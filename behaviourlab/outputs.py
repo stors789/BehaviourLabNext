@@ -109,8 +109,8 @@ def _report_markdown(job: Mapping[str, Any], result: Any,
     for unit in manifest.get("units", []):
         info = unit.get("figures") or {}
         label = unit.get("unit_name") or unit.get("unit_id")
-        names = [name for name in (info.get("trajectory"), info.get("heatmap"))
-                 if name]
+        names = [name for name in (info.get("trajectory"), info.get("heatmap"),
+                                   info.get("activity")) if name]
         if names:
             lines.append(f"- {label}：" + "、".join(names))
         else:
@@ -131,41 +131,58 @@ def _fmt(value: Any) -> str:
 def _unit_figures(target: Path, summary: Mapping[str, Any],
                   rows: Sequence[Mapping[str, Any]], stem: str,
                   style: Mapping[str, Any] | None) -> dict:
-    """每动物轨迹与热图；没有事实支撑就省图并说明原因。"""
+    """每动物可用图形：活动曲线不依赖场地宽高，轨迹/热图才需要。"""
 
     figures_info: dict[str, Any] = {"stem": stem, "trajectory": None,
-                                    "heatmap": None}
-    width = summary.get("arena_width_cm")
-    height = summary.get("arena_height_cm")
-    if not isinstance(width, (int, float)) or not isinstance(height, (int, float)) \
-            or width <= 0 or height <= 0:
-        figures_info["note"] = "没有可用的场地尺寸，未生成图形"
-        return figures_info
-    center = figures.center_rect_for(summary)
+                                    "heatmap": None, "activity": None}
     name = str(summary.get("unit_name") or summary.get("unit_id") or "")
     notes: list[str] = []
-    trajectory = f"{stem}_trajectory.png"
-    heatmap = f"{stem}_heatmap.png"
-    try:
-        if figures.trajectory_png(target / trajectory, rows, float(width),
-                                  float(height), center_rect=center,
-                                  title=name, style=style):
-            figures_info["trajectory"] = trajectory
-        else:
-            notes.append("没有完成的连续运动段，未生成轨迹图")
-        if figures.heatmap_png(target / heatmap, rows, float(width),
-                               float(height), center_rect=center, title=name,
-                               style=style):
-            figures_info["heatmap"] = heatmap
-        else:
-            notes.append("没有有效位置，未生成热图")
-    except (OSError, ValueError) as error:
-        # 图形失败要如实登记，不把没有落盘的文件写进清单。
-        notes.append(f"图形生成失败：{error}")
-        for key, filename in (("trajectory", trajectory),
-                              ("heatmap", heatmap)):
-            if not (target / filename).is_file():
-                figures_info[key] = None
+
+    state_based = (any(row.get("state") for row in rows)
+                   or "immobility_time_s" in summary)
+    if state_based:
+        activity = f"{stem}_activity.png"
+        try:
+            if figures.activity_png(target / activity, rows, title=name,
+                                    style=style):
+                figures_info["activity"] = activity
+            else:
+                notes.append("没有有效状态曝光，未生成活动曲线")
+        except (OSError, ValueError) as error:
+            notes.append(f"活动曲线生成失败：{error}")
+
+    width = summary.get("arena_width_cm")
+    height = summary.get("arena_height_cm")
+    has_size = (isinstance(width, (int, float))
+                and isinstance(height, (int, float))
+                and width > 0 and height > 0)
+    if has_size:
+        center = figures.center_rect_for(summary)
+        trajectory = f"{stem}_trajectory.png"
+        heatmap = f"{stem}_heatmap.png"
+        try:
+            if figures.trajectory_png(target / trajectory, rows, float(width),
+                                      float(height), center_rect=center,
+                                      title=name, style=style):
+                figures_info["trajectory"] = trajectory
+            else:
+                notes.append("没有完成的连续运动段，未生成轨迹图")
+            if figures.heatmap_png(target / heatmap, rows, float(width),
+                                   float(height), center_rect=center,
+                                   title=name, style=style):
+                figures_info["heatmap"] = heatmap
+            else:
+                notes.append("没有有效位置，未生成热图")
+        except (OSError, ValueError) as error:
+            # 图形失败要如实登记，不把没有落盘的文件写进清单。
+            notes.append(f"图形生成失败：{error}")
+            for key, filename in (("trajectory", trajectory),
+                                  ("heatmap", heatmap)):
+                if not (target / filename).is_file():
+                    figures_info[key] = None
+    elif figures_info["activity"] is None:
+        notes.append("没有可用的场地尺寸，未生成图形")
+
     if notes:
         figures_info["note"] = "；".join(notes)
     return figures_info
@@ -206,7 +223,7 @@ def export_result(directory: str | Path, job: Mapping[str, Any],
                 if item.get("unit_id") == unit_id]
         stem = figure_stem(row, used)
         info = _unit_figures(target, row, rows, stem, style)
-        for key in ("trajectory", "heatmap"):
+        for key in ("trajectory", "heatmap", "activity"):
             if info.get(key):
                 files.append(info[key])
         units.append({"unit_id": unit_id, "unit_name": row.get("unit_name"),

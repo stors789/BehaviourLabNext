@@ -246,28 +246,37 @@ def test_lis_mode_is_rejected_before_capture():
 
 def test_medium_activity_needs_point_45s_and_exit_needs_point_4s():
     rows = []
-    for index in range(12):
+    for index in range(15):
         row = evidence_row(index, feature=True, swing=False)
         row.update({"decision_flow_p90_mm_s": 0.0, "speed_std_mm_s": 0.0,
                     "flow_ratio": 0.0, "flow_dispersion": 0.05,
                     "swing_autocorrelation": 0.0, "swing_rigid": True,
                     "swing_motion_candidate": False, "swing_candidate": False,
                     "swing_score": 0.0})
-        if 2 <= index <= 6:
-            # 中等活动：F ≥ max(35, .45×50)=35 且 Q ≥ 2.5。
+        if 2 <= index <= 7:
+            # 中等活动从 .2 秒持续：F ≥ max(35, .45×50)=35 且 Q ≥ 2.5。
             row.update({"decision_flow_p90_mm_s": 40.0, "flow_ratio": 3.0})
+        elif index == 8:
+            # 中间值保持原状态，不累计退出时间。
+            row.update({"decision_flow_p90_mm_s": 45.0, "flow_ratio": 1.0})
+        elif index >= 9:
+            row.update({"decision_flow_p90_mm_s": 0.0, "flow_ratio": 0.0})
         rows.append(row)
     tst.classic_states(rows, flow_hi=50.0, flow_lo=35.0,
                        speed_hi=40.0, speed_lo=20.0)
 
-    assert [row["state"] for row in rows[:6]] == ["immobile"] * 6
-    assert rows[6]["state"] == "struggling"  # 第 5 个中等活动行才满 .45 秒
-    assert [row["state"] for row in rows[7:10]] == ["struggling"] * 3
-    assert rows[10]["state"] == "immobile"   # 连续 .4 秒低于低阈值才退出
-    assert rows[11]["state"] == "immobile"
+    # 只累计已经过去的曝光：.2 秒起的中等活动到 .7 秒才满 .45 秒。
+    assert [row["state"] for row in rows[:7]] == ["immobile"] * 7
+    assert rows[7]["state"] == "struggling"
+    assert [row["state"] for row in rows[8:13]] == ["struggling"] * 5
+    # 低活动从 .9 秒开始，连续 .4 秒才退出，落在 1.3 秒。
+    assert rows[13]["state"] == "immobile"
+    assert rows[14]["state"] == "immobile"
 
     events = tst.build_events(rows, UNIT["id"], UNIT["name"])
     assert [event["kind"] for event in events] == [
         "struggling_transition", "immobile_transition"]
-    assert events[0]["time_s"] == pytest.approx(0.6, abs=TOL)
-    assert events[1]["time_s"] == pytest.approx(1.0, abs=TOL)
+    assert events[0]["time_s"] == pytest.approx(0.7, abs=TOL)
+    assert events[0]["confirmed_s"] == pytest.approx(0.7, abs=TOL)
+    assert events[1]["time_s"] == pytest.approx(1.3, abs=TOL)
+    assert events[1]["confirmed_s"] == pytest.approx(1.3, abs=TOL)

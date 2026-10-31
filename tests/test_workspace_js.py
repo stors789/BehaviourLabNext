@@ -79,3 +79,24 @@ def test_save_failures_show_field_reasons():
         encoding="utf-8")
     assert "function issueText(error, fallback)" in core
     assert "    issueText," in core
+
+
+def test_tst_preview_modes_and_output_toggle():
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    # 原始画面 / 检测预览 / 行为预览三个入口可切换。
+    for label in ("原始画面", "检测预览", "行为预览"):
+        assert '"' + label + '"' in source, label
+    assert "state.previewKind" in source
+    assert "appendPreviewModes" in source
+    assert "selectPreviewKind" in source
+    # 输出开关写入既有 output 配置，且不废弃预览。
+    assert "生成标注视频" in source
+    assert "state.draft.output.annotated_video" in source
+    toggle = source.split("function appendAnnotationToggle", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "markDirty()" in toggle
+    assert "invalidatePreview" not in toggle
+    # 图片加载成功后才确认预览。
+    assert "el.preview.onload" in source
+    assert "state.previewAwaiting" in source

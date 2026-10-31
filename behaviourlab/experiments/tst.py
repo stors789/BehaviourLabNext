@@ -348,9 +348,14 @@ def capture(context: Any, units: Sequence[Mapping[str, Any]]):
             prev = entry["prev"]
             body = None
             if candidate is not None:
+                # 面积变化率用前后源时刻差；首帧或前帧无身体时不给值。
+                elapsed = None
+                previous_area = None
+                if prev is not None and prev.get("body") is not None:
+                    elapsed = float(frame.time_s) - float(prev["time_s"])
+                    previous_area = prev.get("area")
                 body = activity.body_features(
-                    candidate, entry["arena"], float(frame.dt_s),
-                    None if prev is None else prev.get("area"))
+                    candidate, entry["arena"], elapsed, previous_area)
             source_start = float(frame.interval_start_s)
             source_end = float(frame.interval_end_s)
             pair = None
@@ -374,6 +379,7 @@ def capture(context: Any, units: Sequence[Mapping[str, Any]]):
                 extra=_extra(body, pair, settings.get("bg_method")))
             if pair is not None:
                 row["pair_from_frame"] = prev["frame"]
+                row["pair_previous_time_s"] = float(prev["time_s"])
             captured[unit_id].append(row)
             entry["prev"] = {
                 "frame": frame.index,
@@ -492,9 +498,7 @@ def _derive_row(row: dict, history: Sequence[Mapping[str, Any]],
 
     speed_recent = [float(item["speed_nominal_mm_s"]) for item in coherence_rows
                     if is_number(item.get("speed_nominal_mm_s"))]
-    accel_values = [abs(b - a) * fps for a, b in zip(speed_recent,
-                                                     speed_recent[1:])]
-    acceleration = float(np.std(accel_values)) if len(accel_values) >= 3 else 0.0
+    acceleration = activity.acceleration_std(speed_recent, fps)
 
     span_rows = activity.recent_rows(body_rows, moment, 2.0, include_left=True)
     xs = [float(item["body_x_px"]) for item in span_rows]
@@ -513,13 +517,14 @@ def _derive_row(row: dict, history: Sequence[Mapping[str, Any]],
     rigid = activity.rigidity(body_rows, moment, fps)
     extended = activity.elongated(aspects, float(row.get("body_aspect") or 0.0),
                                   fps)
-    dispersion = float(row.get("flow_dispersion") or 1.0)
-    motion = (
-        frequency is not None and 0.8 <= frequency <= 3.0
-        and correlation >= 0.45 and horizontal >= 0.012 and vertical <= 0.55
-        and coherence >= 0.88 and dispersion <= 0.30
-        and (nominal < 8.0 or ratio <= 2.2)
-    )
+    # 0 是合法离散度，只有 None/缺失才用缺省 1。
+    dispersion_value = row.get("flow_dispersion")
+    dispersion = (float(dispersion_value) if is_number(dispersion_value)
+                  else 1.0)
+    motion = activity.motion_swing(
+        frequency=frequency, autocorrelation=correlation,
+        horizontal=horizontal, vertical=vertical, coherence=coherence,
+        dispersion=dispersion, nominal=nominal, ratio=ratio)
     score = activity.swing_score(
         autocorrelation_value=correlation, frequency=frequency,
         coherence=coherence, dispersion=dispersion,
@@ -563,8 +568,9 @@ def _derive_row(row: dict, history: Sequence[Mapping[str, Any]],
 def _estimate(samples: Sequence[Mapping[str, Any]],
               thresholds: Mapping[str, float],
               sensitivity: float) -> dict:
-    flows = [float(row["flow_p90_mm_s"]) for row in samples
-             if is_number(row.get("flow_p90_mm_s"))]
+    # 自动阈值用定义后的决策 F，而不是原始逐帧 P90。
+    flows = [float(row["decision_flow_p90_mm_s"]) for row in samples
+             if is_number(row.get("decision_flow_p90_mm_s"))]
     speeds = [float(row["speed_std_mm_s"]) for row in samples
               if is_number(row.get("speed_std_mm_s"))]
     fps = float(samples[0]["analysis_fps"]) if samples else 10.0
@@ -624,90 +630,126 @@ def classic_states(rows: Sequence[dict], *,
 
 def _run_group(group: list[Mapping[str, Any]],
                thresholds: Mapping[str, float]) -> None:
+    """经典状态机：只累计已经过去的曝光，摆动按曝光秒数取比例。"""
+
     state = "immobile"
-    hold_until = float(group[0]["time_s"]) + 0.2
+    first = group[0]
+    anchor = first.get("pair_previous_time_s")
+    anchor_time = float(anchor) if is_number(anchor) else float(first["time_s"])
+    hold_until = anchor_time + 0.2
     swing = False
+    confirmed_at = None
     swing_accum = 0.0
     enter_accum = 0.0
     exit_accum = 0.0
+    previous: Mapping[str, Any] | None = None
+    previous_medium = False
+    previous_low = False
+    window_start = 0
 
     for index, row in enumerate(group):
         moment = float(row["time_s"])
-        span = max(0.0, float(row.get("dt_s") or 0.0))
-        lookback = [item for item in group[:index + 1]
-                    if float(item["interval_end_s"]) <= moment + 1e-9
-                    and float(item["interval_end_s"]) > moment - 1.5 - 1e-9]
-        coverage = sum(float(item.get("dt_s") or 0.0) for item in lookback)
-        fraction = (sum(1 for item in lookback if item.get("swing_candidate"))
-                    / len(lookback)) if lookback else 0.0
+        continuous = (previous is not None
+                      and abs(float(previous["interval_end_s"])
+                              - float(row["interval_start_s"])) < 1e-7)
+        # 当前行代表 [t, t+dt)，它的曝光尚未过去，不能提前计入计时器。
+        if continuous:
+            elapsed = max(0.0, float(previous.get("dt_s") or 0.0))
+            if (swing and confirmed_at is not None
+                    and float(previous["time_s"]) >= confirmed_at - 1e-9):
+                swing_accum += elapsed
+            if previous_medium and state == "immobile":
+                enter_accum += elapsed
+            if previous_low and state == "struggling":
+                exit_accum += elapsed
+
+        low_edge = moment - 1.5
+        while (window_start < index
+               and float(group[window_start]["interval_end_s"]) <= low_edge):
+            window_start += 1
+        coverage = 0.0
+        candidate_seconds = 0.0
+        for other in group[window_start:index + 1]:
+            start = max(float(other["interval_start_s"]), low_edge)
+            end = min(float(other["interval_end_s"]), moment)
+            if end > start:
+                coverage += end - start
+                if other.get("swing_candidate"):
+                    candidate_seconds += end - start
+        fraction = candidate_seconds / coverage if coverage > 0 else 0.0
 
         if swing:
-            swing_accum += span
             if (coverage >= 1.5 - 1e-9 and fraction <= 0.35
                     and swing_accum >= 1.5 - 1e-9):
                 swing = False
+                confirmed_at = None
                 hold_until = moment + 0.2
                 swing_accum = 0.0
 
         if (not swing and coverage >= 1.5 - 1e-9 and fraction >= 0.65
                 and row.get("swing_rigid")):
             swing = True
+            confirmed_at = moment
             # 摆动结束后回到 immobile，而不是恢复进入摆动前的状态。
             state = "immobile"
             enter_accum = 0.0
             exit_accum = 0.0
+            swing_accum = 0.0
             for other in group[:index + 1]:
-                start = float(other["interval_start_s"])
-                end = float(other["interval_end_s"])
-                if end > moment - 2.5 - 1e-9 and start < moment + 1e-9:
+                # 只回写与过去 2.5 秒有真实交集的曝光，边界零长度不算。
+                start = max(float(other["interval_start_s"]), moment - 2.5)
+                end = min(float(other["interval_end_s"]), moment)
+                if end - start > 1e-9:
                     other["state"] = "swing"
                     other["swing_confirmed_at"] = moment
 
-        if swing:
-            row["state"] = "swing"
-            continue
-        if moment + 1e-9 < hold_until:
-            row["state"] = "immobile"
-            continue
-
-        decision = float(row.get("decision_flow_p90_mm_s") or 0.0)
-        speed_std = float(row.get("speed_std_mm_s") or 0.0)
-        ratio = float(row.get("flow_ratio") or 0.0)
-        if state == "immobile":
-            strong = (speed_std > thresholds["speed_hi"]
-                      or (decision > thresholds["flow_hi"] and ratio >= 2.5))
-            medium = (decision >= max(thresholds["flow_lo"],
-                                      0.45 * thresholds["flow_hi"])
-                      and ratio >= 2.5)
-            suppressed = bool(row.get("swing_motion_candidate")) or (
-                float(row.get("swing_score") or 0.0) >= 4.0
-                and float(row.get("flow_dispersion") or 1.0) <= 0.08
-                and float(row.get("swing_autocorrelation") or 0.0) >= 0.55
-                and bool(row.get("swing_rigid")))
-            if strong:
-                state = "struggling"
-                enter_accum = 0.0
-                exit_accum = 0.0
-            elif medium and not suppressed:
-                enter_accum += span
-                if enter_accum >= 0.45 - 1e-9:
+        previous_medium = False
+        previous_low = False
+        if not swing and moment + 1e-9 >= hold_until:
+            decision = float(row.get("decision_flow_p90_mm_s") or 0.0)
+            speed_std = float(row.get("speed_std_mm_s") or 0.0)
+            ratio = float(row.get("flow_ratio") or 0.0)
+            if state == "immobile":
+                strong = (speed_std > thresholds["speed_hi"]
+                          or (decision > thresholds["flow_hi"] and ratio >= 2.5))
+                medium = (decision >= max(thresholds["flow_lo"],
+                                          0.45 * thresholds["flow_hi"])
+                          and ratio >= 2.5)
+                dispersion_value = row.get("flow_dispersion")
+                dispersion = (float(dispersion_value)
+                              if is_number(dispersion_value) else 1.0)
+                suppressed = bool(row.get("swing_motion_candidate")) or (
+                    float(row.get("swing_score") or 0.0) >= 4.0
+                    and dispersion <= 0.08
+                    and float(row.get("swing_autocorrelation") or 0.0) >= 0.55
+                    and bool(row.get("swing_rigid")))
+                if strong:
                     state = "struggling"
                     enter_accum = 0.0
                     exit_accum = 0.0
-            else:
-                enter_accum = 0.0
-        elif state == "struggling":
-            low = (decision < thresholds["flow_lo"]
-                   and speed_std < thresholds["speed_lo"])
-            if low:
-                exit_accum += span
-                if exit_accum >= 0.4 - 1e-9:
-                    state = "immobile"
-                    exit_accum = 0.0
+                elif medium and not suppressed:
+                    if enter_accum >= 0.45 - 1e-9:
+                        state = "struggling"
+                        enter_accum = 0.0
+                        exit_accum = 0.0
+                    else:
+                        previous_medium = True
+                else:
                     enter_accum = 0.0
-            else:
-                exit_accum = 0.0
-        row["state"] = state
+            elif state == "struggling":
+                low = (decision < thresholds["flow_lo"]
+                       and speed_std < thresholds["speed_lo"])
+                if low:
+                    if exit_accum >= 0.4 - 1e-9:
+                        state = "immobile"
+                        exit_accum = 0.0
+                        enter_accum = 0.0
+                    else:
+                        previous_low = True
+                else:
+                    exit_accum = 0.0
+        row["state"] = "swing" if swing else state
+        previous = row
 
 
 # -- 事件与汇总 ----------------------------------------------------------
@@ -828,16 +870,20 @@ def summarize(rows: Sequence[Mapping[str, Any]], unit: Mapping[str, Any],
 
 
 def _bouts(rows: Sequence[Mapping[str, Any]], group: str) -> int:
+    """最终连续曝光段数：标签相同但曝光断开也要算新的一段。"""
+
     count = 0
-    previous = None
+    previous: Mapping[str, Any] | None = None
     for row in rows:
-        state = row.get("state_group")
-        if state is None:
+        if row.get("state_group") != group:
             previous = None
             continue
-        if state != previous and state == group:
+        gap = (previous is None
+               or abs(float(previous["interval_end_s"])
+                      - float(row["interval_start_s"])) >= 1e-7)
+        if gap:
             count += 1
-        previous = state
+        previous = row
     return count
 
 
@@ -964,3 +1010,95 @@ def analyze(context: Any) -> AnalysisResult:
             "warnings": warnings,
         },
     )
+
+
+def preview_analysis(*, asset: Mapping[str, Any], video: Mapping[str, Any],
+                     unit: Mapping[str, Any], start_s: float,
+                     end_s: float, time_s: float | None = None) -> dict:
+    """行为预览共用同一捕获→特征→实际阈值→最终状态核心。"""
+
+    from ..schema import AnalysisContext, new_id
+
+    metadata = asset.get("metadata") or {}
+    window = {"start_s": float(start_s), "end_s": float(end_s)}
+    source = media.VideoSource(
+        asset.get("path"),
+        start_s=float(start_s),
+        end_s=float(end_s),
+        orientation=int(video.get("orientation", 0) or 0),
+        fps_override=video.get("fps_override"),
+        sample_fps=video.get("sample_fps"),
+        source_fps=metadata.get("fps"),
+        decode_images=True,
+    )
+    job = {
+        "assay": KEY,
+        "run_id": new_id(),
+        "job_id": "preview",
+        "project_id": None,
+        "window": window,
+        "orientation": int(video.get("orientation", 0) or 0),
+        "fps_override": video.get("fps_override"),
+        "sample_fps": video.get("sample_fps"),
+        "asset": dict(asset),
+        "units": [dict(unit)],
+        "style": {},
+    }
+    captured = capture(AnalysisContext(job=job, source=source), [unit])
+    rows_all = captured[unit["id"]]
+    video_window = timeline.resolve_video_window(
+        window, rows_all, metadata.get("duration_s"))
+    geometry = unit.get("geometry") or {}
+    first_seen = timeline.first_seen_in_window(
+        KEY, rows_all, video_window, geometry)
+    unit_window = timeline.resolve_unit_window(
+        unit.get("window"), video_window, first_seen)
+    rows = timeline.clip_rows(rows_all, unit_window)
+    _filter_pairs(rows, unit_window)
+
+    options = unit.get("options") or {}
+    scale, _ = activity.line_scale(geometry.get("body_line"))
+    arena_points = activity.shape_points(geometry.get("arena"))
+    arena_height = max(1.0, max(point[1] for point in arena_points)
+                       - min(point[1] for point in arena_points))
+    thresholds = {
+        "flow_hi": float(options["flow_thr_hi"]),
+        "flow_lo": float(options["flow_thr_lo"]),
+        "speed_hi": float(options["speed_std_thr_hi"]),
+        "speed_lo": float(options["speed_std_thr_lo"]),
+    }
+    info = derive_features(
+        rows, arena_height, thresholds,
+        estimate=bool(options.get("auto_behavior_threshold")),
+        sensitivity=float(options.get("behavior_threshold_sensitivity") or 0.0))
+    classic_states(rows, flow_hi=info["flow_thr_hi"],
+                   flow_lo=info["flow_thr_lo"],
+                   speed_hi=info["speed_thr_hi"],
+                   speed_lo=info["speed_thr_lo"])
+    events = build_events(rows, unit["id"], unit.get("name") or "")
+    summary = summarize(rows, unit, unit_window, info, events)
+    state_at_time = None
+    if time_s is not None:
+        for row in rows:
+            if (float(row["interval_start_s"]) - 1e-9 <= float(time_s)
+                    < float(row["interval_end_s"]) - 1e-9):
+                state_at_time = row.get("state")
+                break
+    return {
+        "start_s": float(start_s),
+        "end_s": float(end_s),
+        "window_start_s": (unit_window.start_s if unit_window.known else None),
+        "window_end_s": (unit_window.end_s if unit_window.known else None),
+        "total_time_s": summary["total_time_s"],
+        "immobility_time_s": summary["immobility_time_s"],
+        "struggling_time_s": summary["struggling_time_s"],
+        "uncertain_time_s": summary["uncertain_time_s"],
+        "swing_time_s": summary["swing_time_s"],
+        "rows": len(rows),
+        "events": len(events),
+        "mm_per_px": scale,
+        "thresholds": summary["thresholds"],
+        "threshold_estimated": bool(info["estimated"]),
+        "threshold_samples": int(info["samples"]),
+        "state_at_time": state_at_time,
+    }

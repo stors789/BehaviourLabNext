@@ -11,7 +11,7 @@ from typing import Any, Mapping
 
 from . import detection, experiments, geometry as geo, media, observation
 from .config import DataPaths
-from .engine import is_manual_path, resolve_detection
+from .engine import is_manual_path, resolve_detection, resolve_options
 from .schema import ValidationError, is_number, new_id
 from .store import Store
 
@@ -300,6 +300,11 @@ def create_preview(
         if isinstance(layer, Mapping):
             options.update(layer)
     settings = resolve_detection(draft["assay"], draft=draft, video=video, unit=unit)
+    metadata = asset.get("metadata") or {}
+    duration_s = metadata.get("duration_s")
+    scope = _scope(draft.get("assay", ""), video, unit, options,
+                   float(info.time_s), kind,
+                   float(duration_s) if is_number(duration_s) else None)
 
     height, width = info.image.shape[:2]
     orientation = int(video.get("orientation", 0) or 0)
@@ -345,6 +350,29 @@ def create_preview(
         except detection.DetectionError as error:
             raise ValidationError(str(error), "detection") from error
 
+    behavior = None
+    module = experiments.get(draft["assay"])
+    if (kind == "behavior" and draft["assay"] == "tst" and not manual_scope
+            and hasattr(module, "preview_analysis")):
+        core_unit = {
+            "id": unit.get("id"),
+            "name": unit.get("name"),
+            "animal_id": unit.get("animal_id"),
+            "window": unit.get("window"),
+            "geometry": geometry,
+            "options": resolve_options(draft["assay"], draft=draft,
+                                       video=video, unit=unit),
+            "detection": settings,
+        }
+        try:
+            behavior = module.preview_analysis(
+                asset=asset, video=video, unit=core_unit,
+                start_s=float(scope["start_s"]),
+                end_s=float(scope["end_s"]),
+                time_s=float(info.time_s),
+            )
+        except ValidationError as error:
+            raise ValidationError(error.message, error.field) from error
     canvas = info.image.copy()
     thickness = _thickness(width, height)
     if result is not None:
@@ -367,17 +395,15 @@ def create_preview(
 
     import cv2
 
+    if behavior and behavior.get("state_at_time"):
+        cv2.putText(canvas, "TST " + str(behavior["state_at_time"]), (12, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (45, 45, 45), 2, cv2.LINE_AA)
+
     filename = f"{new_id()}.png"
     target = Path(paths.previews) / filename
     target.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(target), canvas):
         raise ValidationError("无法保存预览图", "preview")
-
-    metadata = asset.get("metadata") or {}
-    duration_s = metadata.get("duration_s")
-    scope = _scope(draft.get("assay", ""), video, unit, options,
-                   float(info.time_s), kind,
-                   float(duration_s) if is_number(duration_s) else None)
 
     steps = experiments.get(draft["assay"]).SPEC.get("geometry", [])
     missing = [
@@ -402,6 +428,11 @@ def create_preview(
     if missing:
         warnings.append("尚未绘制：" + "、".join(missing))
 
+    if behavior is not None and behavior["rows"] == 0:
+        warnings.append("预览范围内没有可用的行为数据。")
+    elif behavior is not None and behavior["window_start_s"] is None:
+        warnings.append("未检测到动物，无法确定相对时间窗。")
+
     return {
         "image_url": f"/api/previews/{filename}",
         "frame_index": info.index,
@@ -413,6 +444,7 @@ def create_preview(
             "drawn_steps": drawn,
             "missing_steps": missing,
             "detection_available": result is not None,
+            "behavior": behavior,
             "detection": None if result is None else {
                 "candidates": len(result.candidates),
                 "missing_reason": result.missing_reason,

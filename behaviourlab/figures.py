@@ -179,3 +179,62 @@ def center_rect_for(summary: Mapping[str, Any]) -> tuple[float, float, float, fl
         return None
     return (width * (1.0 - rx) / 2.0, height * (1.0 - ry) / 2.0,
             width * (1.0 + rx) / 2.0, height * (1.0 + ry) / 2.0)
+
+
+STATE_COLORS = {
+    "struggling": "#B45F45",
+    "immobile": "#6F8F7C",
+    "swing": "#4E7FA6",
+    "unknown": "#CFC8BE",
+}
+
+
+def activity_png(path: str | Path, rows: Iterable[Mapping[str, Any]], *,
+                 style: Mapping[str, Any] | None = None,
+                 title: str = "") -> bool:
+    """按最终状态画时间线；逐行用真实曝光 [start,end)，缺口留白。"""
+
+    items = []
+    for row in rows:
+        if not row.get("in_window"):
+            continue
+        state = row.get("state")
+        span = _finite(row.get("dt_s"))
+        start = _finite(row.get("interval_start_s"))
+        end = _finite(row.get("interval_end_s"))
+        if state not in STATE_COLORS or span is None or span <= 0 \
+                or start is None or end is None or end <= start:
+            continue
+        items.append((start, end, state))
+    if not items:
+        return False
+
+    _, _, line_width, dpi = _style(style)
+    begin = min(item[0] for item in items)
+    finish = max(item[1] for item in items)
+    figure = Figure(figsize=(6.4, 1.9))
+    FigureCanvasAgg(figure)
+    axes = figure.add_subplot(111)
+    axes.set_xlim(begin, finish)
+    axes.set_ylim(0.0, 1.0)
+    axes.set_yticks([])
+    axes.set_xlabel("time (s)")
+    for start, end, state in items:
+        axes.add_patch(patches.Rectangle(
+            (start, 0.0), end - start, 1.0,
+            facecolor=STATE_COLORS[state], edgecolor="none"))
+    present = []
+    for state in ("struggling", "immobile", "swing", "unknown"):
+        if any(item[2] == state for item in items):
+            present.append(patches.Patch(color=STATE_COLORS[state], label=state))
+    if present:
+        axes.legend(handles=present, loc="upper right", fontsize=7,
+                    frameon=False, ncol=len(present))
+    axes.spines["top"].set_visible(False)
+    axes.spines["right"].set_visible(False)
+    axes.spines["left"].set_linewidth(min(1.0, line_width))
+    if title:
+        axes.set_title(title, fontsize=9, color="#333333")
+    figure.tight_layout()
+    figure.savefig(path, format="png", dpi=dpi)
+    return True

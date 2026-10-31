@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from behaviourlab import worker
 from behaviourlab.experiments import tst
 from behaviourlab.schema import AnalysisResult
@@ -57,9 +59,25 @@ def fake_result() -> AnalysisResult:
         "mode": "classic", "auto_behavior_threshold": False,
         "behavior_threshold_sensitivity": 0.0,
     }
-    return AnalysisResult(observations=[], summary=[summary], events=[], bins=[],
-                          warnings=[], metadata={"assay": "tst",
-                                                 "body_length_mm": 60.0})
+    observations = []
+    for index in range(35):
+        if index < 20:
+            state = "swing"
+        elif index == 20:
+            state = "unknown"
+        else:
+            state = "immobile"
+        start = 0.1 * index
+        observations.append({
+            "unit_id": "e" * 32, "unit_name": "小鼠 1", "frame": index,
+            "time_s": start, "interval_start_s": start,
+            "interval_end_s": start + 0.1, "dt_s": 0.1, "in_window": True,
+            "detected": state != "unknown", "state": state,
+            "state_group": "immobile" if state in ("swing", "immobile") else state,
+        })
+    return AnalysisResult(observations=observations, summary=[summary],
+                          events=[], bins=[], warnings=[],
+                          metadata={"assay": "tst", "body_length_mm": 60.0})
 
 
 def test_tst_result_page_order_and_labels(client, store, tmp_path, monkeypatch):
@@ -83,6 +101,17 @@ def test_tst_result_page_order_and_labels(client, store, tmp_path, monkeypatch):
     assert "检测时间比例" in page
     assert "视觉运动规则使用可调经验阈值" in page
     assert "—" in page  # 潜伏期为空时显示破折号
+
+    manifest = response.get_json()["data"]["jobs"][0]["manifest"]
+    activity = manifest["units"][0]["figures"]["activity"]
+    assert activity and activity.endswith("_activity.png")
+    assert activity in manifest["files"]
+    job_id = response.get_json()["data"]["jobs"][0]["job_id"]
+    assert f'alt="活动曲线"' in page
+    assert "没有可用的场地尺寸" not in page
+    image = client.get(f"/runs/{run_id}/{job_id}/{activity}")
+    assert image.status_code == 200
+    assert image.mimetype == "image/png"
 
 
 def test_tst_analyze_requires_geometry_and_classic_mode(client, store, tmp_path,
@@ -125,3 +154,98 @@ def test_relative_unit_window_previews_configured_range():
     assert scope["start_s"] == 0.0
     assert scope["end_s"] == 10.0
     assert scope["relative"] is True
+
+
+class PreviewSource:
+    """行为预览用的小段解码头：与 VideoSource 相同的 iter_frames 接口。"""
+
+    def __init__(self, path, *, start_s=0.0, end_s=None, **kwargs):
+        import cv2
+        import numpy as np
+        from behaviourlab.schema import Frame
+
+        self._frames = []
+        begin = float(start_s or 0.0)
+        stop = float(end_s if end_s is not None else begin + 1.0)
+        count = max(1, int(round((stop - begin) / 0.1)))
+        for index in range(count):
+            moment = begin + index * 0.1
+            image = np.full((200, 200, 3), 255, dtype=np.uint8)
+            cv2.ellipse(image, (40 + 4 * index, 60), (24, 12), 0, 0, 360,
+                        (0, 0, 0), -1)
+            self._frames.append(Frame(
+                image=image, index=index, time_s=moment, dt_s=0.1,
+                elapsed_s=moment, analysis_fps=10.0,
+                interval_start_s=moment, interval_end_s=moment + 0.1))
+
+    def iter_frames(self):
+        return iter(self._frames)
+
+
+def test_tst_behavior_preview_runs_core(client, store, tmp_path, monkeypatch):
+    from behaviourlab import media, preview
+    from behaviourlab.media import FrameInfo
+
+    asset, draft = seed(store, tmp_path)
+    videos = draft["videos"]
+    videos[0]["window"] = {"start_s": 1.0, "end_s": 4.0}
+    store.update_draft(draft["id"], {"videos": videos})
+    monkeypatch.setattr(media, "VideoSource", PreviewSource)
+    monkeypatch.setattr(
+        preview.media, "read_frame_at_time",
+        lambda *args, **kwargs: FrameInfo(
+            image=__import__("numpy").full((200, 200, 3), 255, dtype="uint8"),
+            index=20, time_s=2.0, pts=None, time_base=None,
+            clock_source="fps_override"))
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "e" * 32,
+              "time_s": 2.0, "kind": "behavior"})
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    assert data["preview_scope"]["start_s"] == 1.0
+    assert data["preview_scope"]["end_s"] == 4.0
+    behavior = data["summary"]["behavior"]
+    assert behavior is not None
+    assert behavior["start_s"] == 1.0
+    assert behavior["end_s"] == 4.0
+    assert behavior["total_time_s"] == pytest.approx(3.0, abs=1e-9)
+    assert behavior["rows"] >= 25
+    assert set(behavior["thresholds"]) == {"flow_thr_hi", "flow_thr_lo",
+                                           "speed_std_thr_hi",
+                                           "speed_std_thr_lo"}
+
+
+def test_tst_relative_behavior_preview_uses_configured_range(
+        client, store, tmp_path, monkeypatch):
+    from behaviourlab import media, preview
+    from behaviourlab.media import FrameInfo
+
+    asset, draft = seed(store, tmp_path)
+    videos = draft["videos"]
+    videos[0]["window"] = {"start_s": 1.0, "end_s": 4.0}
+    videos[0]["units"][0]["window"] = {"mode": "relative", "offset_s": 0.0,
+                                       "duration_s": 2.0}
+    store.update_draft(draft["id"], {"videos": videos})
+    monkeypatch.setattr(media, "VideoSource", PreviewSource)
+    monkeypatch.setattr(
+        preview.media, "read_frame_at_time",
+        lambda *args, **kwargs: FrameInfo(
+            image=__import__("numpy").full((200, 200, 3), 255, dtype="uint8"),
+            index=20, time_s=2.0, pts=None, time_base=None,
+            clock_source="fps_override"))
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "e" * 32,
+              "time_s": 2.0, "kind": "behavior"})
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    assert data["preview_scope"]["mode"] == "configured"
+    assert data["preview_scope"]["start_s"] == 1.0
+    assert data["preview_scope"]["end_s"] == 4.0
+    behavior = data["summary"]["behavior"]
+    assert behavior["window_start_s"] == pytest.approx(1.0, abs=1e-9)
+    assert behavior["window_end_s"] == pytest.approx(3.0, abs=1e-9)
+    assert behavior["total_time_s"] == pytest.approx(2.0, abs=1e-9)

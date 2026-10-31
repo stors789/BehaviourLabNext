@@ -490,6 +490,15 @@
     } else {
       lines.push("检测：候选 " + detection.candidates + " 个");
     }
+    const behavior = summary.behavior;
+    if (behavior && typeof behavior === "object") {
+      const value = (number) => (typeof number === "number" && isFinite(number)
+        ? number.toFixed(2) : "—");
+      lines.push("行为 " + value(behavior.total_time_s) + " s：非挣扎 "
+        + value(behavior.immobility_time_s) + " / 挣扎 "
+        + value(behavior.struggling_time_s) + " / 不确定 "
+        + value(behavior.uncertain_time_s) + " s");
+    }
     warnings.forEach((text) => lines.push(text));
     return { tone, text: lines.join("\n") };
   }

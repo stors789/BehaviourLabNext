@@ -34,6 +34,8 @@
     saveTimer: null,
     savedSnapshot: null,
     previewGate: new PreviewGate(),
+    previewKind: "detection",
+    previewAwaiting: false,
     loading: false,
     recordMode: false,
     canvasMessage: "正在读取源帧…",
@@ -172,6 +174,7 @@
 
   function invalidatePreview() {
     state.previewGate.invalidate();
+    state.previewAwaiting = false;
     if (el.preview) {
       el.preview.hidden = true;
       el.preview.removeAttribute("src");
@@ -1176,13 +1179,65 @@
     const title = document.createElement("h3");
     title.textContent = "检测";
     body.append(title, detectionFields(unit));
+    appendPreviewModes(body);
     appendExperimentSettings(body, unit);
+    appendAnnotationToggle(body);
 
-    const confirmed = state.previewGate.confirmed(previewConfig("detection"));
-    el.primary.textContent = confirmed ? "检查并开始分析" : "检测预览";
-    el.secondary.textContent = "更新检测预览";
+    const kind = state.previewKind === "behavior" ? "behavior" : "detection";
+    const confirmed = state.previewGate.confirmed(previewConfig(kind));
+    el.primary.textContent = confirmed
+      ? "检查并开始分析" : (kind === "behavior" ? "行为预览" : "检测预览");
+    el.secondary.textContent = kind === "behavior" ? "更新行为预览" : "更新检测预览";
     el.secondary.hidden = !confirmed;
-    el.preview.hidden = !confirmed;
+    el.preview.hidden = !confirmed && !state.previewAwaiting;
+  }
+
+  // 原始画面 / 检测预览 / 行为预览：三者切换同一画布上的叠画。
+  function appendPreviewModes(body) {
+    const wrap = document.createElement("div");
+    wrap.className = "mode-row";
+    [["raw", "原始画面"], ["detection", "检测预览"],
+     ["behavior", "行为预览"]].forEach(([value, label]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "mode-button" +
+        (state.previewKind === value ? " is-current" : "");
+      button.textContent = label;
+      button.addEventListener("click", () => { selectPreviewKind(value); });
+      wrap.append(button);
+    });
+    body.append(wrap);
+  }
+
+  async function selectPreviewKind(kind) {
+    state.previewKind = kind;
+    if (kind === "raw") {
+      el.preview.hidden = true;
+      el.preview.removeAttribute("src");
+      status("原始画面", "ok");
+      renderInspector();
+      return;
+    }
+    await runPreview(kind);
+  }
+
+  // 输出开关只影响导出，不进入预览签名，切换时不强制重算。
+  function appendAnnotationToggle(body) {
+    const label = document.createElement("label");
+    label.className = "field";
+    const caption = document.createElement("span");
+    caption.textContent = "生成标注视频";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = Boolean((state.draft.output || {}).annotated_video);
+    input.addEventListener("change", () => {
+      if (!state.draft.output) state.draft.output = {};
+      state.draft.output.annotated_video = input.checked;
+      markDirty();
+      status(input.checked ? "已开启标注视频" : "已关闭标注视频", "ok");
+    });
+    label.append(caption, input);
+    body.append(label);
   }
 
   const BG_METHOD_LABELS = [
@@ -1381,7 +1436,7 @@
     el.primary.textContent = confirmed ? "检查并开始分析" : "行为预览";
     el.secondary.textContent = "更新行为预览";
     el.secondary.hidden = !confirmed;
-    el.preview.hidden = !confirmed;
+    el.preview.hidden = !confirmed && !state.previewAwaiting;
   }
 
   function appendExperimentSettings(body, unit) {
@@ -1674,6 +1729,7 @@
     // 只接受显式的阶段名；事件对象等非字符串一律按当前阶段处理。
     const type = typeof kind === "string"
       ? kind : (state.step === "review" ? "behavior" : "detection");
+    state.previewKind = type;
     const video = currentVideo();
     const unit = currentUnit();
     if (!video || !unit) return;
@@ -1717,12 +1773,29 @@
         return;
       }
       const data = result.data;
-      if (!state.previewGate.accept(request, data)) return;
+      // 图片真正加载成功后才确认，加载失败不留下已确认状态。
+      state.previewAwaiting = true;
+      el.preview.onload = () => {
+        state.previewAwaiting = false;
+        if (!state.previewGate.accept(request, data)) {
+          el.preview.hidden = true;
+          return;
+        }
+        setPreviewNote(window.BLCore.previewNoteFor(data));
+        status((data.preview_scope && data.preview_scope.mode === "frame"
+          ? "本帧预览" : "片段预览") + " · 帧 " + data.frame_index, "ok");
+        renderInspector();
+      };
+      el.preview.onerror = () => {
+        state.previewAwaiting = false;
+        state.previewGate.fail(request);
+        el.preview.hidden = true;
+        setPreviewNote({ tone: "error", text: "预览图加载失败。" });
+        status("预览图加载失败", "error");
+        renderInspector();
+      };
       el.preview.src = data.image_url;
       el.preview.hidden = false;
-      setPreviewNote(window.BLCore.previewNoteFor(data));
-      status((data.preview_scope && data.preview_scope.mode === "frame"
-        ? "本帧预览" : "片段预览") + " · 帧 " + data.frame_index, "ok");
     } catch (error) {
       if (request) state.previewGate.fail(request);
       const reason = issueText(error, "预览失败");
@@ -1758,6 +1831,14 @@
       await goStep("arena", { view: "detection" });
       return;
     }
+    if (state.previewKind === "behavior") {
+      if (state.previewGate.confirmed(previewConfig("behavior"))) {
+        await startAnalysis();
+      } else {
+        await runPreview("behavior");
+      }
+      return;
+    }
     if (state.previewGate.confirmed(previewConfig("detection"))) {
       await startAnalysis();
       return;
@@ -1767,7 +1848,8 @@
 
   async function startAnalysis() {
     if (!state.draftId) return;
-    const kind = state.step === "review" ? "behavior" : "detection";
+    const kind = state.step === "review" ? "behavior"
+      : (state.previewKind === "behavior" ? "behavior" : "detection");
     if (!state.previewGate.confirmed(previewConfig(kind))) {
       status("配置已改变，请重新预览", "warn");
       renderInspector();

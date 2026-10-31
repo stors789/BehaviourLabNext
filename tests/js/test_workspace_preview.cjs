@@ -173,6 +173,23 @@ function fieldReasonsWin() {
   assert.strictEqual(fallback, "保存失败，未生成预览");
 }
 
+function behaviorNote() {
+  const found = previewNoteFor({
+    summary: {
+      detection_available: true,
+      detection: { candidates: 1, missing_reason: null },
+      behavior: {
+        total_time_s: 3.5, immobility_time_s: 3.4,
+        struggling_time_s: 0.0, uncertain_time_s: 0.1,
+      },
+    },
+    warnings: [],
+  });
+  assert.ok(found.text.includes("行为 3.50 s"), found.text);
+  assert.ok(found.text.includes("非挣扎 3.40"), found.text);
+  assert.ok(found.text.includes("不确定 0.10"), found.text);
+}
+
 async function saveFailureCarriesFieldReason() {
   const widthError = new Error("草稿未通过校验");
   widthError.fields = [{
@@ -203,6 +220,7 @@ async function saveFailureCarriesFieldReason() {
   await cleanStateSkipsSave();
   notes();
   fieldReasonsWin();
+  behaviorNote();
   await saveFailureCarriesFieldReason();
   console.log("workspace-preview OK");
 })().catch((error) => {

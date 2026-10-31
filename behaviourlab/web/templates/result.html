@@ -99,7 +99,16 @@
       </div>
     </details>
     <p class="muted">视觉运动规则使用可调经验阈值，请结合视频与人工复核。</p>
-    {% if unit.figures.note %}<p class="muted">{{ unit.figures.note }}</p>{% endif %}
+    {% if unit.figures.activity %}
+    <div class="figure-row">
+      <figure>
+        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.activity }}" alt="活动曲线">
+        <figcaption>活动曲线（最终时间线，秒）</figcaption>
+      </figure>
+    </div>
+    {% elif unit.figures.note %}
+    <p class="muted">{{ unit.figures.note }}</p>
+    {% endif %}
     {% if unit.figures.note %}<p class="muted">{{ unit.figures.note }}</p>{% endif %}
 
     {% elif assay == "oft" %}

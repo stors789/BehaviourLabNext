@@ -65,7 +65,8 @@ def speeds(distance_px: float, mm_per_px: float, fps: float,
 
 def body_features(candidate: Mapping[str, Any],
                   arena_points: Sequence[Sequence[float]],
-                  dt_s: float, prev_area: float | None) -> dict | None:
+                  elapsed_s: float | None,
+                  prev_area: float | None) -> dict | None:
     """最大外轮廓的形态特征；质心不在场地内就不形成身体形态。"""
 
     contour = np.asarray(candidate.get("contour"), dtype=np.float32)
@@ -84,8 +85,10 @@ def body_features(candidate: Mapping[str, Any],
     fill = area / (float(width) * float(height)) if width > 0 and height > 0 else 0.0
     major = float(max(cv2.minAreaRect(contour)[1]))
     rate = None
-    if prev_area is not None and prev_area > 0 and dt_s > 0:
-        rate = abs(area - float(prev_area)) / max(float(prev_area), 1e-6) / dt_s
+    if (prev_area is not None and prev_area > 0
+            and elapsed_s is not None and elapsed_s > 0):
+        rate = (abs(area - float(prev_area)) / max(float(prev_area), 1e-6)
+                / float(elapsed_s))
     return {
         "body_area_px": area,
         "body_perimeter_px": perimeter,
@@ -122,6 +125,38 @@ def _flow_crop(gray: np.ndarray, mask: np.ndarray, bbox: Sequence[float]):
     return crop, body, scale
 
 
+def direction_stats(vectors: np.ndarray) -> tuple[float, float]:
+    """(C, E)：C=平均向量模长/平均模长；E=1−||mean(单位方向向量)||。"""
+
+    magnitudes = np.linalg.norm(vectors, axis=1)
+    directional = magnitudes > 1e-6
+    selected = vectors[directional]
+    sizes = magnitudes[directional]
+    if sizes.size >= 50:
+        p60 = float(np.percentile(sizes, 60))
+        strong = sizes >= p60
+        if int(strong.sum()) >= 20:
+            selected = selected[strong]
+            sizes = sizes[strong]
+    if not sizes.size:
+        return 0.0, 1.0
+    mean_vector = selected.mean(axis=0)
+    coherence = float(np.linalg.norm(mean_vector)
+                      / max(float(sizes.mean()), 1e-9))
+    unit = selected / sizes[:, None]
+    dispersion = float(1.0 - np.linalg.norm(unit.mean(axis=0)))
+    return (max(0.0, min(1.0, coherence)),
+            max(0.0, min(1.0, dispersion)))
+
+
+def acceleration_std(speeds: Sequence[float], fps: float) -> float:
+    """最近窗口的有符号相邻名义速度差 × 分析 Hz 的总体标准差。"""
+
+    diffs = [(float(b) - float(a)) * float(fps)
+             for a, b in zip(speeds, speeds[1:])]
+    return float(np.std(diffs)) if len(diffs) >= 3 else 0.0
+
+
 def flow_features(prev_gray: np.ndarray, cur_gray: np.ndarray,
                   cur_mask: np.ndarray, bbox: Sequence[float],
                   prev_center: Sequence[float], cur_center: Sequence[float],
@@ -155,24 +190,7 @@ def flow_features(prev_gray: np.ndarray, cur_gray: np.ndarray,
     if magnitudes.size == 0:
         return None
 
-    directional = magnitudes > 1e-6
-    direction_vectors = vectors[directional]
-    direction_magnitudes = magnitudes[directional]
-    if direction_magnitudes.size >= 50:
-        p60 = float(np.percentile(direction_magnitudes, 60))
-        strong = direction_magnitudes >= p60
-        if int(strong.sum()) >= 20:
-            direction_vectors = direction_vectors[strong]
-            direction_magnitudes = direction_magnitudes[strong]
-    if direction_magnitudes.size:
-        mean_vector = direction_vectors.mean(axis=0)
-        coherence = float(np.linalg.norm(mean_vector)
-                          / max(float(direction_magnitudes.mean()), 1e-9))
-        unit = direction_vectors / direction_magnitudes[:, None]
-        dispersion = float(1.0 - np.linalg.norm(unit, axis=1).mean())
-    else:
-        coherence = 0.0
-        dispersion = 1.0
+    coherence, dispersion = direction_stats(vectors)
 
     distance = math.hypot(float(cur_center[0]) - float(prev_center[0]),
                           float(cur_center[1]) - float(prev_center[1]))
@@ -320,6 +338,22 @@ def elongated(aspects: Sequence[float], current: float, fps: float) -> bool:
     if len(aspects) < max(1, int(math.ceil(fps))):
         return float(current) > 1.8
     return float(current) > max(1.2, 0.75 * float(np.median(aspects)))
+
+
+def motion_swing(*, frequency: float | None, autocorrelation: float,
+                horizontal: float, vertical: float, coherence: float,
+                dispersion: float, nominal: float, ratio: float) -> bool:
+    """运动摆动候选：频率/自相关/位移比/一致性/离散度与速度门。"""
+
+    return bool(
+        frequency is not None and 0.8 <= float(frequency) <= 3.0
+        and float(autocorrelation) >= 0.45
+        and float(horizontal) >= 0.012
+        and float(vertical) <= 0.55
+        and float(coherence) >= 0.88
+        and float(dispersion) <= 0.30
+        and (float(nominal) < 8.0 or float(ratio) <= 2.2)
+    )
 
 
 def swing_score(*, autocorrelation_value: float | None,
