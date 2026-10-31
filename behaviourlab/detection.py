@@ -18,7 +18,9 @@ import numpy as np
 
 from .schema import Detection, is_number
 
-BG_METHODS = ("threshold", "temporal", "static", "mog2", "knn")
+BG_METHODS = ("threshold", "temporal", "static", "mog2", "knn", "local_otsu")
+FOREGROUND_KEYS = ("bg_method", "bg_type", "gray_threshold", "temporal_bg_samples",
+                   "temporal_diff_threshold", "static_background")
 BG_TYPES = ("light", "dark")
 
 DETECTION_DEFAULTS: dict = {
@@ -324,6 +326,8 @@ def geometry_region(geometry: Mapping[str, Any] | None, assay: str,
         union = _polygon_union(geometry, keys, width, height)
         if union is not None:
             return union, "zones"
+        # 场地范围不足以代表 EPM/Y 的分区；不退回 arena，也不退回全图。
+        raise DetectionError("缺少检测区域")
 
     for key in ("arena", "outer"):
         shape = geometry.get(key)
@@ -342,7 +346,22 @@ def _saturated(raw: np.ndarray, region: np.ndarray) -> bool:
     return cv2.countNonZero(raw) >= SATURATION_RATIO * region_count
 
 
+def _component_label(outer: np.ndarray, labels: np.ndarray | None) -> int:
+    """轮廓点落在连通体边界上；取出现最多的非零标签作为该候选的实体。"""
+
+    if labels is None:
+        return 0
+    points = outer.reshape(-1, 2)
+    values = labels[points[:, 1], points[:, 0]]
+    values = values[values > 0]
+    if values.size == 0:
+        return 0
+    counts = np.bincount(values.astype(np.int64))
+    return int(np.argmax(counts))
+
+
 def _candidate(outer: np.ndarray, holes: list[np.ndarray],
+               labels: np.ndarray | None,
                width: int, height: int) -> dict | None:
     area = float(cv2.contourArea(outer)) - sum(
         float(cv2.contourArea(hole)) for hole in holes
@@ -374,11 +393,18 @@ def _candidate(outer: np.ndarray, holes: list[np.ndarray],
                    * min(1.0, 4.0 / aspect))
 
     mask = np.zeros((height, width), dtype=np.uint8)
-    cv2.drawContours(mask, [outer], -1, 255, -1)
-    for hole in holes:
-        cv2.drawContours(mask, [hole], -1, 0, -1)
-
+    label = _component_label(outer, labels)
     x, y, bw, bh = cv2.boundingRect(outer)
+    if label:
+        # 直接取真实连通体像素：洞内背景与内部独立候选都不属于该实体，
+        # 也不会像重绘孔洞轮廓那样削掉内边缘的一圈墙。
+        window = mask[y:y + bh, x:x + bw]
+        window[labels[y:y + bh, x:x + bw] == label] = 255
+    else:
+        cv2.drawContours(mask, [outer], -1, 255, -1)
+        for hole in holes:
+            cv2.drawContours(mask, [hole], -1, 0, -1)
+
     contour = [[float(point[0][0]), float(point[0][1])] for point in outer]
     return {
         "center": (m10 / m00, m01 / m00),
@@ -408,6 +434,7 @@ def find_candidates(foreground: np.ndarray, region: np.ndarray,
         return [], "no_candidate"
 
     height, width = processed.shape[:2]
+    labels = cv2.connectedComponents(processed, connectivity=8)[1]
     min_area = float(settings.get("min_area", 0.0))
     max_area = float(settings.get("max_area", 1e9))
     quality_threshold = float(settings.get("quality_threshold", 0.0))
@@ -418,7 +445,7 @@ def find_candidates(foreground: np.ndarray, region: np.ndarray,
             continue
         holes = [contours[child] for child in range(len(contours))
                  if hierarchy[0][child][3] == index]
-        item = _candidate(contour, holes, width, height)
+        item = _candidate(contour, holes, labels, width, height)
         if item is None:
             continue
         if item["area"] < min_area or item["area"] > max_area:
@@ -507,20 +534,35 @@ def load_static_background(path: str | Path, orientation: int,
     return to_gray(image)
 
 
-def _median_strips(stack: np.ndarray) -> np.ndarray:
+def _median_strips(stack: np.ndarray, cancel=None) -> np.ndarray | None:
+    """逐条带求中位数；取消时返回 None，让调用者先释放映射再报错。"""
+
     height, width = stack.shape[1:]
     result = np.empty((height, width), dtype=np.uint8)
     for top in range(0, height, STRIP_ROWS):
+        if cancel is not None and cancel():
+            return None
         bottom = min(height, top + STRIP_ROWS)
         block = np.median(stack[:, top:bottom, :], axis=0)
         result[top:bottom, :] = np.clip(block, 0, 255).astype(np.uint8)
     return result
 
 
+def _sample_parts(item: Any) -> tuple[float, Any, float]:
+    """样本项：(time_s, image) 或 (time_s, image, 有效曝光秒数)。"""
+
+    if len(item) >= 3:
+        return float(item[0]), item[1], float(item[2])
+    return float(item[0]), item[1], 1.0
+
+
 def temporal_background(frames: Iterable[tuple[float, Any]],
                         samples: int, start: float, end: float | None,
                         *, cancel=None) -> np.ndarray:
-    """均匀目标时间采集真实帧；临时磁盘映射按条带求中位数。"""
+    """按同一源时钟的已知有效终点均匀取真实帧；未知终点才取前 N 帧。
+
+    零曝光的窗口外上下文帧不参与背景；跨起点但有曝光的帧保留。
+    """
 
     if samples < 1:
         raise DetectionError("背景样本数必须 ≥ 1")
@@ -535,9 +577,12 @@ def temporal_background(frames: Iterable[tuple[float, Any]],
     used = 0
     target_index = 0
     try:
-        for time_s, image in frames:
+        for item in frames:
             if cancel is not None and cancel():
                 raise DetectionError("已取消")
+            time_s, image, exposure = _sample_parts(item)
+            if exposure <= 0:
+                continue
             gray = image if np.asarray(image).ndim == 2 else to_gray(image)
             if stack is None:
                 height, width = gray.shape[:2]
@@ -546,20 +591,24 @@ def temporal_background(frames: Iterable[tuple[float, Any]],
             if targets is None:
                 stack[used] = gray
                 used += 1
-            else:
-                sample_time = max(float(time_s), float(start))
-                if (target_index < len(targets)
-                        and sample_time + 1e-9 >= targets[target_index]):
-                    stack[used] = gray
-                    used += 1
-                    target_index += 1
-            if targets is None and used >= samples:
-                break
-            if targets is not None and target_index >= len(targets):
+                if used >= samples:
+                    break
+                continue
+            sample_time = max(time_s, float(start))
+            if (target_index < len(targets)
+                    and sample_time + 1e-9 >= targets[target_index]):
+                stack[used] = gray
+                used += 1
+                target_index += 1
+            if target_index >= len(targets):
                 break
         if stack is None or used == 0:
             raise DetectionError("没有可用的背景样本")
-        return _median_strips(np.asarray(stack[:used]))
+        background = _median_strips(np.asarray(stack[:used]), cancel)
+        if background is None:
+            stack = None
+            raise DetectionError("已取消")
+        return background
     finally:
         stack = None
         try:
@@ -568,39 +617,36 @@ def temporal_background(frames: Iterable[tuple[float, Any]],
             pass
 
 
-class ClassicalDetector:
-    """同一配置复用背景模型与原始前景缓存；按帧只缓存原始前景。"""
+class ForegroundModel:
+    """共享的减除器与原始前景缓存；只含背景参数，不含单位过滤参数。
+
+    缓存的前景数组只读，调用者清零会立即报错，而不是污染下一只小鼠。
+    """
 
     def __init__(self, settings: Mapping[str, Any] | None = None, *,
                  background: np.ndarray | None = None) -> None:
         self.settings = normalize_settings(settings)
         self.background = background
+        self.method = self.settings["bg_method"]
         self._subtractor = None
-        self._foreground_cache: dict[tuple, np.ndarray] = {}
-        method = self.settings["bg_method"]
-        if method in ("mog2", "knn"):
-            factory = (cv2.createBackgroundSubtractorMOG2 if method == "mog2"
+        if self.method in ("mog2", "knn"):
+            factory = (cv2.createBackgroundSubtractorMOG2 if self.method == "mog2"
                        else cv2.createBackgroundSubtractorKNN)
             self._subtractor = factory(history=500, detectShadows=False)
-
-    def _signature(self) -> tuple:
-        keys = ("bg_method", "bg_type", "gray_threshold", "temporal_bg_samples",
-                "temporal_diff_threshold", "static_background")
-        return tuple(self.settings[key] for key in keys)
+        self._cache: dict[tuple, np.ndarray] = {}
 
     def foreground(self, image: Any) -> np.ndarray:
         gray = to_gray(image)
-        cache_key = (id(image), self._signature())
-        cached = self._foreground_cache.get(cache_key)
+        cache_key = (id(image), gray.shape[:2])
+        cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
 
-        method = self.settings["bg_method"]
-        if method == "threshold":
+        if self.method == "threshold":
             mask = threshold_foreground(gray, self.settings)
-        elif method == "local_otsu":
+        elif self.method == "local_otsu":
             mask = local_otsu_foreground(gray, self.settings["bg_type"])
-        elif method in ("temporal", "static"):
+        elif self.method in ("temporal", "static"):
             if self.background is None:
                 raise DetectionError("缺少背景模型")
             if self.background.shape[:2] != gray.shape[:2]:
@@ -612,14 +658,30 @@ class ClassicalDetector:
             mask = self._subtractor.apply(gray)
             if cv2.countNonZero(mask) >= SHADOW_FRACTION * mask.size:
                 mask = np.zeros_like(mask)
-        self._foreground_cache[cache_key] = mask
-        if len(self._foreground_cache) > 8:
-            self._foreground_cache.pop(next(iter(self._foreground_cache)))
+        mask.setflags(write=False)
+        self._cache[cache_key] = mask
+        if len(self._cache) > 8:
+            self._cache.pop(next(iter(self._cache)))
         return mask
 
+
+class ClassicalDetector:
+    """单位级管线：区域、形态学与过滤各自独立，只共享原始前景。"""
+
+    def __init__(self, settings: Mapping[str, Any] | None = None, *,
+                 background: np.ndarray | None = None,
+                 model: "ForegroundModel | None" = None) -> None:
+        self.settings = normalize_settings(settings)
+        self.model = model or ForegroundModel(self.settings,
+                                              background=background)
+        self.background = self.model.background
+
+    def foreground(self, image: Any) -> np.ndarray:
+        return self.model.foreground(image)
+
     def detect(self, image: Any, region: np.ndarray) -> Detection:
-        foreground = self.foreground(image)
-        candidates, reason = find_candidates(foreground, region, self.settings)
+        candidates, reason = find_candidates(self.foreground(image), region,
+                                             self.settings)
         return _detection_from(candidates, reason)
 
 
@@ -640,24 +702,22 @@ def select_candidate(candidates: Iterable[Mapping[str, Any]] | None) -> dict | N
     return best
 
 
-_SHARED_DETECTORS: dict[tuple, "ClassicalDetector"] = {}
+_SHARED_MODELS: dict[tuple, ForegroundModel] = {}
 
 
 def shared_detector(key: tuple, settings: Mapping[str, Any],
                     background: np.ndarray | None = None) -> "ClassicalDetector":
-    """MOG2/KNN 同配置复用学习状态；其他方法每次新建，避免背景占内存。"""
+    """MOG2/KNN 同配置复用减除器与原始前景；单位参数各自独立。"""
 
     resolved = normalize_settings(settings)
     if resolved["bg_method"] not in ("mog2", "knn"):
         return ClassicalDetector(resolved, background=background)
-    signature = tuple(resolved[name] for name in (
-        "bg_method", "bg_type", "gray_threshold", "temporal_bg_samples",
-        "temporal_diff_threshold", "static_background"))
+    signature = tuple(resolved[name] for name in FOREGROUND_KEYS)
     cache_key = (key, signature)
-    detector = _SHARED_DETECTORS.get(cache_key)
-    if detector is None:
-        detector = ClassicalDetector(resolved, background=background)
-        _SHARED_DETECTORS[cache_key] = detector
-        if len(_SHARED_DETECTORS) > 4:
-            _SHARED_DETECTORS.pop(next(iter(_SHARED_DETECTORS)))
-    return detector
+    model = _SHARED_MODELS.get(cache_key)
+    if model is None:
+        model = ForegroundModel(resolved, background=background)
+        _SHARED_MODELS[cache_key] = model
+        if len(_SHARED_MODELS) > 4:
+            _SHARED_MODELS.pop(next(iter(_SHARED_MODELS)))
+    return ClassicalDetector(resolved, model=model)

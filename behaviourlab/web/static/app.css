@@ -1705,3 +1705,34 @@ summary:focus-visible {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.preview-note {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.preview-note[data-tone="ok"] {
+  border-left-color: var(--ok);
+}
+
+.preview-note[data-tone="warn"] {
+  border-left-color: var(--warn);
+  color: var(--warn);
+}
+
+.preview-note[data-tone="error"] {
+  border-left-color: var(--bad);
+  color: var(--bad);
+}
+
+.preview-note[data-tone="muted"] {
+  border-left-color: var(--control);
+}

@@ -459,6 +459,55 @@
     return stableStringify(config || {});
   }
 
+  // 预览说明：把真实 missing_reason 与 warnings 显示出来，空图不算无说明成功。
+  const MISSING_LABELS = {
+    foreground_saturated: "前景饱和",
+    no_candidate: "无候选",
+  };
+
+  function previewNoteFor(data) {
+    const summary = (data && data.summary) || {};
+    const detection = summary.detection || null;
+    const warnings = (data && Array.isArray(data.warnings) ? data.warnings : [])
+      .filter((text) => typeof text === "string" && text.trim());
+    const lines = [];
+    let tone = "ok";
+    if (summary.detection_available === false) {
+      lines.push("检测：未运行（人工记录路径）");
+      tone = "muted";
+    } else if (!detection) {
+      lines.push("检测：结果缺失");
+      tone = "error";
+    } else if (detection.missing_reason) {
+      const reason = MISSING_LABELS[detection.missing_reason] || detection.missing_reason;
+      lines.push("检测：" + reason);
+      tone = "warn";
+    } else if (!detection.candidates) {
+      lines.push("检测：无候选");
+      tone = "warn";
+    } else {
+      lines.push("检测：候选 " + detection.candidates + " 个");
+    }
+    warnings.forEach((text) => lines.push(text));
+    return { tone, text: lines.join("\n") };
+  }
+
+  // 预览前先落盘：保存失败不发起请求，页面/配置失效也不发起。
+  // task: { dirty(), save(), alive(), config(), send(config) }
+  async function saveThenPreview(task) {
+    const job = task || {};
+    if (typeof job.dirty === "function" && job.dirty()) {
+      const saved = await job.save();
+      if (!saved) return { status: "save_failed" };
+    }
+    if (typeof job.alive === "function" && !job.alive()) {
+      return { status: "stale" };
+    }
+    const config = job.config();
+    const data = await job.send(config);
+    return { status: "ok", config, data };
+  }
+
   function PreviewGate() {
     this.token = 0;
     this.signature = null;
@@ -510,6 +559,8 @@
     PreviewGate,
     SaveQueue,
     previewSignature,
+    previewNoteFor,
+    saveThenPreview,
     stableStringify,
     resolveStep,
     rotateGeometry,

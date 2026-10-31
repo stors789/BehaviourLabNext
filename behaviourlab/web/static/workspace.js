@@ -86,6 +86,7 @@
     primary: document.querySelector("#primary-action"),
     secondary: document.querySelector("#secondary-action"),
     preview: document.querySelector("#preview-layer"),
+    previewNote: document.querySelector("#preview-note"),
   };
 
   const STATUS = {
@@ -169,6 +170,21 @@
     if (el.secondary) el.secondary.hidden = true;
     if (el.primary && state.view === "detection") el.primary.textContent = "检测预览";
     if (state.step === "review" && el.primary) el.primary.textContent = "行为预览";
+    setPreviewNote(null);
+  }
+
+  // 预览说明：把真实 missing_reason 与 warnings 显示出来，空图不算无说明成功。
+  function setPreviewNote(note) {
+    if (!el.previewNote) return;
+    if (!note) {
+      el.previewNote.hidden = true;
+      el.previewNote.textContent = "";
+      el.previewNote.removeAttribute("data-tone");
+      return;
+    }
+    el.previewNote.hidden = false;
+    el.previewNote.dataset.tone = note.tone || "";
+    el.previewNote.textContent = note.text;
   }
 
   function currentSnapshot() {
@@ -1166,6 +1182,7 @@
     ["static", "静态背景"],
     ["mog2", "MOG2"],
     ["knn", "KNN"],
+    ["local_otsu", "局部 Otsu"],
   ];
   const BG_TYPE_LABELS = [["light", "浅底深鼠"], ["dark", "深底浅鼠"]];
   const INTEGER_DETECTION = new Set(["erosion_kernel", "erosion_iter",
@@ -1614,24 +1631,55 @@
     const type = kind || "detection";
     const video = currentVideo();
     const unit = currentUnit();
-    const request = state.previewGate.begin(previewConfig(type));
+    if (!video || !unit) return;
     el.primary.disabled = true;
     el.secondary.disabled = true;
     status(type === "behavior" ? "正在生成行为预览…" : "正在生成检测预览…");
+    let request = null;
     try {
-      const data = await send("POST", "/api/drafts/" + state.draftId + "/preview", {
-        asset_id: video.asset_id,
-        unit_id: unit.id,
-        frame_index: state.frame,
-        kind: type,
+      // 先落盘，再核对页面仍指向同一个视频/小鼠，最后才请求预览。
+      const result = await window.BLCore.saveThenPreview({
+        dirty: isDirty,
+        save: saveThen,
+        alive: () => {
+          const live = currentVideo();
+          const liveUnit = currentUnit();
+          return Boolean(live && liveUnit && live.asset_id === video.asset_id &&
+            liveUnit.id === unit.id);
+        },
+        config: () => previewConfig(type),
+        send: (config) => {
+          request = state.previewGate.begin(config);
+          return send("POST", "/api/drafts/" + state.draftId + "/preview", {
+            asset_id: config.asset_id,
+            unit_id: config.unit.id,
+            frame_index: config.frame_index,
+            kind: config.kind,
+          });
+        },
       });
+      if (result.status === "save_failed") {
+        state.previewGate.invalidate();
+        status("保存失败，未生成预览", "error");
+        setPreviewNote({ tone: "error", text: "保存失败，未生成预览。" });
+        return;
+      }
+      if (result.status === "stale") {
+        state.previewGate.invalidate();
+        status("配置已改变，请重新预览", "warn");
+        setPreviewNote({ tone: "warn", text: "配置已改变，请重新预览。" });
+        return;
+      }
+      const data = result.data;
       if (!state.previewGate.accept(request, data)) return;
       el.preview.src = data.image_url;
       el.preview.hidden = false;
+      setPreviewNote(window.BLCore.previewNoteFor(data));
       status((data.preview_scope && data.preview_scope.mode === "frame"
         ? "本帧预览" : "片段预览") + " · 帧 " + data.frame_index, "ok");
     } catch (error) {
-      state.previewGate.fail(request);
+      if (request) state.previewGate.fail(request);
+      setPreviewNote({ tone: "error", text: "预览失败：" + error.message });
       status(error.message, "error");
     } finally {
       el.primary.disabled = false;

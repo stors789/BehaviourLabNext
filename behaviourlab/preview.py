@@ -68,6 +68,11 @@ def _background_for(settings: Mapping[str, Any], asset: Mapping[str, Any],
         start = float(window.get("start_s") or 0.0)
         end = window.get("end_s")
         end_value = float(end) if is_number(end) else None
+        # 窗口终点未写时用同一源时钟的已知时长安排采样；时长也未知才取前 N 帧。
+        sample_end = end_value
+        duration = metadata.get("duration_s")
+        if sample_end is None and is_number(duration) and float(duration) > start:
+            sample_end = float(duration)
         source = media.VideoSource(
             asset["path"],
             start_s=start,
@@ -78,10 +83,15 @@ def _background_for(settings: Mapping[str, Any], asset: Mapping[str, Any],
             source_fps=metadata.get("fps"),
             decode_images=True,
         )
-        frames = ((frame.time_s, frame.image) for frame in source.iter_frames()
-                  if frame.image is not None)
+        # 只把正有效曝光的帧交给背景；窗口外零曝光的上下文帧不参与中位数。
+        frames = (
+            (frame.time_s, frame.image,
+             frame.interval_end_s - frame.interval_start_s)
+            for frame in source.iter_frames()
+            if frame.image is not None
+        )
         return detection.temporal_background(
-            frames, int(settings.get("temporal_bg_samples", 90)), start, end_value
+            frames, int(settings.get("temporal_bg_samples", 90)), start, sample_end
         )
     return None
 
@@ -325,24 +335,31 @@ def create_preview(
 
     height, width = info.image.shape[:2]
     orientation = int(video.get("orientation", 0) or 0)
-    try:
-        region, region_source = detection.geometry_region(
-            geometry, draft["assay"], options, width, height
-        )
-        background = _background_for(settings, asset, video, orientation,
-                                     width, height)
-        window_key = repr(video.get("window"))
-        detector = detection.shared_detector(
-            (asset.get("id"), orientation, window_key), settings,
-            background=background,
-        )
-        result = detector.detect(info.image, region)
-    except detection.DetectionError as error:
-        raise ValidationError(str(error), "detection") from error
+    manual_scope = _is_manual_scope(draft.get("assay", ""), options, unit)
+    # 人工记录路径不运行自动检测，也不为它伪造检测区域。
+    detect_here = not (kind == "behavior" and manual_scope)
+    region_source = None
+    result = None
+    if detect_here:
+        try:
+            region, region_source = detection.geometry_region(
+                geometry, draft["assay"], options, width, height
+            )
+            background = _background_for(settings, asset, video, orientation,
+                                         width, height)
+            window_key = repr(video.get("window"))
+            detector = detection.shared_detector(
+                (asset.get("id"), orientation, window_key), settings,
+                background=background,
+            )
+            result = detector.detect(info.image, region)
+        except detection.DetectionError as error:
+            raise ValidationError(str(error), "detection") from error
 
     canvas = info.image.copy()
     thickness = _thickness(width, height)
-    _draw_candidates(canvas, result, thickness)
+    if result is not None:
+        _draw_candidates(canvas, result, thickness)
     drawn = []
     for key, shape in geometry.items():
         if not isinstance(shape, Mapping):
@@ -379,7 +396,9 @@ def create_preview(
         if step.get("required") and step.get("key") not in geometry
     ]
     warnings: list[str] = []
-    if result.missing_reason == "foreground_saturated":
+    if result is None:
+        warnings.append("人工记录路径不运行自动检测。")
+    elif result.missing_reason == "foreground_saturated":
         warnings.append("前景覆盖过高，已拒绝整片掩膜。")
     elif result.missing_reason == "no_candidate":
         warnings.append("没有符合面积与质量要求的候选。")
@@ -396,8 +415,8 @@ def create_preview(
             "kind": kind,
             "drawn_steps": drawn,
             "missing_steps": missing,
-            "detection_available": True,
-            "detection": {
+            "detection_available": result is not None,
+            "detection": None if result is None else {
                 "candidates": len(result.candidates),
                 "missing_reason": result.missing_reason,
                 "region": region_source,
