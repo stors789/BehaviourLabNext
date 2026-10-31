@@ -488,7 +488,14 @@ class FrameReader:
                 break
             except Exception:
                 return False
-            if raw.pts == anchor_pts and raw.keyframe:
+            if raw.pts is None:
+                return False
+            if raw.pts > anchor_pts:
+                # seek 落在锚点之后，无法恢复原索引计数。
+                return False
+            if raw.pts == anchor_pts:
+                if not raw.keyframe:
+                    return False
                 raw.index = anchor_index
                 self._iterator = iterator
                 self._decoded = anchor_index + 1
@@ -851,7 +858,7 @@ class VideoSource:
             return last_time + last.duration_s
         if previous_time is not None and last_time > previous_time:
             return last_time + (last_time - previous_time)
-        return last_time + 1.0 / self.analysis_fps
+        return last_time + 1.0 / self.source_fps
 
     def _frame(
         self,
@@ -863,14 +870,9 @@ class VideoSource:
     ) -> Frame:
         time_s = float(meta.time_s or 0.0)
         dt_s = 0.0 if context_after else max(0.0, next_time - time_s)
-        if self.end_s is None:
-            interval_start = time_s
-            interval_end = next_time
-        else:
-            interval_start = min(max(time_s, self.start_s), self.end_s)
-            interval_end = max(
-                interval_start, min(next_time, self.end_s)
-            )
+        window_end = self.end_s if self.end_s is not None else next_time
+        interval_start = min(max(time_s, self.start_s), window_end)
+        interval_end = max(interval_start, min(next_time, window_end))
         image = None
         if self.decode_images and raw.image is not None:
             image = _orient(raw.image, self.orientation)
@@ -975,7 +977,7 @@ class VideoSource:
             raise VideoSourceError("没有可解码的源帧")
 
         eof_boundary = self._eof_boundary(last_meta, previous_time)
-        if pending is not None and phase == "inside":
+        if pending is not None:
             yield self._frame(pending[0], pending[1], eof_boundary)
 
         self._check_coverage()

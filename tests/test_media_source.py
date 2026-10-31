@@ -22,11 +22,15 @@ from behaviourlab.schema import ValidationError
 
 
 class FakeDecoder:
-    def __init__(self, spec, *, version=1, corrupt_seek=False, fail_seek=False):
+    def __init__(
+        self, spec, *, version=1, corrupt_seek=False, fail_seek=False,
+        overshoot_to=None,
+    ):
         self.spec = spec
         self.version = version
         self.corrupt_seek = corrupt_seek
         self.fail_seek = fail_seek
+        self.overshoot_to = overshoot_to
         self.start = 0
         self.closed = False
         self.seek_calls = 0
@@ -52,6 +56,9 @@ class FakeDecoder:
         if self.fail_seek:
             self.start = 0
             return
+        if self.overshoot_to is not None:
+            self.start = self.overshoot_to
+            return
         target = next(
             (index for index, item in enumerate(self.spec)
              if item.get("pts") == pts and item.get("keyframe")),
@@ -64,9 +71,10 @@ class FakeDecoder:
 
 
 class FakeFactory:
-    def __init__(self, spec, *, corrupt_seek=False):
+    def __init__(self, spec, *, corrupt_seek=False, overshoot_to=None):
         self.spec = spec
         self.corrupt_seek = corrupt_seek
+        self.overshoot_to = overshoot_to
         self.version = 0
         self.opens = 0
         self.decoders = []
@@ -77,6 +85,7 @@ class FakeFactory:
             self.spec,
             version=self.version,
             corrupt_seek=self.corrupt_seek,
+            overshoot_to=self.overshoot_to,
         )
         self.decoders.append(decoder)
         return decoder
@@ -262,6 +271,82 @@ def test_sampling_uses_real_frames_and_reports_short_coverage(tmp_path):
     )
     with pytest.raises(VideoSourceError):
         list(short.iter_frames())
+
+
+def test_window_start_only_clips_coverage(tmp_path):
+    pts = [5000, 5050, 5270, 5430]
+    path = write_file(tmp_path / "start-only.mp4")
+    factory = FakeFactory(make_spec(pts, last_duration=0.04))
+    source = VideoSource(
+        path, start_s=0.15, source_fps=20, decoder_factory=factory
+    )
+    frames = list(source.iter_frames())
+
+    assert [frame.index for frame in frames] == [1, 2, 3]
+    assert abs(frames[0].time_s - 0.05) <= 1e-12
+    assert abs(frames[0].dt_s - 0.22) <= 1e-12
+    assert abs(frames[1].time_s - 0.27) <= 1e-12
+    assert abs(frames[2].time_s - 0.43) <= 1e-12
+    assert abs(source.coverage["start_s"] - 0.15) <= 1e-12
+    assert abs(source.coverage["end_s"] - 0.47) <= 1e-12
+    assert abs(source.coverage["duration_s"] - 0.32) <= 1e-12
+    assert source.coverage["frame_count"] == 3
+
+
+def test_window_inside_last_exposure_is_not_empty(tmp_path):
+    pts = [5000, 5050, 5270, 5430]
+    path = write_file(tmp_path / "tail-window.mp4")
+    factory = FakeFactory(make_spec(pts, last_duration=0.04))
+    source = VideoSource(
+        path, start_s=0.44, end_s=0.46, source_fps=20,
+        decoder_factory=factory,
+    )
+    frames = list(source.iter_frames())
+
+    assert len(frames) == 1
+    frame = frames[0]
+    assert frame.index == 3
+    assert abs(frame.time_s - 0.43) <= 1e-12
+    assert abs(frame.dt_s - 0.04) <= 1e-12
+    assert abs(frame.interval_start_s - 0.44) <= 1e-12
+    assert abs(frame.interval_end_s - 0.46) <= 1e-12
+    assert abs(source.coverage["duration_s"] - 0.02) <= 1e-12
+    assert source.coverage["frame_count"] == 1
+    assert abs(source.coverage["end_s"] - 0.46) <= 1e-12
+
+
+def test_eof_fallback_uses_source_fps_not_sample_rate(tmp_path):
+    path = write_file(tmp_path / "single.mp4")
+    spec = make_spec([0])
+    factory = FakeFactory(spec)
+    source = VideoSource(
+        path, source_fps=20, sample_fps=5, decoder_factory=factory
+    )
+    frames = list(source.iter_frames())
+
+    assert len(frames) == 1
+    assert abs(frames[0].dt_s - 0.05) <= 1e-12
+    assert abs(source.coverage["duration_s"] - 0.05) <= 1e-12
+    assert abs(source.coverage["end_s"] - 0.05) <= 1e-12
+    assert source.analysis_fps == 5
+
+
+def test_seek_overshoot_falls_back_to_zero_count(tmp_path):
+    count = 360
+    pts = [1000 + 40 * index for index in range(count)]
+    pts[252] = 4840  # 与帧 96 重复的 PTS
+    spec = make_spec(pts, keyframe_step=12, last_duration=0.04)
+    path = write_file(tmp_path / "overshoot.mp4")
+    factory = FakeFactory(spec, overshoot_to=240)
+    pool = ReaderPool(decoder_factory=factory)
+
+    assert int(read_frame(path, 200, pool=pool)[0, 0, 0]) == 200
+    frame = read_frame(path, 100, pool=pool)
+
+    assert int(frame[0, 0, 0]) == 100
+    reader = pool.get(path)
+    assert reader.decoded_count() == 101
+    assert factory.opens >= 2
 
 
 def test_orientation_swaps_dimensions(tmp_path):
