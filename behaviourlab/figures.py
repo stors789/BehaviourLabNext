@@ -170,6 +170,113 @@ def heatmap_png(path: str | Path, rows: Iterable[Mapping[str, Any]],
     return True
 
 
+def mwm_points(rows: Iterable[Mapping[str, Any]], radius_cm: float
+               ) -> list[tuple[float, float, float]]:
+    """池内有效位置的 (x, y, dt)；池外或缺失不进入轨迹与热图。"""
+
+    points: list[tuple[float, float, float]] = []
+    for row in rows:
+        if not row.get("in_window") or not row.get("detected"):
+            continue
+        if row.get("in_pool") is not True:
+            continue
+        span = _finite(row.get("dt_s"))
+        x = _finite(row.get("x_cm"))
+        y = _finite(row.get("y_cm"))
+        if span is None or span <= 0 or x is None or y is None:
+            continue
+        if math.hypot(x, y) > float(radius_cm) + 1e-8:
+            continue
+        points.append((x, y, span))
+    return points
+
+
+def _mwm_figure(radius_cm: float) -> tuple[Figure, Any]:
+    figure = Figure(figsize=(4.5, 4.5))
+    FigureCanvasAgg(figure)
+    axes = figure.add_subplot(111)
+    axes.set_xlim(-radius_cm, radius_cm)
+    axes.set_ylim(-radius_cm, radius_cm)
+    axes.set_aspect("equal", adjustable="box")
+    axes.set_xlabel("x (cm)")
+    axes.set_ylabel("y (cm)")
+    axes.add_patch(patches.Circle((0.0, 0.0), radius_cm, fill=False,
+                                  edgecolor="#8a8a8a", linewidth=0.8))
+    axes.axhline(0.0, color="#c9c9c9", linewidth=0.6)
+    axes.axvline(0.0, color="#c9c9c9", linewidth=0.6)
+    return figure, axes
+
+
+def mwm_trajectory_png(path: str | Path,
+                       rows: Iterable[Mapping[str, Any]], radius_cm: float, *,
+                       platform: tuple[float, float] | None = None,
+                       platform_radius: float = 0.0,
+                       start: tuple[float, float] | None = None,
+                       title: str = "",
+                       style: Mapping[str, Any] | None = None) -> bool:
+    """池内轨迹：只连接完成的连续运动段，附平台与释放点。"""
+
+    segments = motion_segments(rows)
+    if not segments:
+        return False
+    color, _, line_width, dpi = _style(style)
+    figure, axes = _mwm_figure(float(radius_cm))
+    if platform is not None:
+        axes.add_patch(patches.Circle(platform,
+                                      max(0.5, float(platform_radius)),
+                                      fill=False, edgecolor="#b45f45",
+                                      linewidth=1.2))
+    if start is not None:
+        axes.plot([start[0]], [start[1]], marker="o", markersize=4,
+                  color="#1c5f9e")
+    for x0, y0, x1, y1 in segments:
+        axes.plot([x0, x1], [y0, y1], color=color, linewidth=line_width,
+                  solid_capstyle="round")
+    if title:
+        axes.set_title(title, fontsize=9, color="#333333")
+    figure.tight_layout()
+    figure.savefig(path, format="png", dpi=dpi)
+    return True
+
+
+def mwm_heatmap_png(path: str | Path,
+                    rows: Iterable[Mapping[str, Any]], radius_cm: float, *,
+                    platform: tuple[float, float] | None = None,
+                    platform_radius: float = 0.0,
+                    bins: int = HEATMAP_BINS, title: str = "",
+                    style: Mapping[str, Any] | None = None) -> bool:
+    """以池心为原点的 40×40 秒/箱热图；池外点不进入。"""
+
+    radius = float(radius_cm)
+    points = mwm_points(rows, radius)
+    if not points:
+        return False
+    grid = [[0.0] * bins for _ in range(bins)]
+    for x, y, span in points:
+        column = min(bins - 1, max(0, int((x + radius) / (2.0 * radius) * bins)))
+        row_index = min(bins - 1, max(
+            0, int((y + radius) / (2.0 * radius) * bins)))
+        grid[row_index][column] += span
+    _, colormap, _, dpi = _style(style)
+    figure, axes = _mwm_figure(radius)
+    image = axes.imshow(grid, cmap=colormap, origin="lower",
+                        extent=(-radius, radius, -radius, radius),
+                        aspect="equal", interpolation="nearest")
+    figure.colorbar(image, ax=axes, fraction=0.046, pad=0.03, label="s")
+    axes.add_patch(patches.Circle((0.0, 0.0), radius, fill=False,
+                                  edgecolor="#8a8a8a", linewidth=0.8))
+    if platform is not None:
+        axes.add_patch(patches.Circle(platform,
+                                      max(0.5, float(platform_radius)),
+                                      fill=False, edgecolor="#b45f45",
+                                      linewidth=1.2))
+    if title:
+        axes.set_title(title, fontsize=9, color="#333333")
+    figure.tight_layout()
+    figure.savefig(path, format="png", dpi=dpi)
+    return True
+
+
 def center_rect_for(summary: Mapping[str, Any]) -> tuple[float, float, float, float] | None:
     width = _finite(summary.get("arena_width_cm"))
     height = _finite(summary.get("arena_height_cm"))

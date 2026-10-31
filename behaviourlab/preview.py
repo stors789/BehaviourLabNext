@@ -141,6 +141,20 @@ def _draw_guides(canvas, assay: str, options: Mapping[str, Any],
 
     if assay not in ("mwm", "ezm"):
         return
+    if assay == "mwm":
+        module = experiments.get("mwm")
+        guides = module.quadrant_guides(unit_geometry, options)
+        if not guides:
+            return
+        center = guides["center"]
+        length = max(1.0, float(guides["length"]))
+        for dx, dy in guides["directions"]:
+            start = (int(round(center[0] - dx * length)),
+                     int(round(center[1] - dy * length)))
+            end = (int(round(center[0] + dx * length)),
+                   int(round(center[1] + dy * length)))
+            cv2.line(canvas, start, end, GUIDE_COLOR, 1, cv2.LINE_AA)
+        return
     arena = unit_geometry.get("arena") or unit_geometry.get("outer")
     if not arena:
         return
@@ -154,17 +168,6 @@ def _draw_guides(canvas, assay: str, options: Mapping[str, Any],
         rx, ry = fitted["radii"]
         angle = fitted["angle"]
     else:
-        return
-
-    if assay == "mwm":
-        offset = float(options.get("coordinate_rotation_deg", 0.0) or 0.0)
-        length = max(rx, ry)
-        for index in range(2):
-            theta = math.radians(angle + offset + index * 90.0)
-            dx, dy = math.cos(theta) * length, math.sin(theta) * length
-            start = (int(center[0] - dx), int(center[1] - dy))
-            end = (int(center[0] + dx), int(center[1] + dy))
-            cv2.line(canvas, start, end, GUIDE_COLOR, 1, cv2.LINE_AA)
         return
 
     if assay == "ezm":

@@ -157,7 +157,48 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
     has_size = (isinstance(width, (int, float))
                 and isinstance(height, (int, float))
                 and width > 0 and height > 0)
-    if has_size:
+    mode = str(summary.get("mode") or "classic")
+    pool_radius = summary.get("pool_radius_cm")
+    is_mwm = (mode == "mwm" and isinstance(pool_radius, (int, float))
+              and pool_radius > 0)
+    if is_mwm:
+        radius = float(pool_radius)
+        platform = None
+        px = summary.get("platform_x_cm")
+        py = summary.get("platform_y_cm")
+        if isinstance(px, (int, float)) and isinstance(py, (int, float)):
+            platform = (float(px), float(py))
+        start = None
+        sx = summary.get("start_x_cm")
+        sy = summary.get("start_y_cm")
+        if isinstance(sx, (int, float)) and isinstance(sy, (int, float)):
+            start = (float(sx), float(sy))
+        platform_radius = summary.get("platform_radius_cm")
+        platform_radius = (float(platform_radius)
+                           if isinstance(platform_radius, (int, float)) else 0.0)
+        trajectory = f"{stem}_trajectory.png"
+        heatmap = f"{stem}_heatmap.png"
+        try:
+            if figures.mwm_trajectory_png(
+                    target / trajectory, rows, radius, platform=platform,
+                    platform_radius=platform_radius, start=start,
+                    title=name, style=style):
+                figures_info["trajectory"] = trajectory
+            else:
+                notes.append("没有完成的连续运动段，未生成轨迹图")
+            if figures.mwm_heatmap_png(
+                    target / heatmap, rows, radius, platform=platform,
+                    platform_radius=platform_radius, title=name, style=style):
+                figures_info["heatmap"] = heatmap
+            else:
+                notes.append("没有有效位置，未生成热图")
+        except (OSError, ValueError) as error:
+            notes.append(f"图形生成失败：{error}")
+            for key, filename in (("trajectory", trajectory),
+                                  ("heatmap", heatmap)):
+                if not (target / filename).is_file():
+                    figures_info[key] = None
+    elif has_size:
         center = figures.center_rect_for(summary)
         trajectory = f"{stem}_trajectory.png"
         heatmap = f"{stem}_heatmap.png"

@@ -100,10 +100,10 @@ def test_health_reports_explicit_data_root_and_no_owner(tmp_path):
 
 
 def test_unfinished_experiment_reports_not_implemented():
-    # TST 与 FST 已接入；用仍未实现的 Morris 水迷宫守住“未实现”契约。
-    context = AnalysisContext(job={"assay": "mwm"})
+    # TST、FST 与 MWM 已接入；用仍未实现的新物体识别守住“未实现”契约。
+    context = AnalysisContext(job={"assay": "nor"})
     with pytest.raises(ExperimentNotImplemented) as captured:
-        experiments.get("mwm").analyze(context)
+        experiments.get("nor").analyze(context)
     assert "尚未实现" in str(captured.value)
 
 

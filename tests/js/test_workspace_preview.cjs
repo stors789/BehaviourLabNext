@@ -5,6 +5,7 @@ const {
   saveThenPreview,
   previewNoteFor,
   issueText,
+  mwmLines,
 } = require("../../behaviourlab/web/static/editor-core.js");
 
 const CONFIG = {
@@ -220,6 +221,38 @@ function behaviorNote() {
   assert.ok(fst.text.includes("不动 1.20"), fst.text);
   assert.ok(fst.text.includes("活动 1.50"), fst.text);
   assert.ok(!fst.text.includes("非挣扎"), "FST 不套用 TST 标签");
+
+  const mwm = previewNoteFor({
+    summary: {
+      detection_available: true,
+      detection: { candidates: 1, missing_reason: null },
+      behavior: {
+        mode: "mwm", total_time_s: 4.0, platform_entries: 1,
+        platform_time_s: 2.0, total_distance_cm: 30.0,
+      },
+    },
+    warnings: [],
+  });
+  assert.ok(mwm.text.includes("进入 1 次"), mwm.text);
+  assert.ok(mwm.text.includes("平台 2.00 s"), mwm.text);
+  assert.ok(mwm.text.includes("路径 30.00 cm"), mwm.text);
+  assert.ok(!mwm.text.includes("不动 "), "MWM 不套用 FST 标签");
+}
+
+function mwmQuadrantGuides() {
+  const arena = { type: "ellipse", center: [100, 100], radii: [60, 30], angle: 30 };
+  const guides = mwmLines(arena, 120, 25);
+  assert.ok(guides, "椭圆与旋转必须产出象限方向");
+  const expected = [
+    [0.8870492613930958, 0.461674785820022],
+    [0.343250149967973, -0.9392440228965868],
+  ];
+  guides.directions.forEach(([x, y], index) => {
+    assert.ok(Math.abs(x - expected[index][0]) < 1e-9, "x 方向与物理变换一致");
+    assert.ok(Math.abs(y - expected[index][1]) < 1e-9, "y 方向与物理变换一致");
+  });
+  assert.strictEqual(mwmLines({ type: "line", points: [[0, 0], [1, 0]] }, 120, 0),
+    null, "非椭圆不画象限线");
 }
 
 async function saveFailureCarriesFieldReason() {
@@ -253,6 +286,7 @@ async function saveFailureCarriesFieldReason() {
   notes();
   fieldReasonsWin();
   behaviorNote();
+  mwmQuadrantGuides();
   await saveFailureCarriesFieldReason();
   console.log("workspace-preview OK");
 })().catch((error) => {

@@ -23,7 +23,7 @@ def parameter(
     unit: str | None = None,
     minimum: float | None = None,
     maximum: float | None = None,
-    step: float | None = None,
+    step: float | str | None = None,
     choices: list[dict] | None = None,
     section: str | None = None,
     help: str | None = None,

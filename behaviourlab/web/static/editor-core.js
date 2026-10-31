@@ -271,6 +271,43 @@
     return next;
   }
 
+  // MWM 象限辅助线：把物理 x/y 轴反变换回源像素方向，与 Python 端一致。
+  function mwmLines(arena, diameterCm, rotationDeg) {
+    if (!arena || arena.type !== "ellipse" || !arena.center || !arena.radii) {
+      return null;
+    }
+    const rx = Number(arena.radii[0]);
+    const ry = Number(arena.radii[1]);
+    const diameter = Number(diameterCm);
+    if (!(rx > 0) || !(ry > 0) || !(diameter > 0)) return null;
+    const theta = (Number(arena.angle) || 0) * Math.PI / 180;
+    const ct = Math.cos(theta), st = Math.sin(theta);
+    const a = diameter / (2 * rx), b = diameter / (2 * ry);
+    const m00 = a * ct * ct + b * st * st;
+    const m01 = (a - b) * ct * st;
+    const m11 = a * st * st + b * ct * ct;
+    const alpha = (Number(rotationDeg) || 0) * Math.PI / 180;
+    const ca = Math.cos(alpha), sa = Math.sin(alpha);
+    const n00 = ca * m00 + sa * m01;
+    const n01 = ca * m01 + sa * m11;
+    const n10 = sa * m00 - ca * m01;
+    const n11 = sa * m01 - ca * m11;
+    const det = n00 * n11 - n01 * n10;
+    if (Math.abs(det) < 1e-12) return null;
+    const directions = [
+      [n11 / det, -n10 / det],
+      [-n01 / det, n00 / det],
+    ].map(([x, y]) => {
+      const length = Math.hypot(x, y) || 1;
+      return [x / length, y / length];
+    });
+    return {
+      center: [Number(arena.center[0]), Number(arena.center[1])],
+      directions,
+      length: Math.max(rx, ry),
+    };
+  }
+
   function SaveQueue(send) {
     this.send = send;
     this.editVersion = 0;
@@ -507,6 +544,13 @@
           + value(behavior.immobility_time_s) + " / 活动 "
           + value(behavior.active_time_s) + " / 不确定 "
           + value(behavior.uncertain_time_s) + " s");
+      } else if (behavior.mode === "mwm") {
+        const count = (number) => (typeof number === "number" && isFinite(number)
+          ? String(number) : "—");
+        lines.push("行为 " + value(behavior.total_time_s) + " s：进入 "
+          + count(behavior.platform_entries) + " 次 / 平台 "
+          + value(behavior.platform_time_s) + " s / 路径 "
+          + value(behavior.total_distance_cm) + " cm");
       } else {
         lines.push("行为 " + value(behavior.total_time_s) + " s：非挣扎 "
           + value(behavior.immobility_time_s) + " / 挣扎 "
@@ -611,5 +655,6 @@
     moveHole,
     moveEllipseCenter,
     moveRadius,
+    mwmLines,
   };
 });

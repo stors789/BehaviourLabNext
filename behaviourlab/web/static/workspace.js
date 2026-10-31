@@ -894,7 +894,32 @@
     if (!unit) return;
     const shape = unit.geometry ? unit.geometry[state.stepKey] : null;
     if (shape) drawShape(shape, "#ffd26f", 2.8, true);
+    if (state.assay === "mwm") drawMwmGuides(unit);
     drawEditor();
+  }
+
+  function drawMwmGuides(unit) {
+    if (!unit || !unit.geometry) return;
+    const view = viewport();
+    if (!view) return;
+    const diameter = Number(effectiveOption(unit, "pool_diameter_cm", 0));
+    const rotation = Number(effectiveOption(unit, "coordinate_rotation_deg", 0)) || 0;
+    const guides = (typeof BLCore !== "undefined" && BLCore.mwmLines)
+      ? BLCore.mwmLines(unit.geometry.arena, diameter, rotation) : null;
+    if (!guides) return;
+    const center = toCss(guides.center);
+    const length = guides.length * view.scale;
+    ctx.save();
+    ctx.setLineDash([7, 5]);
+    ctx.strokeStyle = "rgba(255, 210, 111, 0.65)";
+    ctx.lineWidth = 1.2;
+    guides.directions.forEach(([dx, dy]) => {
+      ctx.beginPath();
+      ctx.moveTo(center[0] - dx * length, center[1] - dy * length);
+      ctx.lineTo(center[0] + dx * length, center[1] + dy * length);
+      ctx.stroke();
+    });
+    ctx.restore();
   }
 
   function drawShape(shape, color, width, handles) {
