@@ -205,9 +205,10 @@ def activity_series(rows: Iterable[Mapping[str, Any]], key: str
                     ) -> tuple[list[float], list[float]]:
     """特征 key 的真实曝光阶梯序列 (x, y)。
 
-    每行取 [interval_start_s, interval_end_s)，值在整段曝光内成立；
-    曝光不连续处用 NaN 断开。feature_ready 为 False 的行不算证据，
-    它的特征值是派生层的缺省 0，画出来就是伪造。
+    每行追加 (start, value) 与 (end, value) 两点：值在自己的曝光区间
+    [start, end) 内成立，区间起点垂直跳变到新值；曝光不连续处用 NaN
+    断开。feature_ready 为 False 的行不算证据，它的特征值是派生层的
+    缺省 0，画出来就是伪造。
     """
 
     xs: list[float] = []
@@ -224,8 +225,9 @@ def activity_series(rows: Iterable[Mapping[str, Any]], key: str
         if start is None or end is None or end <= start or value is None:
             continue
         if previous_end is not None and abs(start - previous_end) <= 1e-7:
-            # 与上一行曝光相接：steps-post 直接延伸，不重复写起点。
-            pass
+            # 与上一行曝光相接：在同一 x 垂直跳变到本行的值。
+            xs.append(start)
+            ys.append(value)
         else:
             if xs:
                 xs.append(float("nan"))
@@ -300,8 +302,9 @@ def activity_png(path: str | Path, rows: Iterable[Mapping[str, Any]], *,
             xs, ys = series[key]
             if not xs:
                 continue
+            # 序列已含每行区间起点与终点的阶梯坐标，直接直线连接。
             curve_axes.plot(xs, ys, color=color, linewidth=line_width,
-                            drawstyle="steps-post", label=label)
+                            label=label)
         for key, dash, label in FLOW_THRESHOLD_LINES:
             for value in threshold_values(rows, key):
                 curve_axes.axhline(value, color="#8a8a8a", linestyle=dash,

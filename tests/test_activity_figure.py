@@ -45,13 +45,28 @@ def test_activity_series_uses_exposure_and_breaks_at_gaps():
          "interval_start_s": 0.4, "interval_end_s": 0.5, F: 20.0},
     ]
     xs, ys = figures.activity_series(rows, F)
-    assert len(xs) == len(ys) == 6
+    # 每行值覆盖自己的曝光区间：[0,0.1)@10 → [0.1,0.2)@30，0.1 处垂直跳变。
+    assert len(xs) == len(ys) == 7
     assert xs[0] == 0.0 and ys[0] == 10.0
     assert xs[1] == 0.1 and ys[1] == 10.0
-    assert xs[2] == 0.2 and ys[2] == 30.0
-    assert math.isnan(xs[3]) and math.isnan(ys[3])
-    assert xs[4] == 0.4 and ys[4] == 20.0
-    assert xs[5] == 0.5 and ys[5] == 20.0
+    assert xs[2] == 0.1 and ys[2] == 30.0
+    assert xs[3] == 0.2 and ys[3] == 30.0
+    assert math.isnan(xs[4]) and math.isnan(ys[4])
+    assert xs[5] == 0.4 and ys[5] == 20.0
+    assert xs[6] == 0.5 and ys[6] == 20.0
+
+
+def test_activity_series_value_at_time_matches_own_interval():
+    rows = [
+        {"in_window": True, "feature_ready": True,
+         "interval_start_s": 0.0, "interval_end_s": 0.1, F: 10.0},
+        {"in_window": True, "feature_ready": True,
+         "interval_start_s": 0.1, "interval_end_s": 0.2, F: 30.0},
+    ]
+    xs, ys = figures.activity_series(rows, F)
+    # 0.15 秒落在 [0.1,0.2) 内，必须读到本行的 30 而不是上一行的 10。
+    step = [(x, y) for x, y in zip(xs, ys) if x <= 0.15][-1]
+    assert step == (0.1, 30.0)
 
 
 def test_activity_series_skips_rows_without_evidence():
