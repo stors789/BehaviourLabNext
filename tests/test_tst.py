@@ -136,11 +136,10 @@ def test_parameters_and_geometry_validation():
                                     provided={"auto_behavior_threshold"})
     assert not_boolean[0]["message"] == "必须是布尔值"
 
-    # lis 参数可以保存，但不能在本块开始任务。
+    # lis 已接入执行分支：complete 校验不再拒绝，经典阈值照常校验。
     assert tst.validate_unit(options(mode="lis"), geometry) == []
-    rejected = tst.validate_unit(options(mode="lis"), geometry, complete=True)
-    assert any(issue["field"] == "options.mode" and "尚未接入" in issue["message"]
-               for issue in rejected)
+    assert tst.validate_unit(options(mode="lis"), geometry,
+                             complete=True) == []
 
     missing = tst.validate_unit(options(), {}, complete=True)
     fields = {issue["field"] for issue in missing}
@@ -230,18 +229,25 @@ def test_capture_features_and_recovery_rows():
         "struggling", "immobile", "swing", "unknown", "outside"}
 
 
-def test_lis_mode_is_rejected_before_capture():
-    from behaviourlab.schema import AnalysisContext, ValidationError
-
-    job = {"assay": "tst", "units": [{
-        "id": "u" * 32, "name": "小鼠 1", "animal_id": None, "window": None,
-        "geometry": {"arena": ARENA, "body_line": BODY_LINE},
-        "options": options(mode="lis"),
-        "detection": dict(tst.DETECTION_DEFAULTS),
-    }]}
-    with pytest.raises(ValidationError) as caught:
-        tst.analyze(AnalysisContext(job=job, source=FakeSource([])))
-    assert "尚未接入" in str(caught.value)
+def test_lis_mode_runs_lis_branch():
+    # lis 接入后走 lis 执行分支：行有 lis 证据与最终状态，不静默按 classic。
+    centers = [(60 + 5 * index, 60) for index in range(10)]
+    result = analyze_frames(centers, {"mode": "lis"})
+    rows = result.observations
+    paired = [row for row in rows if row.get("feature_ready")]
+    assert paired and all(row.get("lis_motion_score") is not None
+                          for row in paired)
+    assert all(row.get("lis_confidence") in ("high", "medium", "low")
+               for row in paired)
+    metadata = result.metadata["units"]["u" * 32]
+    assert metadata["mode"] == "lis"
+    assert metadata["low_information"] is False
+    summary = result.summary[0]
+    assert summary["swing_time_s"] == 0.0
+    assert summary["latency_to_immobility_s"] is None
+    assert set(summary["thresholds"]) == {"r", "p", "z", "h", "f", "s",
+                                          "g", "b"}
+    assert all(event["confirmed_s"] is None for event in result.events)
 
 
 def test_medium_activity_needs_point_45s_and_exit_needs_point_4s():

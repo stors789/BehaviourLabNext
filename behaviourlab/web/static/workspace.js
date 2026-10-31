@@ -1735,7 +1735,11 @@
     if (!video || !unit) return;
     el.primary.disabled = true;
     el.secondary.disabled = true;
-    status(type === "behavior" ? "正在生成行为预览…" : "正在生成检测预览…");
+    const extracting = type === "behavior"
+      && currentUnit() && currentUnit().options
+      && currentUnit().options.mode === "lis";
+    status(extracting ? "提取运动特征中，状态待定"
+      : (type === "behavior" ? "正在生成行为预览…" : "正在生成检测预览…"));
     let request = null;
     try {
       // 先落盘，再核对页面仍指向同一个视频/小鼠，最后才请求预览。

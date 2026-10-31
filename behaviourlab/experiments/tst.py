@@ -1,7 +1,8 @@
-"""TST 悬尾实验：classic 模式的成对运动、阈值滞回、摆动与最终时间线。
+"""TST 悬尾实验：classic 与 lis 两种行为算法。
 
-本块只实现 classic；lis 参数照常保存与校验，但最终校验/开始任务会拒绝，
-不会静默按 classic 计算。体长线固定 60 mm，尺度不从身体框反推。
+classic 用成对光流与阈值滞回；lis 先保存配准残差等测量证据，再统一
+按分位数阈值评分（评分/证据两分支）并做片段补救。体长线固定 60 mm，
+尺度不从身体框反推。缺失与未知不参与判定，也不伪造检测。
 """
 
 from __future__ import annotations
@@ -179,10 +180,7 @@ def validate_unit(options: Mapping[str, Any] | None,
             issues.append({"field": f"options.{key}",
                            "message": "必须是 ≥ 0 的有限秒数"})
 
-    if complete and mode == "lis":
-        issues.append({"field": "options.mode",
-                       "message": "微动残差模式尚未接入，本块只能运行经典行为"})
-
+    # lis 已接入执行分支；经典阈值字段保留并验证，但不参与 lis 判定。
     issues.extend(validate_geometry(geometry, require=complete))
     return issues
 
@@ -255,6 +253,15 @@ def _extra(body: Mapping[str, Any] | None, pair: Mapping[str, Any] | None,
         "distance_px": None,
         "speed_nominal_mm_s": None, "speed_mm_s": None,
         "flow_p90_mm_s": None, "flow_mean_mm_s": None,
+        # lis 配对证据：非配对行保持 None，不伪造数值。
+        "lis_r": None, "lis_mask_residual": None, "lis_gray_mean_d": None,
+        "lis_peripheral_d": None, "lis_core_d": None, "lis_core_ratio": None,
+        "lis_z": None, "lis_hu_distance": None, "lis_body_length_px": None,
+        "lis_aspect_ratio": None, "lis_solidity": None, "lis_extent": None,
+        "lis_displacement_ratio": None, "lis_segmentation_bad": None,
+        "lis_climbing_suspected": None,
+        "lis_h": None, "lis_f": None, "lis_s": None, "lis_b": None,
+        "lis_g": None,
     }
     if body:
         values.update(body)
@@ -308,6 +315,13 @@ def capture(context: Any, units: Sequence[Mapping[str, Any]]):
     captured: dict[Any, list[dict]] = {unit["id"]: [] for unit in units}
     state: dict[Any, dict] = {}
     progress_span = float(metadata.get("duration_s") or 0.0)
+    lis_units = [
+        unit for unit in units
+        if str((unit.get("options") or {}).get("mode", "classic")) == "lis"
+    ]
+    if lis_units:
+        # 提取阶段不判定状态：进度文字明确“状态待定”，不给临时挣扎结论。
+        context.progress(0.1, "提取运动特征中，状态待定")
 
     for frame in source.iter_frames():
         if context.cancelled():
@@ -332,12 +346,16 @@ def capture(context: Any, units: Sequence[Mapping[str, Any]]):
                     background = detection.prepare_background(
                         settings, asset, job,
                         int(job.get("orientation", 0) or 0), width, height)
+                roi_y, roi_x, roi_h, roi_w = cv2.boundingRect(region)
                 entry = {
                     "detector": detection.shared_detector(
                         (run_key, unit_id), settings, background=background),
                     "region": region,
                     "arena": activity.shape_points(geometry.get("arena")),
                     "scale": activity.line_scale(geometry.get("body_line"))[0],
+                    "roi": (float(roi_x), float(roi_y),
+                            float(roi_w), float(roi_h)),
+                    "lis": str(options.get("mode", "classic")) == "lis",
                     "prev": None,
                 }
                 state[unit_id] = entry
@@ -371,6 +389,27 @@ def capture(context: Any, units: Sequence[Mapping[str, Any]]):
                     mm_per_px=entry["scale"], fps=float(frame.analysis_fps),
                     elapsed_s=float(frame.time_s) - float(prev["time_s"]),
                 )
+            lis_state = None
+            if entry["lis"] and candidate is not None and body is not None:
+                mask = candidate["mask"]
+                metrics = {
+                    "area": float(candidate["area"]),
+                    "perimeter": float(body["body_perimeter_px"]),
+                    "aspect": float(body["body_aspect"]),
+                    "solidity": float(body["body_solidity"]),
+                    "fill": float(body["body_fill_ratio"]),
+                }
+                lis_state = {
+                    "mask": np.asarray(mask).copy(),
+                    "angle": activity.lis_principal_angle(mask),
+                    "metrics": metrics,
+                    "hu": activity.lis_hu_vector(mask),
+                }
+            if (entry["lis"] and lis_state is not None and pair is not None
+                    and prev is not None and prev.get("lis") is not None):
+                pair = {**pair, **_lis_pair_evidence(
+                    entry, gray, candidate, body, pair, prev, lis_state,
+                    options)}
             result = _detection_of(candidate, reason)
             row = timeline.base_row(
                 {"id": unit_id, "name": unit.get("name"),
@@ -391,11 +430,61 @@ def capture(context: Any, units: Sequence[Mapping[str, Any]]):
                 "area": float(candidate["area"]) if candidate else None,
                 "body": body,
                 "gray": gray.copy(),
+                "lis": lis_state,
             }
         context.progress(min(0.85, 0.1 + 0.75 * max(0.0, float(frame.time_s)) /
                              max(1e-9, progress_span or 1.0)))
 
     return captured
+
+
+def _lis_pair_evidence(entry: Mapping[str, Any], gray, candidate, body,
+                       pair: Mapping[str, Any], prev: Mapping[str, Any],
+                       lis_state: Mapping[str, Any],
+                       options: Mapping[str, Any]) -> dict:
+    """lis 配对证据：配准、残差 R/P/核心量/r、形变 Z 与分割诊断。"""
+
+    length = activity.lis_body_length(candidate["mask"], candidate["bbox"])
+    aligned_gray, aligned_mask, _ = activity.lis_register(
+        prev["gray"], gray, prev["lis"]["mask"], lis_state["mask"],
+        prev["center"], candidate["center"],
+        prev["lis"]["angle"], lis_state["angle"],
+        rotate_align=bool(options.get("lis_rotate_align")))
+    residual = activity.lis_residual(aligned_gray, aligned_mask, gray,
+                                     lis_state["mask"])
+    core = activity.lis_core_peripheral(lis_state["mask"], length,
+                                        residual["diff"])
+    hu_distance = activity.lis_hu_distance(lis_state["hu"],
+                                           prev["lis"]["hu"])
+    z = activity.lis_deformation(lis_state["metrics"], prev["lis"]["metrics"],
+                                 hu_distance, residual["mask_residual"])
+    roi_x, roi_y, roi_w, roi_h = entry["roi"]
+    bbox_x, bbox_y, bbox_w, bbox_h = candidate["bbox"]
+    roi_area = max(roi_w * roi_h, 1e-6)
+    area_ratio = float(candidate["area"]) / roi_area
+    bad = bool(area_ratio < 0.0005 or area_ratio > 0.70 or length < 14.0)
+    climbing = bool(
+        float(bbox_y) <= roi_y + 0.1 * roi_h
+        and float(body["body_y_px"]) <= roi_y + 0.25 * roi_h
+        and float(body["body_aspect"]) >= 1.8)
+    return {
+        "lis_r": float(residual["r"]),
+        "lis_mask_residual": float(residual["mask_residual"]),
+        "lis_gray_mean_d": float(residual["gray_mean_d"]),
+        "lis_peripheral_d": float(core["peripheral_mean"]),
+        "lis_core_d": float(core["core_mean"]),
+        "lis_core_ratio": float(core["ratio"]),
+        "lis_z": float(z),
+        "lis_hu_distance": float(hu_distance),
+        "lis_body_length_px": float(length),
+        "lis_aspect_ratio": float(body["body_aspect"]),
+        "lis_solidity": float(body["body_solidity"]),
+        "lis_extent": float(body["body_fill_ratio"]),
+        "lis_displacement_ratio": (float(pair["distance_px"])
+                                   / max(length, 1e-6)),
+        "lis_segmentation_bad": bad,
+        "lis_climbing_suspected": climbing,
+    }
 
 
 # -- 特征派生 ------------------------------------------------------------
@@ -752,10 +841,402 @@ def _run_group(group: list[Mapping[str, Any]],
         previous = row
 
 
+# -- LIS 微动残差：滚动量、阈值、两分支状态机与片段后处理 -----------------
+
+LIS_ROLLING_KEYS = ("lis_h", "lis_f", "lis_s", "lis_b", "lis_g")
+LIS_SCORE_FEATURES = ("r", "p", "z", "h", "f", "s")
+LIS_SCORE_WEIGHTS = {"r": 0.24, "p": 0.14, "z": 0.22, "h": 0.08,
+                     "f": 0.18, "s": 0.14}
+# 特征 key → 行字段；周边量 P 在行里叫 lis_peripheral_d。
+LIS_ROW_FIELDS = {"r": "lis_r", "p": "lis_peripheral_d", "z": "lis_z",
+                  "h": "lis_h", "f": "lis_f", "s": "lis_s",
+                  "g": "lis_g", "b": "lis_b"}
+
+
+def _lis_rolling(group: list[dict]) -> None:
+    """组内滚动量：H(.5s)、F/S(.3s)、g、b(1.5s)，只看 (t−w, t] 的同组行。"""
+
+    for index, row in enumerate(group):
+        moment = float(row["time_s"])
+        recent = [item for item in group[:index + 1]
+                  if float(item["time_s"]) > moment - 0.5 + 1e-9]
+        if len(recent) >= 3:
+            row["lis_h"] = max(
+                activity.lis_median_diff(
+                    [float(item[key]) for item in recent
+                     if is_number(item.get(key))])
+                for key in ("lis_r", "lis_peripheral_d", "lis_z"))
+        else:
+            row["lis_h"] = 0.0
+        short = [item for item in group[:index + 1]
+                 if float(item["time_s"]) > moment - 0.3 + 1e-9]
+        flows = [float(item["flow_p90_mm_s"]) for item in short
+                 if is_number(item.get("flow_p90_mm_s"))]
+        if len(flows) >= 3:
+            row["lis_f"] = float(np.percentile(flows, 90))
+        elif is_number(row.get("flow_p90_mm_s")):
+            row["lis_f"] = float(row["flow_p90_mm_s"])
+        else:
+            row["lis_f"] = 0.0
+        speeds = [float(item["speed_nominal_mm_s"]) for item in short
+                  if is_number(item.get("speed_nominal_mm_s"))]
+        row["lis_s"] = float(np.std(speeds)) if len(speeds) >= 3 else 0.0
+        length = float(row.get("lis_body_length_px") or 0.0)
+        distance = float(row.get("distance_px") or 0.0)
+        row["lis_g"] = distance / max(length, 1e-6)
+        span_rows = [item for item in group[:index + 1]
+                     if float(item["time_s"]) > moment - 1.5 + 1e-9]
+        row["lis_b"] = activity.lis_periodicity(
+            [float(item["body_x_px"]) for item in span_rows],
+            [float(item["body_y_px"]) for item in span_rows],
+            [float(item["time_s"]) for item in span_rows])
+
+
+def lis_score_rows(rows: Sequence[dict]) -> dict:
+    """阈值估计、归一化与综合分：只用分割良好的配对行估计 R/P/Z/H/F/S。
+
+    无良好分割样本时改用全部配对行并标全局 low_information；
+    每行写 lis_score_*、lis_motion_score、lis_motion_prior、
+    lis_score_mode 与 lis_thresholds_used。
+    """
+
+    pairs = [row for row in rows
+             if row.get("in_window") and row.get("feature_ready")]
+    good = [row for row in pairs if not row.get("lis_segmentation_bad")]
+    low_information = not good
+    sample = good if good else pairs
+    thresholds: dict[str, dict] = {}
+    for key in ("r", "p", "z", "h", "f", "s", "g", "b"):
+        field = LIS_ROW_FIELDS[key]
+        values = [float(row[field]) for row in sample
+                  if is_number(row.get(field))]
+        thresholds[key] = activity.lis_thresholds(values or [0.0])
+
+    for row in rows:
+        if not (row.get("in_window") and row.get("feature_ready")):
+            for key in LIS_ROLLING_KEYS:
+                row.setdefault(key, None)
+            continue
+        score = 0.0
+        for key, weight in LIS_SCORE_WEIGHTS.items():
+            field = LIS_ROW_FIELDS[key]
+            norm = activity.lis_normalize(
+                float(row[field]), thresholds[key]["q25"],
+                thresholds[key]["q90"])
+            row[f"lis_score_{key}"] = norm
+            score += weight * norm
+        row["lis_motion_score"] = score
+        row["lis_motion_prior"] = activity.lis_motion_prior(
+            thresholds["f"]["q50"], thresholds["f"]["q90"],
+            thresholds["s"]["q50"], thresholds["s"]["q90"])
+        row["lis_score_mode"] = ("score" if row["lis_motion_prior"] >= .35
+                                 else "evidence")
+        row["lis_thresholds_used"] = {
+            key: {name: thresholds[key][name]
+                  for name in ("low", "mid", "high", "very_high")}
+            for key in ("r", "p", "z", "h", "f", "s", "g", "b")}
+    return {"thresholds": thresholds, "samples": len(sample),
+            "low_information": low_information}
+
+
+def _lis_evidence(row: Mapping[str, Any], thresholds: Mapping[str, Any]
+                  ) -> tuple[bool, bool, bool]:
+    """(活动证据, 不动证据, 被动摆动)。比较带 2%/5% 相对容差。"""
+
+    values = {
+        "r": float(row["lis_r"]),
+        "p": float(row["lis_peripheral_d"]),
+        "z": float(row["lis_z"]),
+        "h": float(row["lis_h"]),
+    }
+    count = sum(1 for key in ("p", "z", "h")
+                if activity.lis_above(values[key], thresholds[key]["high"]))
+    if activity.lis_above(float(row["lis_core_ratio"]),
+                          max(1.15, thresholds["r"]["q80"])):
+        count += 1
+    active = ((activity.lis_above(values["r"], thresholds["r"]["high"])
+               and count >= 1) or count >= 2)
+    low_evidence = all(
+        activity.lis_not_above(values[key], thresholds[key]["low"])
+        for key in ("r", "p", "z", "h"))
+    calm_local = all(
+        activity.lis_not_above(values[key], thresholds[key]["mid"])
+        for key in ("r", "p", "z"))
+    passive = False
+    if calm_local and not active:
+        g = float(row["lis_g"])
+        b = float(row["lis_b"])
+        g_up_mid = activity.lis_above(g, thresholds["g"]["q50"])
+        g_up_high = activity.lis_above(g, thresholds["g"]["q80"])
+        b_ref = max(0.4, thresholds["b"]["q75"])
+        passive = ((g_up_mid and activity.lis_above(b, b_ref))
+                   or (g_up_high and activity.lis_not_above(
+                       values["h"], thresholds["h"]["high"])))
+    return active, bool(low_evidence or passive), passive
+
+
+def _lis_window(group: Sequence[Mapping[str, Any]], index: int,
+                seconds: float, evidence_key: str) -> tuple[float, float]:
+    """(t−seconds, t) 内已曝光同组数据的覆盖秒数与证据占比。"""
+
+    now = float(group[index]["time_s"])
+    low = now - seconds
+    coverage = 0.0
+    marked = 0.0
+    for row in group[:index]:
+        start = float(row["interval_start_s"])
+        end = float(row["interval_end_s"])
+        overlap = min(end, now) - max(start, low)
+        if overlap > 1e-9:
+            coverage += overlap
+            if row.get(evidence_key):
+                marked += overlap
+    return coverage, (marked / coverage if coverage > 1e-9 else 0.0)
+
+
+def _run_lis_group(group: list[dict], thresholds: Mapping[str, Any],
+                   low_information: bool) -> None:
+    """lis 状态机：评分分支即时判定，证据分支按曝光窗滞回。"""
+
+    state = "immobile"
+    for index, row in enumerate(group):
+        if row.get("lis_segmentation_bad"):
+            # 坏分割仍有配对：保留上一状态、低可信并清空证据。
+            row["state"] = state
+            row["state_group"] = state
+            row["lis_confidence"] = "low"
+            row["lis_reason"] = "分割质量较差，保持上一状态"
+            row["lis_active_evidence"] = False
+            row["lis_immobile_evidence"] = False
+            row["lis_passive_swing"] = False
+            row["lis_evidence_coverage_s"] = None
+            row["lis_evidence_ratio"] = None
+            if row.get("lis_climbing_suspected"):
+                row["lis_confidence"] = "low"
+            continue
+        active, immobile_ev, passive = _lis_evidence(row, thresholds)
+        row["lis_active_evidence"] = active
+        row["lis_immobile_evidence"] = immobile_ev
+        row["lis_passive_swing"] = passive
+        prior = float(row["lis_motion_prior"])
+        coverage: float | None = None
+        ratio: float | None = None
+        if prior >= .35:
+            state = ("struggling" if float(row["lis_motion_score"]) >= .5
+                     else "immobile")
+            row["lis_reason"] = ("综合评分高于阈值" if state == "struggling"
+                                 else "综合评分低于阈值")
+            margin = abs(float(row["lis_motion_score"]) - 0.5)
+            row["lis_confidence"] = "high" if margin >= .15 else "medium"
+        elif state != "struggling":
+            coverage, ratio = _lis_window(group, index, .35,
+                                          "lis_active_evidence")
+            if coverage >= .28 - 1e-9 and ratio >= .45 - 1e-9:
+                state = "struggling"
+                row["lis_reason"] = "活动证据"
+            elif passive:
+                row["lis_reason"] = "被动摆动"
+            elif immobile_ev:
+                row["lis_reason"] = "不动证据"
+            else:
+                row["lis_reason"] = "状态保持"
+            row["lis_confidence"] = "medium"
+        else:
+            coverage, ratio = _lis_window(group, index, .75,
+                                          "lis_immobile_evidence")
+            if coverage >= .60 - 1e-9 and ratio >= .55 - 1e-9:
+                state = "immobile"
+                row["lis_reason"] = "不动证据"
+            else:
+                row["lis_reason"] = "状态保持"
+            row["lis_confidence"] = "medium"
+        row["lis_evidence_coverage_s"] = coverage
+        row["lis_evidence_ratio"] = ratio
+        if row.get("lis_climbing_suspected"):
+            row["lis_confidence"] = "low"
+        row["state"] = state
+        row["state_group"] = state
+    if low_information:
+        for row in group:
+            row["lis_confidence"] = "low"
+
+
+def _lis_state_segments(group: Sequence[Mapping[str, Any]]
+                        ) -> list[dict[str, Any]]:
+    """组内连续同状态段（曝光连续，组内天然相邻）。"""
+
+    segments: list[dict[str, Any]] = []
+    for row in group:
+        state = row["state"]
+        if segments and segments[-1]["state"] == state:
+            segments[-1]["rows"].append(row)
+            segments[-1]["end"] = float(row["interval_end_s"])
+        else:
+            segments.append({"state": state,
+                             "rows": [row],
+                             "start": float(row["interval_start_s"]),
+                             "end": float(row["interval_end_s"])})
+    return segments
+
+
+def _segment_gap(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
+    """两侧挣扎段的判定间隙：同分支用自己的，混合取较小者。"""
+
+    def mode_gap(segment: Mapping[str, Any]) -> float:
+        mode = str(segment["rows"][0].get("lis_score_mode") or "score")
+        return 2.0 if mode == "score" else 0.5
+
+    return min(mode_gap(left), mode_gap(right))
+
+
+def _lis_sandwich(group: list[dict], min_struggle_s: float) -> None:
+    """夹心处理：短不动段填回挣扎，再删过短挣扎段；两端片段不动。"""
+
+    segments = _lis_state_segments(group)
+    for position in range(1, len(segments) - 1):
+        segment = segments[position]
+        if segment["state"] != "immobile":
+            continue
+        left, right = segments[position - 1], segments[position + 1]
+        if left["state"] != "struggling" or right["state"] != "struggling":
+            continue
+        duration = segment["end"] - segment["start"]
+        if duration < _segment_gap(left, right) - 1e-9:
+            for row in segment["rows"]:
+                row["state"] = "struggling"
+                row["state_group"] = "struggling"
+    segments = _lis_state_segments(group)
+    for position in range(1, len(segments) - 1):
+        segment = segments[position]
+        if segment["state"] != "struggling":
+            continue
+        left, right = segments[position - 1], segments[position + 1]
+        if left["state"] != "immobile" or right["state"] != "immobile":
+            continue
+        if segment["end"] - segment["start"] <= float(min_struggle_s) + 1e-9:
+            for row in segment["rows"]:
+                row["state"] = "immobile"
+                row["state_group"] = "immobile"
+
+
+def _lis_rescue_condition(row: Mapping[str, Any]) -> bool:
+    """局部补救三组条件之一命中即可（仅 .28≤p<.35 的行参与）。"""
+
+    aspect = float(row["lis_aspect_ratio"])
+    score = float(row["lis_motion_score"])
+    f = float(row["lis_f"])
+    s = float(row["lis_s"])
+    r = float(row["lis_r"])
+    p = float(row["lis_peripheral_d"])
+    h = float(row["lis_h"])
+    b = float(row["lis_b"])
+    g = float(row["lis_g"])
+    if aspect >= 1.55 and score >= .45 and f >= 20 and s <= 6:
+        return True
+    if (aspect >= 1.10 and score >= .32 and r >= .026 and p >= .010
+            and h >= .006 and f >= 15 and s <= 6.5 and b >= .30
+            and g <= .012):
+        return True
+    if (aspect >= 1.70 and score >= .45 and r >= .025 and p >= .016
+            and h >= .025 and f >= 14 and s <= 12 and b >= .48 and g <= .010):
+        return True
+    return False
+
+
+def _lis_rescue(group: list[dict], rescue_gap_s: float, before_s: float,
+                after_s: float) -> None:
+    """局部微动补救：候选夹心、间隙填充、前后扩展；不跨组不造位置。"""
+
+    for row in group:
+        prior = float(row["lis_motion_prior"])
+        raw = bool(.28 <= prior < .35 and _lis_rescue_condition(row))
+        row["lis_rescue_raw"] = raw
+        row["lis_rescue"] = False
+    raw_positions = [index for index, row in enumerate(group)
+                     if row["lis_rescue_raw"]]
+    if not raw_positions:
+        return
+    # 夹心：两段候选之间严格短于补救间隙的连续非候选行补成候选。
+    for left, right in zip(raw_positions, raw_positions[1:]):
+        between = group[left + 1:right]
+        if not between:
+            continue
+        duration = (float(between[-1]["interval_end_s"])
+                    - float(between[0]["interval_start_s"]))
+        if duration < float(rescue_gap_s) - 1e-9:
+            for row in between:
+                row["lis_rescue_raw"] = True
+    # 候选段前后扩展：与 [起点−before, 终点+after) 有正交集的本组曝光。
+    filled_positions = [index for index, row in enumerate(group)
+                        if row["lis_rescue_raw"]]
+    blocks = []
+    run = [filled_positions[0]]
+    for index in filled_positions[1:]:
+        if index == run[-1] + 1:
+            run.append(index)
+        else:
+            blocks.append(run)
+            run = [index]
+    blocks.append(run)
+    for block in blocks:
+        start = float(group[block[0]]["interval_start_s"]) - float(before_s)
+        end = float(group[block[-1]]["interval_end_s"]) + float(after_s)
+        for row in group:
+            overlap = (min(float(row["interval_end_s"]), end)
+                       - max(float(row["interval_start_s"]), start))
+            if overlap > 1e-9:
+                row["lis_rescue"] = True
+    for row in group:
+        if row["lis_rescue"]:
+            row["state"] = "struggling"
+            row["state_group"] = "struggling"
+
+
+def derive_lis_features(rows: Sequence[dict], options: Mapping[str, Any]
+                        ) -> dict:
+    """lis 完整派生：滚动量 → 阈值/评分 → 状态机 → 夹心 → 补救。"""
+
+    ordered = sorted(rows, key=lambda item: (item["time_s"], item["frame"]))
+    pairs = [row for row in ordered
+             if row.get("in_window") and row.get("feature_ready")]
+    groups = _groups(pairs)
+    for group in groups:
+        _lis_rolling(group)
+    info = lis_score_rows(ordered)
+    for row in ordered:
+        if not row.get("in_window"):
+            row["state"] = "outside"
+            row["state_group"] = "outside"
+        elif not row.get("feature_ready"):
+            row["state"] = "unknown"
+            row["state_group"] = "unknown"
+    for group in groups:
+        _run_lis_group(group, info["thresholds"], info["low_information"])
+    rescue_enabled = bool(options.get("lis_rescue_enabled"))
+    for group in groups:
+        _lis_sandwich(group, float(options.get("lis_min_struggle_s") or 0.3))
+        if rescue_enabled:
+            _lis_rescue(group, float(options.get("lis_rescue_gap_s") or 1.0),
+                        float(options.get("lis_rescue_before_s") or 0.7),
+                        float(options.get("lis_rescue_after_s") or 0.3))
+        else:
+            for row in group:
+                row["lis_rescue_raw"] = False
+                row["lis_rescue"] = False
+    for row in ordered:
+        state = row.get("state") or "unknown"
+        if state not in ("unknown", "outside"):
+            row["state_group"] = state
+        row["is_struggling"] = (None if state in ("unknown", "outside")
+                                else state == "struggling")
+        row["is_swinging"] = False
+    return info
+
+
 # -- 事件与汇总 ----------------------------------------------------------
 
 def build_events(rows: Sequence[Mapping[str, Any]], unit_id: str,
-                 unit_name: str) -> list[dict]:
+                 unit_name: str, *, confirm_swing: bool = True) -> list[dict]:
     events: list[dict] = []
     previous = None
     sequence = 0
@@ -772,6 +1253,9 @@ def build_events(rows: Sequence[Mapping[str, Any]], unit_id: str,
                 confirmed = moment
                 if row.get("state") == "swing" and row.get("swing_confirmed_at"):
                     confirmed = float(row["swing_confirmed_at"])
+                if not confirm_swing:
+                    # lis 是离线分段：不声称某帧实时确认。
+                    confirmed = None
                 events.append({
                     "event_id": f"{unit_id}:{'struggling' if row['state_group'] == 'struggling' else 'immobile'}_transition:{sequence}",
                     "unit_id": unit_id,
@@ -791,7 +1275,8 @@ def build_events(rows: Sequence[Mapping[str, Any]], unit_id: str,
 
 def summarize(rows: Sequence[Mapping[str, Any]], unit: Mapping[str, Any],
               window: timeline.Window, info: Mapping[str, Any],
-              events: Sequence[Mapping[str, Any]]) -> dict:
+              events: Sequence[Mapping[str, Any]], *,
+              mode: str = "classic") -> dict:
     total = immobility = struggling = swing = detected_time = 0.0
     total_frames = detected_frames = 0
     for row in rows:
@@ -817,16 +1302,33 @@ def summarize(rows: Sequence[Mapping[str, Any]], unit: Mapping[str, Any],
     struggling_events = sum(1 for event in events
                             if event["kind"] == "struggling_transition")
     latency = None
-    for event in events:
-        if event["kind"] == "immobile_transition":
-            start = float(window.start_s) if window.known else 0.0
-            latency = float(event["time_s"]) - start
-            break
+    if mode != "lis":
+        # 首次经典转变潜伏期在 lis 恒为 null。
+        for event in events:
+            if event["kind"] == "immobile_transition":
+                start = float(window.start_s) if window.known else 0.0
+                latency = float(event["time_s"]) - start
+                break
     immobility_bouts = _bouts(rows, "immobile")
     struggling_bouts = _bouts(rows, "struggling")
 
     def percent(value: float) -> float | None:
         return timeline.ratio(value * 100.0, total)
+
+    if mode == "lis":
+        threshold_block = {
+            key: {name: info["thresholds"][key][name]
+                  for name in ("low", "mid", "high", "very_high")}
+            for key in ("r", "p", "z", "h", "f", "s", "g", "b")}
+        estimated = True
+    else:
+        threshold_block = {
+            "flow_thr_hi": info["flow_thr_hi"],
+            "flow_thr_lo": info["flow_thr_lo"],
+            "speed_std_thr_hi": info["speed_thr_hi"],
+            "speed_std_thr_lo": info["speed_thr_lo"],
+        }
+        estimated = bool(info["estimated"])
 
     summary = {
         "unit_id": unit.get("id"),
@@ -855,13 +1357,8 @@ def summarize(rows: Sequence[Mapping[str, Any]], unit: Mapping[str, Any],
         "latency_to_immobility_s": latency,
         "analysis_window_start_s": window.start_s if window.known else None,
         "analysis_window_end_s": window.end_s if window.known else None,
-        "thresholds": {
-            "flow_thr_hi": info["flow_thr_hi"],
-            "flow_thr_lo": info["flow_thr_lo"],
-            "speed_std_thr_hi": info["speed_thr_hi"],
-            "speed_std_thr_lo": info["speed_thr_lo"],
-        },
-        "threshold_estimated": bool(info["estimated"]),
+        "thresholds": threshold_block,
+        "threshold_estimated": estimated,
         "threshold_samples": int(info["samples"]),
     }
     for key in OPTION_KEYS:
@@ -894,7 +1391,13 @@ def _clear_pair(row: dict) -> None:
     for key in ("flow_mean_px", "flow_p50_px", "flow_p90_px", "flow_max_px",
                 "flow_std_px", "flow_coherence", "flow_dispersion",
                 "distance_px", "speed_nominal_mm_s",
-                "speed_mm_s", "flow_p90_mm_s", "flow_mean_mm_s"):
+                "speed_mm_s", "flow_p90_mm_s", "flow_mean_mm_s",
+                "lis_r", "lis_mask_residual", "lis_gray_mean_d",
+                "lis_peripheral_d", "lis_core_d", "lis_core_ratio",
+                "lis_z", "lis_hu_distance", "lis_body_length_px",
+                "lis_aspect_ratio", "lis_solidity", "lis_extent",
+                "lis_displacement_ratio", "lis_segmentation_bad",
+                "lis_climbing_suspected"):
         row[key] = None
 
 
@@ -943,6 +1446,7 @@ def analyze(context: Any) -> AnalysisResult:
         unit_id = unit["id"]
         geometry = unit.get("geometry") or {}
         options = unit.get("options") or {}
+        mode = str(options.get("mode", "classic"))
         first_seen = timeline.first_seen_in_window(
             KEY, captured[unit_id], video_window, geometry)
         window = timeline.resolve_unit_window(
@@ -951,46 +1455,82 @@ def analyze(context: Any) -> AnalysisResult:
         _filter_pairs(rows, window)
 
         scale, line_px = activity.line_scale(geometry.get("body_line"))
-        arena_points = activity.shape_points(geometry.get("arena"))
-        arena_height = max(1.0, max(point[1] for point in arena_points)
-                           - min(point[1] for point in arena_points))
-        thresholds = {
-            "flow_hi": float(options["flow_thr_hi"]),
-            "flow_lo": float(options["flow_thr_lo"]),
-            "speed_hi": float(options["speed_std_thr_hi"]),
-            "speed_lo": float(options["speed_std_thr_lo"]),
-        }
-        info = derive_features(
-            rows, arena_height, thresholds,
-            estimate=bool(options.get("auto_behavior_threshold")),
-            sensitivity=float(options.get("behavior_threshold_sensitivity") or 0.0))
-        classic_states(rows, flow_hi=info["flow_thr_hi"],
-                       flow_lo=info["flow_thr_lo"],
-                       speed_hi=info["speed_thr_hi"],
-                       speed_lo=info["speed_thr_lo"])
-        unit_events = build_events(rows, unit_id, unit.get("name") or "")
-        unit_summary = summarize(rows, unit, window, info, unit_events)
+        if mode == "lis":
+            info = derive_lis_features(rows, options)
+            unit_events = build_events(rows, unit_id,
+                                       unit.get("name") or "",
+                                       confirm_swing=False)
+            unit_summary = summarize(rows, unit, window, info, unit_events,
+                                     mode="lis")
+        else:
+            arena_points = activity.shape_points(geometry.get("arena"))
+            arena_height = max(1.0, max(point[1] for point in arena_points)
+                               - min(point[1] for point in arena_points))
+            thresholds = {
+                "flow_hi": float(options["flow_thr_hi"]),
+                "flow_lo": float(options["flow_thr_lo"]),
+                "speed_hi": float(options["speed_std_thr_hi"]),
+                "speed_lo": float(options["speed_std_thr_lo"]),
+            }
+            info = derive_features(
+                rows, arena_height, thresholds,
+                estimate=bool(options.get("auto_behavior_threshold")),
+                sensitivity=float(
+                    options.get("behavior_threshold_sensitivity") or 0.0))
+            classic_states(rows, flow_hi=info["flow_thr_hi"],
+                           flow_lo=info["flow_thr_lo"],
+                           speed_hi=info["speed_thr_hi"],
+                           speed_lo=info["speed_thr_lo"])
+            unit_events = build_events(rows, unit_id, unit.get("name") or "")
+            unit_summary = summarize(rows, unit, window, info, unit_events)
 
         observations.extend(rows)
         events.extend(unit_events)
         summary.append(unit_summary)
-        unit_metadata[unit_id] = {
-            "body_length_mm": activity.BODY_LENGTH_MM,
-            "mm_per_px": scale,
-            "body_line_px": line_px,
-            "coordinate_unit": "mm",
-            "thresholds": unit_summary["thresholds"],
-            "auto_threshold": bool(options.get("auto_behavior_threshold")),
-            "threshold_estimated": bool(info["estimated"]),
-            "threshold_samples": int(info["samples"]),
-            "speed_sources": {
-                "nominal": "px × mm/px × analysis fps",
-                "actual": "px × mm/px ÷ source dt",
-            },
-            "state_labels": ["struggling", "immobile", "swing", "unknown",
-                             "outside"],
-            "immobility_includes_swing": True,
-        }
+        if mode == "lis":
+            priors = [float(row["lis_motion_prior"]) for row in rows
+                      if is_number(row.get("lis_motion_prior"))]
+            mode_counts: dict[str, int] = {}
+            for row in rows:
+                key = str(row.get("lis_score_mode") or "")
+                if key:
+                    mode_counts[key] = mode_counts.get(key, 0) + 1
+            unit_metadata[unit_id] = {
+                "mode": "lis",
+                "body_length_mm": activity.BODY_LENGTH_MM,
+                "mm_per_px": scale,
+                "body_line_px": line_px,
+                "coordinate_unit": "mm",
+                "thresholds": info["thresholds"],
+                "motion_prior": {"min": min(priors) if priors else None,
+                                 "max": max(priors) if priors else None},
+                "score_mode": mode_counts,
+                "samples": int(info["samples"]),
+                "low_information": bool(info["low_information"]),
+                "rotate_align": bool(options.get("lis_rotate_align")),
+                "rescue_enabled": bool(options.get("lis_rescue_enabled")),
+                "state_labels": ["struggling", "immobile", "unknown",
+                                 "outside"],
+            }
+        else:
+            unit_metadata[unit_id] = {
+                "mode": "classic",
+                "body_length_mm": activity.BODY_LENGTH_MM,
+                "mm_per_px": scale,
+                "body_line_px": line_px,
+                "coordinate_unit": "mm",
+                "thresholds": unit_summary["thresholds"],
+                "auto_threshold": bool(options.get("auto_behavior_threshold")),
+                "threshold_estimated": bool(info["estimated"]),
+                "threshold_samples": int(info["samples"]),
+                "speed_sources": {
+                    "nominal": "px × mm/px × analysis fps",
+                    "actual": "px × mm/px ÷ source dt",
+                },
+                "state_labels": ["struggling", "immobile", "swing", "unknown",
+                                 "outside"],
+                "immobility_includes_swing": True,
+            }
         if not window.known:
             warnings.append("未检测到动物，无法确定相对时间窗："
                             + str(unit.get("name") or unit_id))
@@ -1019,13 +1559,10 @@ def preview_analysis(*, asset: Mapping[str, Any], video: Mapping[str, Any],
 
     from ..schema import AnalysisContext, new_id
 
-    # 与正式分析同一规则：lis 明确拒绝，不静默按 classic 计算。
     options = unit.get("options") or {}
-    mode = options.get("mode", "classic")
-    if mode != "classic":
-        message = ("微动残差模式尚未接入，本块只能运行经典行为"
-                   if mode == "lis" else "未知行为算法")
-        raise ValidationError(message, "options.mode")
+    mode = str(options.get("mode", "classic"))
+    if mode not in MODES:
+        raise ValidationError("未知行为算法", "options.mode")
 
     metadata = asset.get("metadata") or {}
     window = {"start_s": float(start_s), "end_s": float(end_s)}
@@ -1065,25 +1602,33 @@ def preview_analysis(*, asset: Mapping[str, Any], video: Mapping[str, Any],
     _filter_pairs(rows, unit_window)
 
     scale, _ = activity.line_scale(geometry.get("body_line"))
-    arena_points = activity.shape_points(geometry.get("arena"))
-    arena_height = max(1.0, max(point[1] for point in arena_points)
-                       - min(point[1] for point in arena_points))
-    thresholds = {
-        "flow_hi": float(options["flow_thr_hi"]),
-        "flow_lo": float(options["flow_thr_lo"]),
-        "speed_hi": float(options["speed_std_thr_hi"]),
-        "speed_lo": float(options["speed_std_thr_lo"]),
-    }
-    info = derive_features(
-        rows, arena_height, thresholds,
-        estimate=bool(options.get("auto_behavior_threshold")),
-        sensitivity=float(options.get("behavior_threshold_sensitivity") or 0.0))
-    classic_states(rows, flow_hi=info["flow_thr_hi"],
-                   flow_lo=info["flow_thr_lo"],
-                   speed_hi=info["speed_thr_hi"],
-                   speed_lo=info["speed_thr_lo"])
-    events = build_events(rows, unit["id"], unit.get("name") or "")
-    summary = summarize(rows, unit, unit_window, info, events)
+    if mode == "lis":
+        info = derive_lis_features(rows, options)
+        events = build_events(rows, unit["id"], unit.get("name") or "",
+                              confirm_swing=False)
+        summary = summarize(rows, unit, unit_window, info, events,
+                            mode="lis")
+    else:
+        arena_points = activity.shape_points(geometry.get("arena"))
+        arena_height = max(1.0, max(point[1] for point in arena_points)
+                           - min(point[1] for point in arena_points))
+        thresholds = {
+            "flow_hi": float(options["flow_thr_hi"]),
+            "flow_lo": float(options["flow_thr_lo"]),
+            "speed_hi": float(options["speed_std_thr_hi"]),
+            "speed_lo": float(options["speed_std_thr_lo"]),
+        }
+        info = derive_features(
+            rows, arena_height, thresholds,
+            estimate=bool(options.get("auto_behavior_threshold")),
+            sensitivity=float(
+                options.get("behavior_threshold_sensitivity") or 0.0))
+        classic_states(rows, flow_hi=info["flow_thr_hi"],
+                       flow_lo=info["flow_thr_lo"],
+                       speed_hi=info["speed_thr_hi"],
+                       speed_lo=info["speed_thr_lo"])
+        events = build_events(rows, unit["id"], unit.get("name") or "")
+        summary = summarize(rows, unit, unit_window, info, events)
     state_at_time = None
     if time_s is not None:
         for row in rows:
@@ -1091,7 +1636,8 @@ def preview_analysis(*, asset: Mapping[str, Any], video: Mapping[str, Any],
                     < float(row["interval_end_s"]) - 1e-9):
                 state_at_time = row.get("state")
                 break
-    return {
+    behavior = {
+        "mode": mode,
         "start_s": float(start_s),
         "end_s": float(end_s),
         "window_start_s": (unit_window.start_s if unit_window.known else None),
@@ -1105,7 +1651,12 @@ def preview_analysis(*, asset: Mapping[str, Any], video: Mapping[str, Any],
         "events": len(events),
         "mm_per_px": scale,
         "thresholds": summary["thresholds"],
-        "threshold_estimated": bool(info["estimated"]),
+        "threshold_estimated": bool(summary["threshold_estimated"]),
         "threshold_samples": int(info["samples"]),
         "state_at_time": state_at_time,
     }
+    if mode == "lis":
+        # 短段阈值样本来自预览范围自身，与全程分析的估计可能不同。
+        behavior["threshold_note"] = "行为预览为短段阈值估计，与全程分析可能不同"
+        behavior["low_information"] = bool(info["low_information"])
+    return behavior

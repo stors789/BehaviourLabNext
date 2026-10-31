@@ -85,14 +85,25 @@
               {% else %}未确定{% endif %}
             </td></tr>
             <tr><th>实际阈值</th><td>
+              {% if s.mode == "lis" %}
+              {% for key, label in [("r", "残差R"), ("p", "周边P"), ("z", "形变Z"), ("h", "高频H"), ("f", "光流F"), ("s", "速度S"), ("g", "整体g"), ("b", "周期b")] -%}
+              {{ label }} 低/中/高 {{ num(s.thresholds[key].low, 3) }} / {{ num(s.thresholds[key].mid, 3) }} / {{ num(s.thresholds[key].high, 3) }}{% if not loop.last %} · {% endif %}
+              {%- endfor %}
+              （分位数估计，{{ s.threshold_samples }} 个样本）
+              {% else %}
               光流高/低 {{ num(s.thresholds.flow_thr_hi, 3) }} / {{ num(s.thresholds.flow_thr_lo, 3) }} mm/s ·
               速度波动高/低 {{ num(s.thresholds.speed_std_thr_hi, 3) }} / {{ num(s.thresholds.speed_std_thr_lo, 3) }} mm/s
               {% if s.threshold_estimated %}（自动估计，{{ s.threshold_samples }} 个样本）{% else %}（默认，{{ s.threshold_samples }} 个样本）{% endif %}
+              {% endif %}
             </td></tr>
             <tr><th>参数</th><td>
+              {% if s.mode == "lis" %}
+              微动残差（先测量后评分） · 体长线 60 mm
+              {% else %}
               {{ s.mode }} · 灵敏度 {{ num(s.behavior_threshold_sensitivity, 2) }} ·
               自动阈值 {{ "开" if s.auto_behavior_threshold else "关" }} ·
               体长线 60 mm
+              {% endif %}
             </td></tr>
           </tbody>
         </table>

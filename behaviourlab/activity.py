@@ -402,3 +402,244 @@ def estimate_high_low(values: Sequence[float], original_high: float,
                cap * float(original_high))
     low = max(0.001, min(0.65 * high, max(0.4 * high, p35)))
     return float(high), float(low)
+
+
+# -- LIS 微动残差：配准、残差量与分位数（纯数值，夹具可直接核对） ----------
+
+LIS_ROTATE_MAX_DEG = 30.0
+LIS_HU_SCALE = 25.0
+
+
+def _fold_angle(degrees: float) -> float:
+    """角差折到 [-90°, 90°)。"""
+
+    return (float(degrees) + 90.0) % 180.0 - 90.0
+
+
+def lis_principal_angle(mask: np.ndarray) -> float | None:
+    """身体像素主轴方向角（度，atan2(dy, dx)）；像素不足返回 None。"""
+
+    points = np.column_stack(np.nonzero(mask))
+    if points.shape[0] < 5:
+        return None
+    centered = points.astype(np.float64) - points.mean(axis=0)
+    cov = centered.T @ centered / max(points.shape[0] - 1, 1)
+    values, vectors = np.linalg.eigh(cov)
+    principal = vectors[:, int(np.argmax(values))]
+    return math.degrees(math.atan2(float(principal[0]), float(principal[1])))
+
+
+def lis_register(prev_gray: np.ndarray, cur_gray: np.ndarray,
+                 prev_mask: np.ndarray, cur_mask: np.ndarray,
+                 prev_center: Sequence[float], cur_center: Sequence[float],
+                 prev_angle: float | None, cur_angle: float | None, *,
+                 rotate_align: bool) -> tuple[np.ndarray, np.ndarray, float]:
+    """平移上一图至当前质心；可选主轴旋转对齐（角差 >30° 不旋转）。
+
+    灰度双线性、掩膜最近邻插值，图像外填 0。返回 (对齐灰度, 对齐掩膜,
+    实际使用的旋转角差)。
+    """
+
+    height, width = cur_gray.shape[:2]
+    delta = 0.0
+    if rotate_align and prev_angle is not None and cur_angle is not None:
+        delta = _fold_angle(float(cur_angle) - float(prev_angle))
+        if abs(delta) > LIS_ROTATE_MAX_DEG:
+            delta = 0.0
+    cos_t = math.cos(math.radians(delta))
+    sin_t = math.sin(math.radians(delta))
+    px, py = float(prev_center[0]), float(prev_center[1])
+    tx, ty = float(cur_center[0]), float(cur_center[1])
+    # p → R·(p − prev_center) + cur_center
+    matrix = np.array([
+        [cos_t, -sin_t, tx - (cos_t * px - sin_t * py)],
+        [sin_t, cos_t, ty - (sin_t * px + cos_t * py)],
+    ], dtype=np.float64)
+    aligned_gray = cv2.warpAffine(prev_gray, matrix, (width, height),
+                                  flags=cv2.INTER_LINEAR, borderValue=0)
+    aligned_mask = cv2.warpAffine(prev_mask, matrix, (width, height),
+                                  flags=cv2.INTER_NEAREST, borderValue=0)
+    return aligned_gray, aligned_mask, delta
+
+
+def lis_residual(aligned_gray: np.ndarray, aligned_mask: np.ndarray,
+                 cur_gray: np.ndarray, cur_mask: np.ndarray) -> dict:
+    """掩膜残差、灰差图与综合残差 R = max(掩膜残差, mean_U(D))。"""
+
+    union = (aligned_mask > 0) | (cur_mask > 0)
+    inter = (aligned_mask > 0) & (cur_mask > 0)
+    union_count = int(union.sum())
+    mask_residual = 1.0 - (int(inter.sum()) / max(union_count, 1))
+    diff = np.abs(cur_gray.astype(np.float32)
+                  - aligned_gray.astype(np.float32)) / 255.0
+    gray_mean = float(diff[union].mean()) if union_count else 0.0
+    return {"mask_residual": mask_residual, "gray_mean_d": gray_mean,
+            "r": max(mask_residual, gray_mean), "diff": diff}
+
+
+def lis_body_length(mask: np.ndarray, bbox: Sequence[float]) -> float:
+    """L = max(主轴投影 P95−P5, 框最长边)。"""
+
+    projected = 0.0
+    points = np.column_stack(np.nonzero(mask)).astype(np.float64)
+    if points.shape[0] >= 5:
+        centered = points - points.mean(axis=0)
+        cov = centered.T @ centered / max(points.shape[0] - 1, 1)
+        values, vectors = np.linalg.eigh(cov)
+        axis = vectors[:, int(np.argmax(values))]
+        projection = centered @ axis
+        projected = float(np.percentile(projection, 95)
+                          - np.percentile(projection, 5))
+    _, _, width, height = (float(v) for v in bbox)
+    return max(projected, width, height)
+
+
+def lis_core_peripheral(mask: np.ndarray, length_px: float,
+                        diff: np.ndarray) -> dict:
+    """以 .08L（最近整数、≥3、偶数加 1）椭圆核腐蚀分核心/周边。
+
+    任一区为空就用整个身体。返回核心/周边灰差均值与比值 r。
+    """
+
+    body = mask > 0
+    if not body.any():
+        return {"core_mean": 0.0, "peripheral_mean": 0.0, "ratio": 0.0,
+                "kernel": 0}
+    size = int(round(0.08 * float(length_px)))
+    size = max(3, size)
+    if size % 2 == 0:
+        size += 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+    core = cv2.erode(mask, kernel) > 0
+    peripheral = body & ~core
+    if not core.any() or not peripheral.any():
+        core = body
+        peripheral = body
+    core_mean = float(diff[core].mean())
+    peripheral_mean = float(diff[peripheral].mean())
+    return {"core_mean": core_mean, "peripheral_mean": peripheral_mean,
+            "ratio": peripheral_mean / max(core_mean, 1e-6), "kernel": size}
+
+
+def lis_hu_vector(mask: np.ndarray) -> list[float] | None:
+    """Hu 矩的有符号对数向量 −sign(h)·log10(max(|h|,1e-30))。"""
+
+    if not isinstance(mask, np.ndarray) or not (mask > 0).any():
+        return None
+    moments = cv2.moments(mask, binaryImage=True)
+    raw = cv2.HuMoments(moments).flatten()
+    return [-math.copysign(math.log10(max(abs(float(value)), 1e-30)),
+                           float(value)) for value in raw]
+
+
+def lis_hu_distance(cur: Sequence[float] | None,
+                    prev: Sequence[float] | None) -> float:
+    """Hu 对数向量的欧氏距离；任一侧缺失按 0。"""
+
+    if cur is None or prev is None:
+        return 0.0
+    return float(np.linalg.norm(np.asarray(cur, dtype=np.float64)
+                                - np.asarray(prev, dtype=np.float64)))
+
+
+def lis_deformation(cur: Mapping[str, float], prev: Mapping[str, float],
+                    hu_distance: float, mask_residual: float) -> float:
+    """形变量 Z：七量截到 [0,1] 后的中位数。"""
+
+    parts = []
+    for key in ("area", "perimeter", "aspect"):
+        base = max(abs(float(prev[key])), 1e-6)
+        parts.append(min(1.0, abs(float(cur[key]) - float(prev[key])) / base))
+    for key in ("solidity", "fill"):
+        parts.append(min(1.0, abs(float(cur[key]) - float(prev[key]))))
+    parts.append(min(1.0, max(0.0, hu_distance / LIS_HU_SCALE)))
+    parts.append(min(1.0, max(0.0, mask_residual)))
+    return float(np.median(parts))
+
+
+def lis_median_diff(values: Sequence[float]) -> float:
+    """相邻差绝对值的中位数；不足两条为 0。"""
+
+    if len(values) < 2:
+        return 0.0
+    diffs = [abs(float(b) - float(a)) for a, b in zip(values, values[1:])]
+    return float(np.median(diffs))
+
+
+def lis_periodicity(xs: Sequence[float], ys: Sequence[float],
+                    times: Sequence[float]) -> float:
+    """最近窗的周期量 b：零延迟归一自相关在 .2–1 秒延迟的最大值。
+
+    两轴各减中位数后计算取较大者；少于 8 条或跨度 ≤1 秒为 0。
+    采样率按 (条数−1)/真实跨度 估计，延迟范围换算为帧 lag。
+    """
+
+    count = len(times)
+    if count < 8:
+        return 0.0
+    span = float(times[-1]) - float(times[0])
+    if span <= 1.0:
+        return 0.0
+    fps_est = (count - 1) / span
+    min_lag = max(1, int(math.ceil(0.2 * fps_est)))
+    max_lag = min(count - 2, int(math.floor(1.0 * fps_est)))
+    if max_lag < min_lag:
+        return 0.0
+    best = 0.0
+    for series in (xs, ys):
+        array = np.asarray(series, dtype=np.float64)
+        array = array - float(np.median(array))
+        denominator = float(np.dot(array, array))
+        if denominator <= 1e-12:
+            continue
+        full = np.correlate(array, array, mode="full")[count - 1:]
+        for lag in range(min_lag, max_lag + 1):
+            best = max(best, float(full[lag]) / denominator)
+    return max(0.0, min(1.0, best))
+
+
+def lis_thresholds(values: Sequence[float]) -> dict:
+    """线性分位数阈值：low=min(q50, max(0, q20+.5·MAD))、mid=q50、
+    high=q80、very_high=q90；q80−q20<1e-4 记 low_information。"""
+
+    array = np.asarray(values, dtype=np.float64)
+    q20, q25, q50, q75, q80, q90 = (
+        float(np.percentile(array, q)) for q in (20, 25, 50, 75, 80, 90))
+    mad = float(np.median(np.abs(array - q50)))
+    low = min(q50, max(0.0, q20 + 0.5 * mad))
+    return {"q20": q20, "q25": q25, "q50": q50, "q75": q75, "q80": q80,
+            "q90": q90, "mad": mad, "low": low, "mid": q50, "high": q80,
+            "very_high": q90, "low_information": bool((q80 - q20) < 1e-4)}
+
+
+def lis_normalize(value: float, q25: float, q90: float) -> float:
+    """nX = clip((X−q25)/max(q90−q25, 1e-6), 0, 1)。"""
+
+    span = max(float(q90) - float(q25), 1e-6)
+    return max(0.0, min(1.0, (float(value) - float(q25)) / span))
+
+
+def lis_motion_prior(f_q50: float, f_q90: float, s_q50: float,
+                     s_q90: float) -> float:
+    """运动先验 p = max(.5×[c(Fq50/45)+c(Sq50/25)], .375×[c(Fq90/90)+c(Sq90/40)])。"""
+
+    def clamp(value: float, reference: float) -> float:
+        return max(0.0, min(1.0, float(value) / max(float(reference), 1e-9)))
+
+    slow = 0.5 * (clamp(f_q50, 45.0) + clamp(s_q50, 25.0))
+    fast = 0.375 * (clamp(f_q90, 90.0) + clamp(s_q90, 40.0))
+    return max(slow, fast)
+
+
+def lis_above(value: float, threshold: float) -> bool:
+    """"高于 a"：值 > a + max(1e-6, .02|a|)。"""
+
+    threshold = float(threshold)
+    return float(value) > threshold + max(1e-6, 0.02 * abs(threshold))
+
+
+def lis_not_above(value: float, threshold: float) -> bool:
+    """"不高于 a"：值 ≤ a + max(1e-6, .05|a|)。"""
+
+    threshold = float(threshold)
+    return float(value) <= threshold + max(1e-6, 0.05 * abs(threshold))

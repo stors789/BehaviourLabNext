@@ -498,6 +498,9 @@
         + value(behavior.immobility_time_s) + " / 挣扎 "
         + value(behavior.struggling_time_s) + " / 不确定 "
         + value(behavior.uncertain_time_s) + " s");
+      if (typeof behavior.threshold_note === "string" && behavior.threshold_note) {
+        lines.push(behavior.threshold_note);
+      }
     }
     warnings.forEach((text) => lines.push(text));
     return { tone, text: lines.join("\n") };

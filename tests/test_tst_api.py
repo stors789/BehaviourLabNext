@@ -129,18 +129,26 @@ def test_tst_analyze_requires_geometry_and_classic_mode(client, store, tmp_path,
     assert "videos[0].units[0].geometry.body_line" in fields
     assert store.list_jobs() == []
 
-    # lis 参数可保存，最终校验拒绝，不静默按 classic 跑。
+    # lis 参数可保存，接入后走 lis 执行分支，不再拒绝。
     values = dict(tst.DEFAULTS)
     values["mode"] = "lis"
     asset2, draft2 = seed(store, tmp_path, options=values)
     saved = client.put(f"/api/drafts/{draft2['id']}",
                        json={"videos": draft2["videos"]})
     assert saved.status_code == 200
-    blocked = client.post(f"/api/drafts/{draft2['id']}/analyze")
-    assert blocked.status_code == 400
-    messages = [issue["message"]
-                for issue in blocked.get_json()["error"]["fields"]]
-    assert any("微动残差模式尚未接入" in message for message in messages)
+    from behaviourlab import media as media_module
+
+    monkeypatch.setattr(media_module, "VideoSource", PreviewSource)
+    monkeypatch.setattr(
+        "behaviourlab.engine.media.probe_video",
+        lambda path: {"width": 200, "height": 200, "duration_s": 1.0,
+                      "fps": 10.0, "frame_count": 10})
+    started = client.post(f"/api/drafts/{draft2['id']}/analyze")
+    assert started.status_code == 201, started.get_json()
+    data = started.get_json()["data"]
+    assert data["jobs"] and data["jobs"][0]["status"] == "done"
+    manifest = data["jobs"][0]["manifest"]
+    assert manifest["metadata"]["units"]["e" * 32]["mode"] == "lis"
 
 
 def test_relative_unit_window_previews_configured_range():
@@ -217,12 +225,12 @@ def test_tst_behavior_preview_runs_core(client, store, tmp_path, monkeypatch):
                                            "speed_std_thr_lo"}
 
 
-def test_tst_behavior_preview_rejects_lis_mode(client, store, tmp_path,
-                                               monkeypatch):
+def test_tst_behavior_preview_runs_lis_mode(client, store, tmp_path,
+                                            monkeypatch):
     from behaviourlab import media, preview
     from behaviourlab.media import FrameInfo
 
-    # lis 保存照常，但行为预览也必须明确拒绝，不能静默按 classic 跑。
+    # lis 行为预览走同一核心；短段阈值样本来自预览范围并明确说明差异。
     values = dict(tst.DEFAULTS)
     values["mode"] = "lis"
     asset, draft = seed(store, tmp_path, options=values)
@@ -241,10 +249,13 @@ def test_tst_behavior_preview_rejects_lis_mode(client, store, tmp_path,
         f"/api/drafts/{draft['id']}/preview",
         json={"asset_id": asset["id"], "unit_id": "e" * 32,
               "time_s": 2.0, "kind": "behavior"})
-    assert response.status_code == 400, response.get_json()
-    fields = response.get_json()["error"]["fields"]
-    assert any(issue["field"] == "options.mode" for issue in fields)
-    assert any("微动残差模式尚未接入" in issue["message"] for issue in fields)
+    assert response.status_code == 201, response.get_json()
+    behavior = response.get_json()["data"]["summary"]["behavior"]
+    assert behavior["mode"] == "lis"
+    assert "短段阈值估计" in behavior["threshold_note"]
+    assert behavior["swing_time_s"] == 0.0
+    assert set(behavior["thresholds"]) == {"r", "p", "z", "h", "f", "s",
+                                           "g", "b"}
 
 
 def test_tst_relative_behavior_preview_uses_configured_range(
