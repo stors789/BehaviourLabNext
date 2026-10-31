@@ -18,4 +18,23 @@ Thumbs.db
 
 # 本地环境与日志
 .env
+.env.*
 *.log
+
+# 工作区数据
+.workbuddy/
+
+# 视频素材
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+
+# 数据库与运行输出
+*.db
+*.sqlite
+*.sqlite3
+output/
+outputs/
+runs/
