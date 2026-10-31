@@ -73,22 +73,34 @@ def write_observations(path: str | Path, observations: Sequence[Mapping[str, Any
     return write_csv(path, observations, columns)
 
 
+def _report_metrics(assay: Any) -> list[dict]:
+    from . import experiments
+
+    if not experiments.exists(assay):
+        return []
+    return list(experiments.get(assay).SPEC.get("metrics") or [])[:5]
+
+
 def _report_markdown(job: Mapping[str, Any], result: Any,
                      manifest: Mapping[str, Any]) -> str:
     lines = [f"# {job.get('assay', '')} 分析报告", ""]
     lines.append(f"- run: {job.get('run_id')}")
     lines.append(f"- job: {job.get('job_id')}")
     lines.append(f"- unit 数: {len(result.summary)}")
-    lines.extend(["", "| 动物 | 中心占比 | 场地内路程 (cm) | 平均速度 (cm/s) |",
-                  "| --- | --- | --- | --- |"])
+    metrics = _report_metrics(job.get("assay"))
+    if not metrics:
+        metrics = [{"key": "center_percent", "label": "中心占比", "unit": "%"},
+                   {"key": "total_distance_cm", "label": "场地内路程", "unit": "cm"},
+                   {"key": "mean_speed_cm_s", "label": "平均速度", "unit": "cm/s"}]
+    headers = ["动物"] + [
+        item["label"] + (f"（{item['unit']}）" if item.get("unit") else "")
+        for item in metrics]
+    lines.extend(["", "| " + " | ".join(headers) + " |",
+                  "| " + " | ".join(["---"] * len(headers)) + " |"])
     for row in result.summary:
-        lines.append(
-            "| {name} | {center} | {distance} | {speed} |".format(
-                name=row.get("unit_name") or row.get("unit_id"),
-                center=_fmt(row.get("center_percent")),
-                distance=_fmt(row.get("total_distance_cm")),
-                speed=_fmt(row.get("mean_speed_cm_s")),
-            ))
+        cells = [str(row.get("unit_name") or row.get("unit_id"))]
+        cells.extend(_fmt(row.get(item["key"])) for item in metrics)
+        lines.append("| " + " | ".join(cells) + " |")
     if result.warnings:
         lines.extend(["", "## 警告", ""])
         lines.extend(f"- {text}" for text in result.warnings)

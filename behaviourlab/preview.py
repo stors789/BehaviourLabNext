@@ -221,7 +221,12 @@ def _scope(assay: str, video: Mapping[str, Any], unit: Mapping[str, Any],
     if kind == "detection":
         return {"start_s": time_s, "end_s": time_s, "frame_count": 1,
                 "mode": "frame"}
-    if is_manual_path(assay, options.get("mode"), unit.get("manual")):
+    unit_window = unit.get("window")
+    relative = (isinstance(unit_window, Mapping)
+                and unit_window.get("mode") == "relative")
+    manual = is_manual_path(assay, options.get("mode"), unit.get("manual"))
+    if manual or relative:
+        # 人工路径与相对单位窗都需要完整配置范围，不能只取 t±1/3 秒。
         scope_end = end_value if end_value is not None else max(start, time_s)
         scope_end = max(start, scope_end)
         return {
@@ -229,7 +234,8 @@ def _scope(assay: str, video: Mapping[str, Any], unit: Mapping[str, Any],
             "end_s": scope_end,
             "duration_s": scope_end - start,
             "mode": "configured",
-            "manual": True,
+            "manual": manual,
+            "relative": relative,
         }
     scope_start = max(start, time_s - 1.0)
     scope_end = time_s + 3.0

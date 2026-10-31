@@ -701,14 +701,16 @@ class ForegroundModel:
             factory = (cv2.createBackgroundSubtractorMOG2 if self.method == "mog2"
                        else cv2.createBackgroundSubtractorKNN)
             self._subtractor = factory(history=500, detectShadows=False)
-        self._cache: dict[tuple, np.ndarray] = {}
+        # 值里保留图像引用：id 只在对象存活期间唯一，引用防止地址被复用后误命中。
+        self._cache: dict[int, tuple[Any, np.ndarray]] = {}
 
     def foreground(self, image: Any) -> np.ndarray:
         gray = to_gray(image)
-        cache_key = (id(image), gray.shape[:2])
+        cache_key = id(image)
         cached = self._cache.get(cache_key)
-        if cached is not None:
-            return cached
+        if (cached is not None and cached[0] is image
+                and cached[1].shape[:2] == gray.shape[:2]):
+            return cached[1]
 
         if self.method == "threshold":
             mask = threshold_foreground(gray, self.settings)
@@ -727,7 +729,7 @@ class ForegroundModel:
             if cv2.countNonZero(mask) >= SHADOW_FRACTION * mask.size:
                 mask = np.zeros_like(mask)
         mask.setflags(write=False)
-        self._cache[cache_key] = mask
+        self._cache[cache_key] = (image, mask)
         if len(self._cache) > 8:
             self._cache.pop(next(iter(self._cache)))
         return mask

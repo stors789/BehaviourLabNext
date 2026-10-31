@@ -143,6 +143,18 @@ def _normalize_videos(videos: Any) -> list[dict]:
     return normalized
 
 
+def _assay_metrics(assay: Any) -> list[dict]:
+    if not experiments.exists(assay):
+        return []
+    return deepcopy(experiments.get(assay).SPEC.get("metrics") or [])
+
+
+def _assay_label(assay: Any) -> str:
+    if not experiments.exists(assay):
+        return str(assay or "").upper()
+    return str(experiments.get(assay).SPEC.get("label") or assay)
+
+
 def _run_payloads(directory: Path) -> list[dict]:
     """读取一次运行的每个任务结果；缺失或损坏时如实标记。"""
 
@@ -187,6 +199,11 @@ def _run_payloads(directory: Path) -> list[dict]:
                               "unit_name": row.get("unit_name"),
                               "summary": row, "figures": {}})
         entry["units"] = units
+        assay = ((entry.get("result") or {}).get("metadata") or {}).get("assay") \
+            or (entry.get("job") or {}).get("assay")
+        entry["assay"] = assay
+        entry["metrics"] = _assay_metrics(assay)
+        entry["assay_label"] = _assay_label(assay)
         payloads.append(entry)
     return payloads
 

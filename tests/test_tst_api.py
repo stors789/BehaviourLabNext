@@ -1,0 +1,127 @@
+"""第 09 块 TST 接口：开始任务校验、结果页概览与指标顺序。"""
+
+from __future__ import annotations
+
+from behaviourlab import worker
+from behaviourlab.experiments import tst
+from behaviourlab.schema import AnalysisResult
+
+ARENA = {"type": "polygon",
+         "points": [[5, 5], [120, 5], [120, 120], [5, 120]]}
+BODY_LINE = {"type": "line", "points": [[10, 10], [70, 10]]}
+
+
+def seed(store, tmp_path, *, geometry=None, options=None):
+    source = tmp_path / "tst.mp4"
+    source.write_bytes(b"placeholder")
+    asset = store.create_asset(
+        name="悬尾.mp4", path=str(source), project_id=None,
+        metadata={"width": 200, "height": 200, "duration_s": 1.0,
+                  "fps": 10.0, "frame_count": 10},
+    )
+    draft = store.create_draft("tst", videos=[{
+        "asset_id": asset["id"],
+        "window": {"start_s": 0.0, "end_s": 1.0},
+        "orientation": 0, "fps_override": None, "sample_fps": None,
+        "units": [{
+            "id": "e" * 32, "name": "小鼠 1", "window": None,
+            "geometry": geometry if geometry is not None else {
+                "arena": ARENA, "body_line": BODY_LINE},
+            "options": dict(tst.DEFAULTS if options is None else options),
+            "detection": {}, "manual": None,
+        }],
+    }])
+    return asset, draft
+
+
+def fake_result() -> AnalysisResult:
+    summary = {
+        "unit_id": "e" * 32, "unit_name": "小鼠 1",
+        "total_time_s": 3.5, "immobility_time_s": 3.4,
+        "struggling_time_s": 0.0, "uncertain_time_s": 0.1,
+        "swing_time_s": 2.0,
+        "immobility_percent": 3.4 / 3.5 * 100.0,
+        "struggling_percent": 0.0, "uncertain_percent": 0.1 / 3.5 * 100.0,
+        "swing_percent": 2.0 / 3.5 * 100.0,
+        "detected_time_s": 3.4, "detected_rate_percent": 3.4 / 3.5 * 100.0,
+        "detected_frames": 34, "total_frames": 35,
+        "immobility_episodes": 0, "struggling_episodes": 0,
+        "immobility_frequency_per_min": 0.0,
+        "struggling_frequency_per_min": 0.0,
+        "immobility_bouts": 2, "struggling_bouts": 0,
+        "latency_to_immobility_s": None,
+        "analysis_window_start_s": 0.0, "analysis_window_end_s": 3.5,
+        "thresholds": {"flow_thr_hi": 50.0, "flow_thr_lo": 35.0,
+                       "speed_std_thr_hi": 40.0, "speed_std_thr_lo": 20.0},
+        "threshold_estimated": False, "threshold_samples": 34,
+        "mode": "classic", "auto_behavior_threshold": False,
+        "behavior_threshold_sensitivity": 0.0,
+    }
+    return AnalysisResult(observations=[], summary=[summary], events=[], bins=[],
+                          warnings=[], metadata={"assay": "tst",
+                                                 "body_length_mm": 60.0})
+
+
+def test_tst_result_page_order_and_labels(client, store, tmp_path, monkeypatch):
+    asset, draft = seed(store, tmp_path)
+    monkeypatch.setattr(
+        "behaviourlab.engine.media.probe_video",
+        lambda path: {"width": 200, "height": 200, "duration_s": 1.0,
+                      "fps": 10.0, "frame_count": 10})
+    monkeypatch.setattr(worker, "run_frozen_job", lambda job: fake_result())
+
+    response = client.post(f"/api/drafts/{draft['id']}/analyze")
+    assert response.status_code == 201, response.get_json()
+    run_id = response.get_json()["data"]["run_id"]
+    page = client.get(f"/results/{run_id}").get_data(as_text=True)
+
+    assert "尾悬实验 / TST" in page
+    labels = ["非挣扎时间（含摆动）", "挣扎时间", "不确定时间",
+              "非挣扎比例", "挣扎比例", "首次挣扎转非挣扎潜伏期（经典）"]
+    positions = [page.index(label) for label in labels]
+    assert positions == sorted(positions)
+    assert "检测时间比例" in page
+    assert "视觉运动规则使用可调经验阈值" in page
+    assert "—" in page  # 潜伏期为空时显示破折号
+
+
+def test_tst_analyze_requires_geometry_and_classic_mode(client, store, tmp_path,
+                                                      monkeypatch):
+    asset, draft = seed(store, tmp_path, geometry={})
+    store.update_draft(draft["id"], {"videos": draft["videos"]})
+    monkeypatch.setattr(
+        "behaviourlab.engine.media.probe_video",
+        lambda path: {"width": 200, "height": 200, "duration_s": 1.0,
+                      "fps": 10.0, "frame_count": 10})
+    response = client.post(f"/api/drafts/{draft['id']}/analyze")
+    assert response.status_code == 400
+    fields = [issue["field"] for issue in response.get_json()["error"]["fields"]]
+    assert "videos[0].units[0].geometry.arena" in fields
+    assert "videos[0].units[0].geometry.body_line" in fields
+    assert store.list_jobs() == []
+
+    # lis 参数可保存，最终校验拒绝，不静默按 classic 跑。
+    values = dict(tst.DEFAULTS)
+    values["mode"] = "lis"
+    asset2, draft2 = seed(store, tmp_path, options=values)
+    saved = client.put(f"/api/drafts/{draft2['id']}",
+                       json={"videos": draft2["videos"]})
+    assert saved.status_code == 200
+    blocked = client.post(f"/api/drafts/{draft2['id']}/analyze")
+    assert blocked.status_code == 400
+    messages = [issue["message"]
+                for issue in blocked.get_json()["error"]["fields"]]
+    assert any("微动残差模式尚未接入" in message for message in messages)
+
+
+def test_relative_unit_window_previews_configured_range():
+    from behaviourlab import preview
+
+    scope = preview._scope(
+        "tst", {"window": {"start_s": 0.0, "end_s": 10.0}},
+        {"window": {"mode": "relative", "offset_s": 0.0, "duration_s": 2.0}},
+        {"mode": "classic"}, 5.0, "behavior", 10.0)
+    assert scope["mode"] == "configured"
+    assert scope["start_s"] == 0.0
+    assert scope["end_s"] == 10.0
+    assert scope["relative"] is True

@@ -266,3 +266,16 @@ def test_shared_foreground_cache_is_read_only():
     with pytest.raises(ValueError):
         first[0, 0] = 0
     assert int(second[40, 60]) == 255
+
+
+def test_foreground_cache_checks_image_identity(monkeypatch):
+    # id() 会被复用：缓存必须核对对象身份，不能只看地址。
+    values = dict(detection.DETECTION_DEFAULTS)
+    values.update({"bg_type": "light", "gray_threshold": 127.0})
+    detector = detection.ClassicalDetector(values)
+    first = np.zeros((10, 10), dtype=np.uint8)
+    second = np.full((10, 10), 255, dtype=np.uint8)
+    monkeypatch.setattr(detection, "id", lambda item: 1, raising=False)
+    mask_first = detector.foreground(first)
+    mask_second = detector.foreground(second)
+    assert not np.array_equal(mask_first, mask_second)

@@ -31,6 +31,7 @@
 {% endif %}
 
 {% for entry in results %}
+{% set assay = entry.result.metadata.assay if entry.result else '' %}
 <section class="panel">
   {% if entry.error %}
   <p class="status" data-tone="error">{{ entry.error }}</p>
@@ -38,12 +39,12 @@
   {% if entry.result %}
   <div class="section-head">
     <div>
-      <h2>{{ (entry.result.metadata.assay or entry.job.assay or "结果")|upper }}</h2>
+      <h2>{{ entry.assay_label or assay|upper or "结果" }}</h2>
       <p class="muted">
         {% if entry.job %}
         来源 {{ entry.job.asset.name or entry.job.asset.id }}
         {% if entry.result.summary and entry.result.summary[0].analysis_window_start_s is not none %}
-        · 窗口 {{ num(entry.result.summary[0].analysis_window_start_s) }}–{{ num(entry.result.summary[0].analysis_window_end_s) }} s
+        · 窗口 {{ num(entry.result.summary[0].analysis_window_start_s, 3) }}–{{ num(entry.result.summary[0].analysis_window_end_s, 3) }} s
         {% endif %}
         {% endif %}
       </p>
@@ -56,6 +57,52 @@
   <article class="unit-block">
     <h3>{{ s.unit_name or s.unit_id }}</h3>
 
+    {% if assay == "tst" %}
+    <div class="metric-grid">
+      {{ metric("非挣扎时间（含摆动）", num(s.immobility_time_s, 3), "s") }}
+      {{ metric("挣扎时间", num(s.struggling_time_s, 3), "s") }}
+      {{ metric("不确定时间", num(s.uncertain_time_s, 3), "s") }}
+      {{ metric("非挣扎比例", num(s.immobility_percent, 1), "%") }}
+      {{ metric("挣扎比例", num(s.struggling_percent, 1), "%") }}
+      {{ metric("首次挣扎转非挣扎潜伏期（经典）", num(s.latency_to_immobility_s, 3), "s") }}
+    </div>
+
+    <details class="fold">
+      <summary>全部指标</summary>
+      <div class="fold-body">
+        <table class="simple-table">
+          <tbody>
+            <tr><th>检测时间比例</th><td>{{ num(s.detected_rate_percent, 1) }} %（{{ s.detected_frames }} / {{ s.total_frames }} 帧，{{ num(s.detected_time_s, 3) }} s）</td></tr>
+            <tr><th>摆动</th><td>{{ num(s.swing_time_s, 3) }} s（{{ num(s.swing_percent, 1) }} %，已含在非挣扎时间内）</td></tr>
+            <tr><th>时间</th><td>总 {{ num(s.total_time_s, 3) }} / 非挣扎 {{ num(s.immobility_time_s, 3) }} / 挣扎 {{ num(s.struggling_time_s, 3) }} / 不确定 {{ num(s.uncertain_time_s, 3) }} s</td></tr>
+            <tr><th>段数与频率</th><td>
+              非挣扎 {{ s.immobility_episodes }} 次转变 / {{ s.immobility_bouts }} 段 / {{ num(s.immobility_frequency_per_min, 2) }} 次·min⁻¹ ·
+              挣扎 {{ s.struggling_episodes }} 次转变 / {{ s.struggling_bouts }} 段 / {{ num(s.struggling_frequency_per_min, 2) }} 次·min⁻¹
+            </td></tr>
+            <tr><th>窗口</th><td>
+              {% if s.analysis_window_start_s is not none %}
+              {{ num(s.analysis_window_start_s, 3) }}–{{ num(s.analysis_window_end_s, 3) }} s
+              {% else %}未确定{% endif %}
+            </td></tr>
+            <tr><th>实际阈值</th><td>
+              光流高/低 {{ num(s.thresholds.flow_thr_hi, 3) }} / {{ num(s.thresholds.flow_thr_lo, 3) }} mm/s ·
+              速度波动高/低 {{ num(s.thresholds.speed_std_thr_hi, 3) }} / {{ num(s.thresholds.speed_std_thr_lo, 3) }} mm/s
+              {% if s.threshold_estimated %}（自动估计，{{ s.threshold_samples }} 个样本）{% else %}（默认，{{ s.threshold_samples }} 个样本）{% endif %}
+            </td></tr>
+            <tr><th>参数</th><td>
+              {{ s.mode }} · 灵敏度 {{ num(s.behavior_threshold_sensitivity, 2) }} ·
+              自动阈值 {{ "开" if s.auto_behavior_threshold else "关" }} ·
+              体长线 60 mm
+            </td></tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+    <p class="muted">视觉运动规则使用可调经验阈值，请结合视频与人工复核。</p>
+    {% if unit.figures.note %}<p class="muted">{{ unit.figures.note }}</p>{% endif %}
+    {% if unit.figures.note %}<p class="muted">{{ unit.figures.note }}</p>{% endif %}
+
+    {% elif assay == "oft" %}
     <div class="metric-grid">
       {{ metric("总曝光", num(s.total_time_s), "s") }}
       {{ metric("观察占用", num(s.observed_time_s), "s") }}
@@ -117,10 +164,22 @@
     {% elif unit.figures.note %}
     <p class="muted">{{ unit.figures.note }}</p>
     {% endif %}
+
+    {% else %}
+    <div class="metric-grid">
+      {% for item in entry.metrics[:6] %}
+      {% if item.key in s %}
+      {{ metric(item.label, num(s[item.key], 3), item.unit or "") }}
+      {% endif %}
+      {% endfor %}
+    </div>
+    {% endif %}
   </article>
   {% endfor %}
 
+  {% if assay == "oft" %}
   <p class="muted">中心、外围、场外三类互斥；壁区包含在外围内。</p>
+  {% endif %}
 
   {% if entry.result.warnings %}
   <ul class="warn-list">
