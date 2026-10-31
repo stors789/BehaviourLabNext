@@ -370,6 +370,26 @@
     return next;
   }
 
+  function mergeEcho(target, incoming) {
+    if (!target || !incoming) return incoming || target;
+    const byAsset = new Map((incoming.videos || []).map((video) => [video.asset_id, video]));
+    const videos = (target.videos || []).map((video) => {
+      const fresh = byAsset.get(video.asset_id);
+      if (!fresh) return video;
+      const byUnit = new Map((fresh.units || []).map((unit) => [unit.id, unit]));
+      const units = (video.units || []).map((unit) => {
+        const next = byUnit.get(unit.id);
+        if (!next) return unit;
+        Object.assign(unit, next);
+        return unit;
+      });
+      Object.assign(video, fresh, { units });
+      return video;
+    });
+    Object.assign(target, incoming, { videos });
+    return target;
+  }
+
   function resolveStep(spec, context) {
     if (!spec) return null;
     const options = context || {};
@@ -493,6 +513,7 @@
     stableStringify,
     resolveStep,
     rotateGeometry,
+    mergeEcho,
     pickMedia,
     viewportToSource,
     moveVertex,

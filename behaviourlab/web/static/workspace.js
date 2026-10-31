@@ -183,8 +183,9 @@
   function flushSave() {
     if (!state.draftId || !state.draft) return Promise.resolve(true);
     return saver().save(currentSnapshot, (draft) => {
-      state.draft = draft;
-      state.savedSnapshot = clone(draft);
+      // 原地合并，保持当前 unit 引用有效，避免控件绑定到被替换的旧对象。
+      window.BLCore.mergeEcho(state.draft, draft);
+      state.savedSnapshot = clone(state.draft);
     }).then((ok) => {
       if (!ok && state.saver && state.saver.lastError) {
         status(state.saver.lastError.message, "error");
@@ -1278,26 +1279,29 @@
       if (input.type === "checkbox") input.checked = Boolean(value);
       else input.value = value == null ? "" : String(value);
       input.addEventListener("change", () => {
-        if (!unit.options) unit.options = {};
+        // 始终写入当前草稿的 unit：保存回写后旧闭包引用可能已过期。
+        const target = currentUnit();
+        if (!target) return;
+        if (!target.options) target.options = {};
         let changed = null;
         if (input.type === "checkbox") {
-          unit.options[param.key] = input.checked;
+          target.options[param.key] = input.checked;
           changed = input.checked;
         } else if (input.type === "number") {
           const number = Number(input.value);
           if (!Number.isFinite(number)) {
-            input.value = String(effectiveOption(unit, param.key, param.default));
+            input.value = String(effectiveOption(target, param.key, param.default));
             return;
           }
           if (param.step === 1 && !Number.isInteger(number)) {
             status(param.label + " 必须是整数", "error");
-            input.value = String(effectiveOption(unit, param.key, param.default));
+            input.value = String(effectiveOption(target, param.key, param.default));
             return;
           }
-          unit.options[param.key] = number;
+          target.options[param.key] = number;
           changed = number;
         } else {
-          unit.options[param.key] = input.value;
+          target.options[param.key] = input.value;
           changed = input.value;
         }
         invalidatePreview();
@@ -1334,7 +1338,9 @@
     input.type = "text";
     input.value = unit.name || "";
     input.addEventListener("change", () => {
-      unit.name = input.value.trim() || "小鼠 " + (state.unitIndex + 1);
+      const target = currentUnit();
+      if (!target) return;
+      target.name = input.value.trim() || "小鼠 " + (state.unitIndex + 1);
       invalidatePreview();
       markDirty();
       ensureContext();
@@ -1358,15 +1364,17 @@
     record.type = "button";
     record.textContent = "记录当前帧事件";
     record.addEventListener("click", () => {
-      if (!unit.manual) unit.manual = { events: [] };
-      if (!Array.isArray(unit.manual.events)) unit.manual.events = [];
+      const target = currentUnit();
+      if (!target) return;
+      if (!target.manual) target.manual = { events: [] };
+      if (!Array.isArray(target.manual.events)) target.manual.events = [];
       const time = state.frameInfo && Number.isFinite(state.frameInfo.time)
         ? state.frameInfo.time : null;
       if (time == null) {
         status("当前帧时间不可用", "error");
         return;
       }
-      unit.manual.events.push({ time_s: time, frame: state.frame, kind: "event" });
+      target.manual.events.push({ time_s: time, frame: state.frame, kind: "event" });
       invalidatePreview();
       markDirty();
       renderInspector();
@@ -1391,7 +1399,9 @@
       remove.className = "remove-button";
       remove.textContent = "移除";
       remove.addEventListener("click", () => {
-        events.splice(index, 1);
+        const target = currentUnit();
+        const live = (target && target.manual && target.manual.events) || [];
+        live.splice(index, 1);
         invalidatePreview();
         markDirty();
         renderInspector();

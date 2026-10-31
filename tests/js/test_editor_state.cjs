@@ -8,6 +8,7 @@ const {
   PreviewGate,
   SaveQueue,
   TOOLBAR_HEIGHT,
+  mergeEcho,
   pickMedia,
   resolveStep,
   rotateGeometry,
@@ -158,6 +159,39 @@ assert.strictEqual(rotated.platform.angle, 110);
 const restored = rotateGeometry(rotated, 1280, 720, 90, 0);
 assert.deepStrictEqual(restored.arena.points[0], [100, 120]);
 assert.strictEqual(restored.platform.angle, 20);
+
+// 6b. 保存回写保持 unit 引用，洞数写入当前草稿并驱动三点提交。
+const liveDraft = {
+  options: {},
+  videos: [{ asset_id: "a" * 32, units: [{ id: "u1", options: {}, geometry: {} }] }],
+};
+const capturedUnit = liveDraft.videos[0].units[0];
+const echo = {
+  options: { hole_count: 20 },
+  videos: [{ asset_id: "a" * 32, units: [{ id: "u1", options: {}, geometry: {} }] }],
+};
+assert.strictEqual(mergeEcho(liveDraft, echo), liveDraft);
+assert.strictEqual(liveDraft.videos[0].units[0], capturedUnit,
+  "保存回写后 unit 引用必须保持");
+// 控件闭包仍持有旧引用，写入 3 后当前草稿必须同步。
+capturedUnit.options.hole_count = 3;
+assert.strictEqual(liveDraft.videos[0].units[0].options.hole_count, 3);
+const snapshot = JSON.parse(JSON.stringify(liveDraft));
+assert.strictEqual(snapshot.videos[0].units[0].options.hole_count, 3,
+  "下一次 PUT 的快照应包含洞数");
+const holeSpec = resolveStep({
+  key: "holes", type: "holes", count: 0, count_key: "hole_count",
+}, capturedUnit.options);
+assert.strictEqual(holeSpec.count, 3);
+const liveHoles = new EditorCore();
+liveHoles.reset(holeSpec);
+assert.strictEqual(liveHoles.addPoint({ x: 10, y: 10 }).status, "pending");
+assert.strictEqual(liveHoles.addPoint({ x: 20, y: 20 }).status, "pending");
+assert.strictEqual(liveHoles.committed, null, "不足 3 点不应提交");
+assert.strictEqual(liveHoles.addPoint({ x: 30, y: 30 }).status, "committed");
+assert.deepStrictEqual(liveHoles.committed.holes.map((hole) => hole.id),
+  ["1", "2", "3"]);
+assert.deepStrictEqual(liveHoles.committed.holes[2].center, [30, 30]);
 
 // 7. 保存队列：串行快照、旧响应不回写、失败后仍可重试。
 (async () => {

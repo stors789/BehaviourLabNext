@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 
-def payload(unit_window):
+def payload(unit_window, assay="oft", options=None):
     return {
-        "assay": "oft",
+        "assay": assay,
         "project_id": None,
         "videos": [{
             "asset_id": "a" * 32,
@@ -18,7 +18,7 @@ def payload(unit_window):
                 "name": "小鼠 1",
                 "window": unit_window,
                 "geometry": {},
-                "options": {},
+                "options": options or {},
                 "detection": {},
                 "manual": None,
             }],
@@ -48,3 +48,45 @@ def test_repeated_payloads_create_separate_drafts(client):
     assert second.status_code == 201
     assert (first.get_json()["data"]["draft"]["id"]
             != second.get_json()["data"]["draft"]["id"])
+
+
+def test_barnes_hole_count_persists(client):
+    created = client.post("/api/drafts", json=payload(None, assay="barnes"))
+    assert created.status_code == 201, created.get_json()
+    draft = created.get_json()["data"]["draft"]
+    assert draft["videos"][0]["units"][0]["options"] == {}
+
+    videos = draft["videos"]
+    videos[0]["units"][0]["options"] = {"hole_count": 3}
+    videos[0]["units"][0]["geometry"] = {
+        "disk": {"type": "ellipse", "center": [100, 100],
+                 "radii": [50, 50], "angle": 0},
+    }
+    saved = client.put(f"/api/drafts/{draft['id']}", json={"videos": videos})
+    assert saved.status_code == 200, saved.get_json()
+
+    reloaded = client.get(f"/api/drafts/{draft['id']}").get_json()["data"]["draft"]
+    unit = reloaded["videos"][0]["units"][0]
+    assert unit["options"]["hole_count"] == 3
+    assert unit["geometry"]["disk"]["radii"] == [50, 50]
+
+
+def test_barnes_hole_count_persists(client):
+    created = client.post("/api/drafts", json=payload(None, assay="barnes"))
+    assert created.status_code == 201, created.get_json()
+    draft = created.get_json()["data"]["draft"]
+    assert draft["videos"][0]["units"][0]["options"] == {}
+
+    videos = draft["videos"]
+    videos[0]["units"][0]["options"] = {"hole_count": 3}
+    videos[0]["units"][0]["geometry"] = {
+        "disk": {"type": "ellipse", "center": [100, 100],
+                 "radii": [50, 50], "angle": 0},
+    }
+    saved = client.put(f"/api/drafts/{draft['id']}", json={"videos": videos})
+    assert saved.status_code == 200, saved.get_json()
+
+    reloaded = client.get(f"/api/drafts/{draft['id']}").get_json()["data"]["draft"]
+    unit = reloaded["videos"][0]["units"][0]
+    assert unit["options"]["hole_count"] == 3
+    assert unit["geometry"]["disk"]["radii"] == [50, 50]
