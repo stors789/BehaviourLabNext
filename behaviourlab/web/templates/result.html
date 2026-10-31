@@ -185,6 +185,83 @@
     <p class="muted">{{ unit.figures.note }}</p>
     {% endif %}
 
+    {% elif assay == "fst" %}
+    <div class="metric-grid">
+      {{ metric("不动时间", num(s.immobility_time_s, 3), "s") }}
+      {{ metric("活动时间", num(s.active_time_s, 3), "s") }}
+      {{ metric("不确定时间", num(s.uncertain_time_s, 3), "s") }}
+      {{ metric("不动比例", num(s.immobility_percent, 1), "%") }}
+      {{ metric("不动片段数", s.immobility_bouts if s.immobility_bouts is not none else "—", "次") }}
+      {{ metric("首次不动潜伏期", num(s.latency_to_immobility_s, 3), "s") }}
+    </div>
+
+    <details class="fold">
+      <summary>全部指标</summary>
+      <div class="fold-body">
+        <table class="simple-table">
+          <tbody>
+            <tr><th>检测时间比例</th><td>{{ num(s.detected_rate_percent, 1) }} %（{{ s.detected_frames }} / {{ s.total_frames }} 帧，{{ num(s.detected_time_s, 3) }} s）</td></tr>
+            <tr><th>时间</th><td>总 {{ num(s.total_time_s, 3) }} / 活动 {{ num(s.active_time_s, 3) }} / 不动 {{ num(s.immobility_time_s, 3) }} / 不确定 {{ num(s.uncertain_time_s, 3) }} s</td></tr>
+            <tr><th>不动占检测</th><td>{{ num(s.immobility_percent_detected, 1) }} %</td></tr>
+            <tr><th>不动片段</th><td>{{ s.immobility_bouts }} 段 · 最长 {{ num(s.longest_immobility_bout_s, 3) }} s · 首次潜伏期 {{ num(s.latency_to_immobility_s, 3) }} s</td></tr>
+            <tr><th>运动分数</th><td>均值 {{ num(s.mean_motion_score, 3) }} · 最大 {{ num(s.max_motion_score, 3) }}</td></tr>
+            <tr><th>实际阈值</th><td>
+              不动 {{ num(s.thresholds.low, 3) }} / 活动 {{ num(s.thresholds.high, 3) }}
+              {% if s.threshold_estimated %}（自动估计，{{ s.threshold_samples }} 个样本）{% else %}（未估计，{{ s.threshold_samples }} 个样本）{% endif %}
+            </td></tr>
+            <tr><th>参数</th><td>
+              内径 {{ num(s.cylinder_diameter_cm, 2) }} cm ·
+              自动阈值 {{ "开" if s.auto_threshold else "关" }} ·
+              灵敏度 {{ num(s.threshold_sensitivity, 2) }} ·
+              手动低/高 {{ num(s.immobility_threshold, 3) }} / {{ num(s.active_threshold, 3) }} ·
+              平滑 {{ num(s.smoothing_window_s, 2) }} s ·
+              最短不动 {{ num(s.min_immobility_duration_s, 2) }} s ·
+              最短活动 {{ num(s.min_active_duration_s, 2) }} s ·
+              合并间隙 {{ num(s.gap_merge_s, 2) }} s ·
+              箱宽 {{ num(s.bin_seconds, 2) }} s
+            </td></tr>
+            <tr><th>窗口</th><td>
+              {% if s.analysis_window_start_s is not none %}
+              {{ num(s.analysis_window_start_s, 3) }}–{{ num(s.analysis_window_end_s, 3) }} s
+              {% else %}未确定{% endif %}
+            </td></tr>
+          </tbody>
+        </table>
+        {% set unit_bins = (entry.result.bins or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
+        {% if unit_bins %}
+        <table class="simple-table">
+          <thead>
+            <tr><th>箱</th><th>时间（s）</th><th>活动</th><th>不动</th><th>未知</th><th>不动比例</th><th>均分</th></tr>
+          </thead>
+          <tbody>
+            {% for b in unit_bins %}
+            <tr>
+              <td>{{ b.bin_index }}</td>
+              <td>{{ num(b.start_s, 2) }}–{{ num(b.end_s, 2) }}</td>
+              <td>{{ num(b.active_time_s, 2) }}</td>
+              <td>{{ num(b.immobility_time_s, 2) }}</td>
+              <td>{{ num(b.unknown_time_s, 2) }}</td>
+              <td>{{ num(b.immobility_percent, 1) }} %</td>
+              <td>{{ num(b.mean_motion_score, 3) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+    </details>
+    <p class="muted">视觉运动规则使用可调经验阈值，请结合视频与人工复核。</p>
+    {% if unit.figures.activity %}
+    <div class="figure-row">
+      <figure>
+        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.activity }}" alt="活动曲线">
+        <figcaption>分数与状态（最终时间线，秒）</figcaption>
+      </figure>
+    </div>
+    {% elif unit.figures.note %}
+    <p class="muted">{{ unit.figures.note }}</p>
+    {% endif %}
+
     {% else %}
     <div class="metric-grid">
       {% for item in entry.metrics[:6] %}

@@ -502,6 +502,11 @@
           + count(behavior.center_entries) + " 次 / 路程 "
           + value(behavior.total_distance_cm) + " cm / 平均速度 "
           + value(behavior.mean_speed_cm_s) + " cm/s");
+      } else if (behavior.mode === "fst") {
+        lines.push("行为 " + value(behavior.total_time_s) + " s：不动 "
+          + value(behavior.immobility_time_s) + " / 活动 "
+          + value(behavior.active_time_s) + " / 不确定 "
+          + value(behavior.uncertain_time_s) + " s");
       } else {
         lines.push("行为 " + value(behavior.total_time_s) + " s：非挣扎 "
           + value(behavior.immobility_time_s) + " / 挣扎 "

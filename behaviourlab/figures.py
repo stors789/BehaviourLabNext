@@ -200,6 +200,17 @@ LIS_CURVE_KEYS = {
     "lis_s": ("#16684e", "速度波动 S"),
 }
 
+# FST 的分数曲线与最终时间线；阈值线用行内实际生效值。
+FST_CURVE_KEYS = {
+    "motion_score": ("#1c5f9e", "运动分数"),
+    "smoothed_motion_score": ("#b86245", "平滑分数"),
+}
+
+FST_THRESHOLD_LINES = (
+    ("threshold_low", "--", "不动阈值"),
+    ("threshold_high", ":", "活动阈值"),
+)
+
 # 决策特征 F 使用的实际阈值参考线（虚线）：key、线型、图例标签。
 FLOW_THRESHOLD_LINES = (
     ("flow_thr_hi_used", "--", "光流高阈值"),
@@ -265,7 +276,7 @@ def activity_png(path: str | Path, rows: Iterable[Mapping[str, Any]], *,
 
     逐行用真实曝光 [start,end)，缺口留白；没有可用状态不出图，
     没有配对证据时退回只画状态色带。lis 用 lis_f/lis_s 两条实际曲线，
-    不画经典阈值线。
+    fst 用原始/平滑运动分数与实际阈值线；两者都不套用经典阈值。
     """
 
     items = []
@@ -284,6 +295,10 @@ def activity_png(path: str | Path, rows: Iterable[Mapping[str, Any]], *,
         return False
 
     curve_keys = LIS_CURVE_KEYS if mode == "lis" else CURVE_KEYS
+    lines = () if mode == "lis" else FLOW_THRESHOLD_LINES
+    if mode == "fst":
+        curve_keys = FST_CURVE_KEYS
+        lines = FST_THRESHOLD_LINES
     series = {key: activity_series(rows, key) for key in curve_keys}
     has_curves = any(xs for xs, _ in series.values())
     _, _, line_width, dpi = _style(style)
@@ -314,12 +329,12 @@ def activity_png(path: str | Path, rows: Iterable[Mapping[str, Any]], *,
             curve_axes.plot(xs, ys, color=color, linewidth=line_width,
                             label=label)
         if mode != "lis":
-            for key, dash, label in FLOW_THRESHOLD_LINES:
+            for key, dash, label in lines:
                 for value in threshold_values(rows, key):
                     curve_axes.axhline(value, color="#8a8a8a", linestyle=dash,
                                        linewidth=max(0.8, line_width * 0.6),
                                        label=label)
-        curve_axes.set_ylabel("mm/s")
+        curve_axes.set_ylabel("分数" if mode == "fst" else "mm/s")
         handles, labels = curve_axes.get_legend_handles_labels()
         if handles:
             curve_axes.legend(handles, labels, loc="upper right", fontsize=7,

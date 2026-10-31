@@ -396,7 +396,9 @@ def create_preview(
     import cv2
 
     if behavior and behavior.get("state_at_time"):
-        cv2.putText(canvas, "TST " + str(behavior["state_at_time"]), (12, 28),
+        label = module.SPEC.get("short") or draft["assay"].upper()
+        cv2.putText(canvas, label + " " + str(behavior["state_at_time"]),
+                    (12, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (45, 45, 45), 2, cv2.LINE_AA)
 
     filename = f"{new_id()}.png"
