@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import ExperimentNotImplemented
+from .base import ExperimentNotImplemented, geometry_field
 
 DEFAULTS: dict = {}
 DETECTION_DEFAULTS: dict = {}
@@ -14,7 +14,10 @@ SPEC = {
     "label": "旷场实验",
     "short": "OFT",
     "parameters": [],
-    "geometry": [],
+    "geometry": [
+        geometry_field("arena", "场地", "quad", count=4),
+        geometry_field("mask", "遮挡区域", "polygon", min_points=3, optional=True),
+    ],
     "metrics": [],
     "template_keys": [],
 }

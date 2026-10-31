@@ -57,19 +57,39 @@ def geometry_field(
     type: str,
     count: int = 0,
     *,
+    min_points: int = 0,
     optional: bool = False,
     count_key: str | None = None,
+    count_field: str | None = None,
+    auto_commit: bool = False,
+    fixed: bool = False,
+    modes: list[str] | None = None,
+    role: str | None = None,
 ) -> dict:
+    """一步几何的绘制契约；count 为 0 表示点数可变，min_points 为下限。"""
+
     item: dict[str, Any] = {
         "key": key,
         "label": label,
         "type": type,
         "count": count,
+        "min_points": min_points,
+        "required": not optional,
     }
     if optional:
         item["optional"] = True
     if count_key is not None:
         item["count_key"] = count_key
+    if count_field is not None:
+        item["count_field"] = count_field
+    if auto_commit:
+        item["auto_commit"] = True
+    if fixed:
+        item["fixed"] = True
+    if modes is not None:
+        item["modes"] = list(modes)
+    if role is not None:
+        item["role"] = role
     return item
 
 

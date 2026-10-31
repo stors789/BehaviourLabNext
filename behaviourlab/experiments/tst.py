@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import ExperimentNotImplemented, parameter
+from .base import ExperimentNotImplemented, geometry_field, parameter
 
 DEFAULTS = {"mode": "classic"}
 
@@ -27,7 +27,11 @@ SPEC = {
             section="基础",
         )
     ],
-    "geometry": [],
+    "geometry": [
+        geometry_field("arena", "场地", "polygon", min_points=3),
+        geometry_field("body_line", "体长线", "line", count=2),
+        geometry_field("mask", "遮挡区域", "polygon", min_points=3, optional=True),
+    ],
     "metrics": [],
     "template_keys": [],
 }

@@ -14,6 +14,7 @@ from werkzeug.exceptions import HTTPException
 from .. import assets as asset_service
 from .. import experiments
 from .. import media as media_service
+from .. import preview as preview_service
 from ..assets import BackgroundError
 from ..config import APP_NAME, APP_VERSION, SCHEMA_VERSION, DataPaths
 from ..detection import common_detection_defaults
@@ -183,6 +184,17 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         if request.path.startswith("/api/"):
             return failure("服务器内部错误", 500)
         return render_template("error.html"), 500
+
+    @app.context_processor
+    def inject_shell():
+        project_id = request.args.get("project")
+        project = store.get_project(project_id) if is_valid_id(project_id) else None
+        mode = request.args.get("mode", "")
+        return {
+            "nav_projects": store.list_projects(),
+            "current_project": project,
+            "current_mode": "independent" if mode == "independent" else "",
+        }
 
     # -- 健康与目录 -----------------------------------------------------
     @app.get("/api/health")
@@ -552,6 +564,19 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         draft = _require_draft(draft_id)
         return success({"issues": validate_draft(draft)})
 
+    @app.post("/api/drafts/<draft_id>/preview")
+    def create_preview(draft_id: str):
+        _require_draft(draft_id)
+        body = _json_body()
+        try:
+            result = preview_service.create_preview(store, paths, draft_id, body)
+        except ValidationError as error:
+            raise ApiError(error.message, 400, [error.as_issue()])
+        except media_service.MediaError as error:
+            raise ApiError(str(error), 422,
+                           [{"field": "frame_index", "message": str(error)}])
+        return success(result, 201)
+
     # -- 页面 -----------------------------------------------------------
     @app.get("/")
     def page_home():
@@ -586,12 +611,26 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         project_id = request.args.get("project")
         if project_id is not None and store.get_project(project_id) is None:
             project_id = None
+        draft_id = request.args.get("draft_id") or ""
+        draft = store.get_draft(draft_id) if is_valid_id(draft_id) else None
+        if draft is None:
+            draft_id = ""
+        step = request.args.get("step", "select")
+        if step not in ("select", "range", "arena", "review"):
+            step = "select"
+        view = "detection" if request.args.get("view") == "detection" else "geometry"
+        assay = draft["assay"] if draft else ""
         return render_template(
             "analyze.html",
             active="analyze",
             mode=mode,
             project_id=project_id,
             projects=store.list_projects(),
+            draft_id=draft_id,
+            step=step,
+            view=view,
+            assay=assay,
+            catalog=experiments.catalog(),
         )
 
     @app.get("/tasks")

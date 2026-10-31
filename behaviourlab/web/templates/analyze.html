@@ -1,66 +1,167 @@
 {% extends "base.html" %}
 {% block title %}{{ '独立分析' if mode == 'independent' else '项目分析' }} · {{ app_name }}{% endblock %}
 
+{% block topcenter %}
+{% if draft_id %}
+<nav class="tasknav" id="tasknav" aria-label="分析步骤">
+  <a href="#" data-step-link="select">视频</a>
+  <span class="tasknav-sep" aria-hidden="true">›</span>
+  <a href="#" data-step-link="range">场地</a>
+  <span class="tasknav-sep" aria-hidden="true">›</span>
+  <a href="#" data-step-link="arena">检测</a>
+</nav>
+{% endif %}
+{% endblock %}
+
 {% block content %}
-<div class="section-head page-head" data-analyze
-     data-mode="{{ mode }}" data-project="{{ project_id or '' }}">
-  <div>
-    <a class="crumb" href="/">首页</a>
-    <h1>{{ '独立分析' if mode == 'independent' else '项目分析' }}</h1>
-  </div>
-  {% if mode == 'project' %}
-  <label class="select-inline">
-    <span>项目</span>
-    <select id="project-select">
-      <option value="">选择项目</option>
-      {% for project in projects %}
-      <option value="{{ project.id }}" {{ 'selected' if project.id == project_id else '' }}>{{ project.name }}</option>
-      {% endfor %}
-    </select>
-  </label>
-  {% endif %}
-</div>
+<div class="work" id="work" data-analyze
+     data-mode="{{ mode }}" data-project="{{ project_id or '' }}"
+     data-draft="{{ draft_id or '' }}" data-step="{{ step }}"
+     data-view="{{ view }}" data-assay="{{ assay or '' }}">
 
-<section class="import-zone" id="dropzone">
-  <div class="import-actions">
-    <button class="button primary" type="button" id="pick-videos">选择视频</button>
-    <button class="button" type="button" id="pick-folder">选择文件夹</button>
-  </div>
-  <p class="drop-hint">拖入视频文件</p>
-  <p class="import-status" id="import-status" hidden></p>
-</section>
-
-<ul class="error-list" id="import-errors" hidden></ul>
-
-<div class="analyze-grid">
-  <section class="panel">
-    <div class="section-head">
-      <h2>视频资产</h2>
-      <span class="project-meta" id="asset-count"></span>
+  <section class="view" data-panel="select">
+    <div class="select-head">
+      <label class="field inline">
+        <span>实验</span>
+        <select id="assay-select">
+          {% for item in catalog %}
+          <option value="{{ item.key }}" {{ 'selected' if item.key == (assay or 'tst') else '' }}>{{ item.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      {% if mode == 'project' %}
+      <label class="field inline">
+        <span>项目</span>
+        <select id="project-select">
+          <option value="">选择项目</option>
+          {% for project in projects %}
+          <option value="{{ project.id }}" {{ 'selected' if project.id == project_id else '' }}>{{ project.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      {% endif %}
     </div>
-    <ul class="asset-list" id="asset-list"></ul>
-    <div class="empty-inline" id="asset-empty">
-      <p>还没有视频。</p>
+
+    <section class="import-zone" id="dropzone">
+      <div class="import-actions">
+        <button class="button primary" type="button" id="pick-videos">选择视频</button>
+        <button class="button" type="button" id="pick-folder">选择文件夹</button>
+      </div>
+      <p class="import-status" id="import-status" hidden></p>
+    </section>
+
+    <ul class="error-list" id="import-errors" hidden></ul>
+
+    <div class="select-grid">
+      <section class="panel">
+        <div class="section-head">
+          <h2>视频资产</h2>
+          <span class="meta" id="asset-count"></span>
+        </div>
+        <ul class="asset-list" id="asset-list"></ul>
+        <div class="empty-inline" id="asset-empty"><p>还没有视频。</p></div>
+      </section>
+
+      <section class="panel">
+        <div class="section-head">
+          <h2>已选视频</h2>
+          <span class="meta" id="selected-count"></span>
+        </div>
+        <ul class="selected-list" id="selected-list"></ul>
+        <div class="empty-inline" id="selected-empty"><p>未选择视频。</p></div>
+        <button class="button primary full" type="button" id="setup-videos" disabled>设置视频</button>
+      </section>
     </div>
   </section>
 
-  <section class="panel">
-    <div class="section-head">
-      <h2>已选视频</h2>
-      <span class="project-meta" id="selected-count"></span>
+  <section class="view" data-panel="range" hidden>
+    <div class="range-grid">
+      <div class="range-list" id="range-list"></div>
+      <div class="range-main">
+        <div class="range-frame"><img id="range-image" alt=""><p class="range-empty" id="range-empty">源帧不可读</p></div>
+        <form class="range-form" id="range-form" autocomplete="off">
+          <div class="field-row">
+            <label class="field"><span>开始时间（秒）</span>
+              <input type="number" id="window-start" min="0" step="0.01" value="0">
+            </label>
+            <label class="field"><span>结束时间（秒）</span>
+              <input type="number" id="window-end" min="0" step="0.01" placeholder="到片尾">
+            </label>
+          </div>
+          <label class="field"><span>方向</span>
+            <select id="orientation">
+              <option value="0">0°</option>
+              <option value="90">90°</option>
+              <option value="180">180°</option>
+              <option value="270">270°</option>
+            </select>
+          </label>
+          <details class="fold" id="fps-fold">
+            <summary>帧率设置</summary>
+            <div class="fold-body">
+              <label class="field"><span>解释帧率（FPS）</span>
+                <input type="number" id="fps-override" min="0" step="0.01" placeholder="源 PTS">
+              </label>
+              <label class="field"><span>采样帧率（FPS）</span>
+                <input type="number" id="sample-fps" min="0" step="0.01" placeholder="全部帧">
+              </label>
+            </div>
+          </details>
+          <div class="form-actions">
+            <button class="button" type="button" id="apply-all">应用到其他视频</button>
+            <button class="button primary" type="button" id="confirm-range">下一步：场地</button>
+          </div>
+        </form>
+      </div>
     </div>
-    <ul class="selected-list" id="selected-list"></ul>
-    <div class="empty-inline" id="selected-empty">
-      <p>未选择视频。</p>
+  </section>
+
+  <section class="view" data-panel="arena" hidden>
+    <div class="ctxbar">
+      <label class="field inline grow">
+        <span>视频</span>
+        <select id="video-select"></select>
+      </label>
+      <label class="field inline unit">
+        <span>小鼠</span>
+        <select id="unit-select"></select>
+      </label>
+      <button class="button small" type="button" id="add-unit">添加小鼠</button>
     </div>
-    <button class="button primary full" type="button" id="setup-videos" disabled>设置视频</button>
-    <p class="muted setup-note" id="setup-note" hidden></p>
+
+    <div class="stage">
+      <div class="videoarea">
+        <div class="toolhead" id="toolhead">
+          <button class="tool" type="button" id="tool-undo">撤销</button>
+          <button class="tool" type="button" id="tool-redraw">重画</button>
+          <button class="tool is-primary" type="button" id="tool-finish" hidden>完成当前绘制</button>
+        </div>
+        <div class="canvaswrap" id="canvaswrap">
+          <canvas id="stage-canvas" tabindex="0" aria-label="视频画布"></canvas>
+          <img class="preview-layer" id="preview-layer" alt="" hidden>
+        </div>
+        <div class="scrub">
+          <input type="range" id="frame-range" min="0" max="0" value="0" step="1" aria-label="源帧">
+          <input type="number" id="frame-number" min="0" value="0" step="1" aria-label="源帧编号">
+          <span class="time-label" id="time-label"></span>
+        </div>
+        <div class="statusbar" id="statusbar" role="status"></div>
+      </div>
+
+      <aside class="inspector" aria-label="检查器">
+        <div class="inspect-body" id="inspect-body"></div>
+        <div class="inspect-foot">
+          <button class="button primary" type="button" id="primary-action">检测预览</button>
+          <button class="button" type="button" id="secondary-action" hidden>更新检测预览</button>
+        </div>
+      </aside>
+    </div>
   </section>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script src="{{ url_for('static', filename='pickers.js') }}" defer></script>
-<script src="{{ url_for('static', filename='frameview.js') }}" defer></script>
-<script src="{{ url_for('static', filename='analyze.js') }}" defer></script>
+<script src="{{ url_for('static', filename='editor-core.js') }}" defer></script>
+<script src="{{ url_for('static', filename='workspace.js') }}" defer></script>
 {% endblock %}

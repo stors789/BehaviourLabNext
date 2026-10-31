@@ -7,28 +7,50 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
 </head>
 <body>
+  <a class="skip" href="#main">跳到主要内容</a>
   <header class="topbar">
     <a class="brand" href="/">
       <span class="brand-mark" aria-hidden="true"></span>
-      <span>{{ app_name }}</span>
+      <span class="brand-text">{{ app_name }}</span>
     </a>
-    <nav class="nav" aria-label="主导航">
-      <a href="/projects" class="{{ 'is-active' if active == 'projects' else '' }}">项目</a>
-      <a href="/analyze" class="{{ 'is-active' if active == 'analyze' else '' }}">分析</a>
-      <a href="/tasks" class="{{ 'is-active' if active == 'tasks' else '' }}">任务</a>
-      <a href="/settings" class="{{ 'is-active' if active == 'settings' else '' }}">设置</a>
-      <a href="/landmarks" class="{{ 'is-active' if active == 'landmarks' else '' }}">关键点</a>
-    </nav>
-    <div class="health" id="health" data-state="checking">
-      <span class="health-dot" aria-hidden="true"></span>
-      <span class="health-text">本地服务</span>
+
+    {% set summary = current_project.name if current_project else ('独立分析' if current_mode == 'independent' else '工作空间') %}
+    <div class="switcher" data-switcher>
+      <button class="switch-summary" id="switch-summary" type="button"
+              aria-haspopup="true" aria-expanded="false" title="{{ summary }}">
+        <span class="switch-name">{{ summary }}</span>
+        <span class="switch-caret" aria-hidden="true"></span>
+      </button>
+      <div class="switch-panel" id="switch-panel" hidden>
+        <a class="switch-row" href="/analyze?mode=independent">独立分析</a>
+        <div class="switch-list">
+          {% for item in nav_projects %}
+          <a class="switch-row" href="/analyze?mode=project&project={{ item.id }}"
+             {{ 'aria-current=page' if current_project and item.id == current_project.id else '' }}>
+            <span class="switch-name">{{ item.name }}</span>
+            <span class="switch-meta">{{ item.group_count }} 组 · {{ item.animal_count }} 只</span>
+          </a>
+          {% else %}
+          <p class="switch-empty">还没有项目</p>
+          {% endfor %}
+        </div>
+        <a class="switch-row switch-manage" href="/projects">管理项目</a>
+      </div>
     </div>
+
+    <div class="top-context">{% block topcenter %}{% endblock %}</div>
+
+    <nav class="top-tools" aria-label="工具">
+      <a href="/tasks" aria-label="任务">任务</a>
+      <a href="/settings" aria-label="设置">设置</a>
+    </nav>
   </header>
 
-  <main class="page">
+  <main class="page" id="main" tabindex="-1">
     {% block content %}{% endblock %}
   </main>
 
+  <script src="{{ url_for('static', filename='shell.js') }}" defer></script>
   <script src="{{ url_for('static', filename='app.js') }}" defer></script>
   {% block scripts %}{% endblock %}
 </body>
