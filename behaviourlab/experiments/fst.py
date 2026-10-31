@@ -185,6 +185,10 @@ def validate_geometry(geometry: Mapping[str, Any] | None,
     if arena is None:
         if require:
             issues.append({"field": "geometry.arena", "message": "缺少圆筒区域"})
+    elif not isinstance(arena, Mapping) or arena.get("type") != "polygon":
+        # 线/椭圆等形状会被检测区域栅格成一条细线，不能当圆筒区域。
+        issues.append({"field": "geometry.arena",
+                       "message": "圆筒区域必须是多边形"})
     else:
         points = activity.shape_points(arena)
         if len(points) < 3:

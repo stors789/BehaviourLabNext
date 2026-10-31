@@ -182,6 +182,7 @@ def center_rect_for(summary: Mapping[str, Any]) -> tuple[float, float, float, fl
 
 
 STATE_COLORS = {
+    "active": "#8C6BB1",
     "struggling": "#B45F45",
     "immobile": "#6F8F7C",
     "swing": "#4E7FA6",
@@ -353,7 +354,7 @@ def activity_png(path: str | Path, rows: Iterable[Mapping[str, Any]], *,
             (start, 0.0), end - start, 1.0,
             facecolor=STATE_COLORS[state], edgecolor="none"))
     present = []
-    for state in ("struggling", "immobile", "swing", "unknown"):
+    for state in ("active", "struggling", "immobile", "swing", "unknown"):
         if any(item[2] == state for item in items):
             present.append(patches.Patch(color=STATE_COLORS[state], label=state))
     if present:

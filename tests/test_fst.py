@@ -186,6 +186,93 @@ class PreviewSource:
         return iter(self._frames)
 
 
+def test_arena_requires_polygon_type(client, store, tmp_path, monkeypatch):
+    geometry = {"arena": {"type": "line",
+                          "points": [[20, 20], [220, 20],
+                                     [220, 220], [20, 220]]},
+                "diameter_line": DIAMETER}
+    issues = fst.validate_unit(dict(fst.DEFAULTS), geometry, complete=True)
+    assert [item["field"] for item in issues] == ["geometry.arena"]
+    assert fst.validate_unit(dict(fst.DEFAULTS),
+                             {"arena": ARENA, "diameter_line": DIAMETER},
+                             complete=True) == []
+
+    source = tmp_path / "line-arena.mp4"
+    source.write_bytes(b"placeholder")
+    asset = store.create_asset(
+        name="line-arena.mp4", path=str(source), project_id=None,
+        metadata={"width": 240, "height": 240, "duration_s": 3.0,
+                  "fps": 10.0, "frame_count": 30})
+    draft = store.create_draft("fst", videos=[{
+        "asset_id": asset["id"],
+        "window": {"start_s": 0.0, "end_s": 3.0},
+        "orientation": 0, "fps_override": None, "sample_fps": 10,
+        "units": [{
+            "id": "f" * 32, "name": "FST 鼠", "window": None,
+            "geometry": geometry,
+            "options": dict(fst.DEFAULTS), "detection": {}, "manual": None,
+        }],
+    }])
+    monkeypatch.setattr(
+        "behaviourlab.engine.media.probe_video",
+        lambda path: {"width": 240, "height": 240, "duration_s": 3.0,
+                      "fps": 10.0, "frame_count": 30})
+    response = client.post(f"/api/drafts/{draft['id']}/analyze")
+    assert response.status_code == 400, response.get_json()
+    fields = [item["field"] for item in response.get_json()["error"]["fields"]]
+    assert "videos[0].units[0].geometry.arena" in fields
+    assert store.list_jobs() == []
+
+
+def state_rows(state: str, count: int = 50) -> list[dict]:
+    rows = []
+    for index in range(count):
+        start = 0.1 * index
+        rows.append({
+            "in_window": True, "feature_ready": True,
+            "interval_start_s": start, "interval_end_s": start + 0.1,
+            "dt_s": 0.1, "state": state,
+            "motion_score": 0.0, "smoothed_motion_score": 0.0,
+            "threshold_low": 0.08, "threshold_high": 0.108,
+        })
+    return rows
+
+
+def test_state_band_draws_active_and_keeps_gaps(tmp_path):
+    from behaviourlab import figures
+
+    active = tmp_path / "active.png"
+    # 全 active 的 5 秒数据也必须出图（此前 active 不在色表时返回 False）。
+    assert figures.activity_png(active, state_rows("active"), mode="fst")
+    image = cv2.imread(str(active))
+    assert image is not None
+    active_bgr = np.array([177, 107, 140])  # #8C6BB1
+    assert int(np.all(image == active_bgr, axis=2).sum()) > 5000
+
+    unknown = tmp_path / "unknown.png"
+    assert figures.activity_png(unknown, state_rows("unknown"), mode="fst")
+    assert not np.array_equal(image, cv2.imread(str(unknown)))
+
+    # 3.8 秒 active + 1.2 秒 immobile：两种色带都要出现。
+    mixed = state_rows("active")
+    for row in mixed[38:]:
+        row["state"] = "immobile"
+    target = tmp_path / "mixed.png"
+    assert figures.activity_png(target, mixed, mode="fst")
+    mixed_image = cv2.imread(str(target))
+    immobile_bgr = np.array([124, 143, 111])  # #6F8F7C
+    assert int(np.all(mixed_image == active_bgr, axis=2).sum()) > 1000
+    assert int(np.all(mixed_image == immobile_bgr, axis=2).sum()) > 1000
+
+    # 真正缺失不填平：缺口区间不出图，仍能生成其余部分。
+    gapped = state_rows("active")
+    for row in gapped[20:30]:
+        row["in_window"] = False
+    gap_target = tmp_path / "gap.png"
+    assert figures.activity_png(gap_target, gapped, mode="fst")
+    assert not np.array_equal(cv2.imread(str(gap_target)), image)
+
+
 def test_fst_registration_preview_and_result_page(client, store, tmp_path,
                                                   monkeypatch):
     from behaviourlab import media, preview
