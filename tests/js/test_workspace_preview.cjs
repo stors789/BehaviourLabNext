@@ -4,6 +4,7 @@ const assert = require("assert");
 const {
   saveThenPreview,
   previewNoteFor,
+  issueText,
 } = require("../../behaviourlab/web/static/editor-core.js");
 
 const CONFIG = {
@@ -145,12 +146,64 @@ function notes() {
   assert.ok(sized.text.includes("体型不一致"), sized.text);
 }
 
+function fieldReasonsWin() {
+  const width = issueText({
+    message: "草稿未通过校验",
+    fields: [
+      { field: "videos[0].units[0].options.arena_width_cm",
+        message: "场地宽度必须 > 0" },
+      { field: "videos[0].units[0].options.bin_seconds",
+        message: "时间箱长度必须 > 0" },
+    ],
+  }, "保存失败，未开始分析");
+  assert.strictEqual(width, "场地宽度必须 > 0；时间箱长度必须 > 0",
+    "字段原因不能被通用提示覆盖");
+
+  const fieldOnly = issueText({
+    message: "草稿未通过校验",
+    fields: [{ field: "videos[0].units[0].geometry.arena" }],
+  }, "保存失败");
+  assert.strictEqual(fieldOnly, "videos[0].units[0].geometry.arena",
+    "没有 message 时退回字段名");
+
+  const plain = issueText({ message: "服务不可用" }, "保存失败");
+  assert.strictEqual(plain, "服务不可用");
+
+  const fallback = issueText(new Error(""), "保存失败，未生成预览");
+  assert.strictEqual(fallback, "保存失败，未生成预览");
+}
+
+async function saveFailureCarriesFieldReason() {
+  const widthError = new Error("草稿未通过校验");
+  widthError.fields = [{
+    field: "videos[0].units[0].options.arena_width_cm",
+    message: "场地宽度必须 > 0",
+  }];
+  let posts = 0;
+  const result = await saveThenPreview({
+    dirty: () => true,
+    save: async () => false,
+    alive: () => true,
+    config: () => CONFIG,
+    send: async () => {
+      posts += 1;
+      return {};
+    },
+  });
+  assert.strictEqual(result.status, "save_failed");
+  assert.strictEqual(posts, 0, "保存失败不得发起预览或开始分析");
+  assert.strictEqual(issueText(widthError, "保存失败，未生成预览"),
+    "场地宽度必须 > 0", "阻断提示必须带具体字段原因");
+}
+
 (async () => {
   await saveRunsFirst();
   await saveFailureStopsPreview();
   await stalePageStopsPreview();
   await cleanStateSkipsSave();
   notes();
+  fieldReasonsWin();
+  await saveFailureCarriesFieldReason();
   console.log("workspace-preview OK");
 })().catch((error) => {
   console.error(error);

@@ -494,6 +494,16 @@
     return { tone, text: lines.join("\n") };
   }
 
+  // 校验失败优先展示字段级原因；通用文案只在没有具体字段时兜底。
+  function issueText(error, fallback) {
+    const issues = error && Array.isArray(error.fields) ? error.fields : [];
+    const messages = issues
+      .map((issue) => (issue && (issue.message || issue.field)) || "")
+      .filter((text) => text);
+    if (messages.length) return messages.join("；");
+    return (error && error.message) || fallback || "请求失败";
+  }
+
   // 预览前先落盘：保存失败不发起请求，页面/配置失效也不发起。
   // task: { dirty(), save(), alive(), config(), send(config) }
   async function saveThenPreview(task) {
@@ -562,6 +572,7 @@
     SaveQueue,
     previewSignature,
     previewNoteFor,
+    issueText,
     saveThenPreview,
     stableStringify,
     resolveStep,

@@ -124,6 +124,15 @@
     el.statusbar.dataset.tone = tone || "";
   }
 
+  // 校验失败优先显示字段级原因；通用文案只在没有具体字段时兜底。
+  function issueText(error, fallback) {
+    return window.BLCore.issueText(error, fallback);
+  }
+
+  function lastSaveText(fallback) {
+    return issueText(state.saver && state.saver.lastError, fallback);
+  }
+
   function clone(value) {
     return value == null ? value : JSON.parse(JSON.stringify(value));
   }
@@ -205,7 +214,7 @@
       state.savedSnapshot = clone(state.draft);
     }).then((ok) => {
       if (!ok && state.saver && state.saver.lastError) {
-        status(state.saver.lastError.message, "error");
+        status(issueText(state.saver.lastError, "保存失败"), "error");
       }
       return ok && !isDirty();
     });
@@ -280,7 +289,7 @@
       const ok = await saveThen();
       if (token !== state.navToken) return false;
       if (!ok) {
-        status("保存失败，仍停留在当前页", "error");
+        status(lastSaveText("保存失败，仍停留在当前页"), "error");
         return false;
       }
     }
@@ -645,7 +654,7 @@
     clearTimeout(state.saveTimer);
     const ok = await saveThen();
     if (!ok) {
-      status("保存失败，未进入场地", "error");
+      status(lastSaveText("保存失败，未进入场地"), "error");
       return;
     }
     await goStep("arena", { view: "geometry" });
@@ -1696,8 +1705,9 @@
       });
       if (result.status === "save_failed") {
         state.previewGate.invalidate();
-        status("保存失败，未生成预览", "error");
-        setPreviewNote({ tone: "error", text: "保存失败，未生成预览。" });
+        const reason = lastSaveText("保存失败，未生成预览");
+        status(reason, "error");
+        setPreviewNote({ tone: "error", text: reason });
         return;
       }
       if (result.status === "stale") {
@@ -1715,8 +1725,9 @@
         ? "本帧预览" : "片段预览") + " · 帧 " + data.frame_index, "ok");
     } catch (error) {
       if (request) state.previewGate.fail(request);
-      setPreviewNote({ tone: "error", text: "预览失败：" + error.message });
-      status(error.message, "error");
+      const reason = issueText(error, "预览失败");
+      setPreviewNote({ tone: "error", text: reason });
+      status(reason, "error");
     } finally {
       el.primary.disabled = false;
       el.secondary.disabled = false;
@@ -1764,7 +1775,7 @@
     }
     const settled = await saveThen();
     if (!settled) {
-      status("保存失败，未开始分析", "error");
+      status(lastSaveText("保存失败，未开始分析"), "error");
       return;
     }
     el.primary.disabled = true;
@@ -1780,10 +1791,7 @@
       window.location.href = "/results/" + data.run_id;
     } catch (error) {
       // 校验失败时给出可定位原因，而不是只显示“草稿未通过校验”。
-      const issues = Array.isArray(error.fields) ? error.fields : [];
-      status(issues.length
-        ? issues.map((issue) => issue.message || issue.field).join("；")
-        : error.message, "error");
+      status(issueText(error, "分析失败"), "error");
     } finally {
       el.primary.disabled = false;
     }
@@ -1999,7 +2007,7 @@
       if (token !== state.navToken) return;
       if (!ok) {
         history.pushState({ analysis: analysisState() }, "", location.href);
-        status("保存失败，未切换历史记录", "error");
+        status(lastSaveText("保存失败，未切换历史记录"), "error");
         return;
       }
       if (!target) return;
@@ -2046,7 +2054,7 @@
       if (token !== state.navToken) return;
       state.pendingNav = null;
       if (!ok) {
-        status("保存失败，仍留在当前页", "error");
+        status(lastSaveText("保存失败，仍留在当前页"), "error");
         return;
       }
       location.href = url.href;

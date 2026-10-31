@@ -62,3 +62,20 @@ def test_parameter_sections_render_as_folds():
     assert entry["parameters"]
     assert all(param.get("section") == "统计"
                for param in entry["parameters"])
+
+
+def test_save_failures_show_field_reasons():
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    # 保存失败与因此被阻断的路径都走字段级文案，不再被通用提示覆盖。
+    for fallback in ("保存失败，仍停留在当前页", "保存失败，未进入场地",
+                     "保存失败，未生成预览", "保存失败，未开始分析"):
+        assert f'lastSaveText("{fallback}")' in source, fallback
+    assert 'status("保存失败' not in source
+    assert "issueText(state.saver.lastError" in source
+    assert "window.BLCore.issueText(error, fallback)" in source
+
+    core = (ROOT / "behaviourlab/web/static/editor-core.js").read_text(
+        encoding="utf-8")
+    assert "function issueText(error, fallback)" in core
+    assert "    issueText," in core

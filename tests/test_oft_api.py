@@ -139,3 +139,29 @@ def test_analyze_requires_arena_before_creating_job(client, store, tmp_path,
     fixed["videos"][0]["units"][0]["geometry"] = {"arena": ARENA}
     assert client.put(f"/api/drafts/{draft['id']}",
                       json={"videos": fixed["videos"]}).status_code == 200
+
+
+def test_width_zero_save_reason_and_recovery(client, store, tmp_path):
+    asset, draft = seed(store, tmp_path)
+    videos = draft["videos"]
+    videos[0]["units"][0]["options"]["arena_width_cm"] = 40.0
+    assert client.put(f"/api/drafts/{draft['id']}",
+                      json={"videos": videos}).status_code == 200
+
+    videos[0]["units"][0]["options"]["arena_width_cm"] = 0.0
+    bad = client.put(f"/api/drafts/{draft['id']}", json={"videos": videos})
+    assert bad.status_code == 400
+    issues = bad.get_json()["error"]["fields"]
+    assert any(issue["field"].endswith("options.arena_width_cm")
+               and issue["message"] == "场地宽度必须 > 0"
+               for issue in issues), issues
+    # 保存失败不回写：草稿仍是上一次成功的 40，界面保留用户输入的 0。
+    stored = client.get(f"/api/drafts/{draft['id']}").get_json()["data"]["draft"]
+    assert stored["videos"][0]["units"][0]["options"]["arena_width_cm"] == 40.0
+    assert store.list_jobs() == []
+
+    videos[0]["units"][0]["options"]["arena_width_cm"] = 40.0
+    fixed = client.put(f"/api/drafts/{draft['id']}", json={"videos": videos})
+    assert fixed.status_code == 200, fixed.get_json()
+    kept = client.get(f"/api/drafts/{draft['id']}").get_json()["data"]["draft"]
+    assert kept["videos"][0]["units"][0]["options"]["arena_width_cm"] == 40.0
