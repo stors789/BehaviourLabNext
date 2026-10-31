@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import logging
+import re
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, Mapping
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException
 
+from .. import assets as asset_service
 from .. import experiments
+from ..assets import BackgroundError
 from ..config import APP_NAME, APP_VERSION, SCHEMA_VERSION, DataPaths
 from ..detection import common_detection_defaults
 from ..engine import (
@@ -26,6 +30,8 @@ from ..store import NotFoundError, Store
 LOGGER = logging.getLogger(__name__)
 
 SETTINGS_SECTIONS = ("defaults", "detection", "output", "style")
+BACKGROUND_NAME = re.compile(r"[0-9a-f]{32}\.png")
+PREVIEW_NAME = re.compile(r"[0-9a-f]{32}\.(?:png|jpg|jpeg)")
 
 
 class ApiError(Exception):
@@ -203,6 +209,92 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
                 "style_defaults": deepcopy(COMMON_STYLE_DEFAULTS),
             }
         )
+
+    # -- 素材导入与媒体 -------------------------------------------------
+    def _require_project(project_id: str) -> dict:
+        if not is_valid_id(project_id):
+            raise ApiError("项目 ID 无效", 400,
+                           [{"field": "project_id", "message": "ID 无效"}])
+        project = store.get_project(project_id)
+        if project is None:
+            raise ApiError("项目不存在", 404)
+        return project
+
+    @app.get("/api/assets")
+    def list_assets():
+        project_id = request.args.get("project_id")
+        if project_id is None:
+            return success({"assets": store.list_assets()})
+        _require_project(project_id)
+        return success({"assets": store.list_assets_for_scope(project_id)})
+
+    @app.post("/api/assets/import")
+    def import_assets():
+        body = _json_body()
+        paths = body.get("paths")
+        if not isinstance(paths, list):
+            raise ApiError("paths 必须是数组", 400,
+                           [{"field": "paths", "message": "必须是数组"}])
+        for index, value in enumerate(paths):
+            if not isinstance(value, str):
+                raise ApiError("paths 必须是字符串数组", 400,
+                               [{"field": f"paths[{index}]", "message": "必须是字符串"}])
+        project_id = body.get("project_id")
+        if project_id is not None:
+            _require_project(project_id)
+        return success(asset_service.import_paths(store, paths, project_id))
+
+    @app.post("/api/assets/upload")
+    def upload_assets():
+        files = request.files.getlist("files")
+        if not files:
+            raise ApiError("缺少上传文件", 400,
+                           [{"field": "files", "message": "至少选择一个文件"}])
+        project_id = request.form.get("project_id") or None
+        if project_id is not None:
+            _require_project(project_id)
+        return success(asset_service.import_uploads(store, files, project_id))
+
+    @app.get("/api/assets/<asset_id>/stream")
+    def stream_asset(asset_id: str):
+        asset = store.get_asset(asset_id)
+        if asset is None:
+            raise ApiError("素材不存在", 404)
+        path = Path(asset["path"])
+        if not path.is_file():
+            raise ApiError("源文件不可读取", 404)
+        return send_file(path, conditional=True)
+
+    @app.post("/api/backgrounds/upload")
+    def upload_background():
+        upload = request.files.get("file")
+        if upload is None:
+            raise ApiError("缺少背景文件", 400,
+                           [{"field": "file", "message": "请选择一个文件"}])
+        try:
+            result = asset_service.save_background(paths, upload.read())
+        except BackgroundError as error:
+            raise ApiError(str(error), 400,
+                           [{"field": "file", "message": str(error)}])
+        return success(result, 201)
+
+    @app.get("/api/backgrounds/<filename>")
+    def get_background(filename: str):
+        if not BACKGROUND_NAME.fullmatch(filename):
+            raise ApiError("背景不存在", 404)
+        path = Path(paths.backgrounds) / filename
+        if not path.is_file():
+            raise ApiError("背景不存在", 404)
+        return send_file(path, mimetype="image/png", conditional=True)
+
+    @app.get("/api/previews/<filename>")
+    def get_preview(filename: str):
+        if not PREVIEW_NAME.fullmatch(filename):
+            raise ApiError("预览不存在", 404)
+        path = Path(paths.previews) / filename
+        if not path.is_file():
+            raise ApiError("预览不存在", 404)
+        return send_file(path, conditional=True)
 
     # -- 设置 -----------------------------------------------------------
     def _defaults_for(section: str) -> dict:
@@ -430,8 +522,18 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
 
     @app.get("/analyze")
     def page_analyze():
+        mode = request.args.get("mode", "project")
+        if mode not in ("project", "independent"):
+            mode = "project"
+        project_id = request.args.get("project")
+        if project_id is not None and store.get_project(project_id) is None:
+            project_id = None
         return render_template(
-            "analyze.html", active="analyze", mode=request.args.get("mode", "project")
+            "analyze.html",
+            active="analyze",
+            mode=mode,
+            project_id=project_id,
+            projects=store.list_projects(),
         )
 
     @app.get("/tasks")

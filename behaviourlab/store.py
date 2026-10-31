@@ -499,8 +499,10 @@ class Store:
         project_id: str | None = None,
         metadata: Mapping[str, Any] | None = None,
         upload_sha256: str | None = None,
+        asset_id: str | None = None,
     ) -> dict:
-        asset_id = new_id()
+        asset_id = asset_id or new_id()
+        require_id(asset_id, "asset_id")
         now = utc_now()
         clean_name = _text(name, "name")
         if ownership not in ("linked", "owned"):
@@ -559,6 +561,46 @@ class Store:
                     (project_id,),
                 ).fetchall()
         return [_decode_row(row, ("metadata",)) for row in rows]
+
+    def list_assets_for_scope(self, project_id: str | None) -> list[dict]:
+        """仅返回该归属下的资产；project_id 为 None 时只返回未绑定资产的记录。"""
+
+        with self.read() as connection:
+            if project_id is None:
+                rows = connection.execute(
+                    "SELECT * FROM assets WHERE project_id IS NULL ORDER BY created_at DESC"
+                ).fetchall()
+            else:
+                require_id(project_id, "project_id")
+                rows = connection.execute(
+                    "SELECT * FROM assets WHERE project_id = ? ORDER BY created_at DESC",
+                    (project_id,),
+                ).fetchall()
+        return [_decode_row(row, ("metadata",)) for row in rows]
+
+    def find_asset_by_path(self, project_id: str | None, path: str) -> dict | None:
+        folded = os.path.normcase(os.path.abspath(path))
+        for asset in self.list_assets_for_scope(project_id):
+            if os.path.normcase(os.path.abspath(asset["path"])) == folded:
+                return asset
+        return None
+
+    def find_asset_by_sha256(self, project_id: str | None, digest: str) -> dict | None:
+        with self.read() as connection:
+            if project_id is None:
+                row = connection.execute(
+                    "SELECT * FROM assets WHERE project_id IS NULL AND upload_sha256 = ?"
+                    " ORDER BY created_at DESC LIMIT 1",
+                    (digest,),
+                ).fetchone()
+            else:
+                require_id(project_id, "project_id")
+                row = connection.execute(
+                    "SELECT * FROM assets WHERE project_id = ? AND upload_sha256 = ?"
+                    " ORDER BY created_at DESC LIMIT 1",
+                    (project_id, digest),
+                ).fetchone()
+        return _row_or_none(row, ("metadata",))
 
     # -- 草稿 -----------------------------------------------------------
     def create_draft(

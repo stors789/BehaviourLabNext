@@ -31,6 +31,13 @@ Thumbs.db
 *.mov
 *.mkv
 *.wmv
+*.m4v
+*.mpg
+*.mpeg
+*.mts
+*.m2ts
+*.webm
+*.flv
 
 # 数据库与运行输出
 *.db
@@ -39,3 +46,7 @@ Thumbs.db
 output/
 outputs/
 runs/
+/videos/
+/backgrounds/
+/previews/
+/logs/

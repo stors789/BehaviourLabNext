@@ -13,6 +13,40 @@ class MediaError(RuntimeError):
     """无法读取指定媒体。"""
 
 
+VIDEO_EXTENSIONS = (
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".mkv",
+    ".m4v",
+    ".wmv",
+    ".mpg",
+    ".mpeg",
+    ".mts",
+    ".m2ts",
+    ".webm",
+    ".flv",
+)
+
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp")
+
+
+def has_video_extension(name: str) -> bool:
+    return Path(name).suffix.lower() in VIDEO_EXTENSIONS
+
+
+def has_image_extension(name: str) -> bool:
+    return Path(name).suffix.lower() in IMAGE_EXTENSIONS
+
+
+def video_dialog_filter() -> str:
+    return "视频文件 (" + ";".join(f"*{suffix}" for suffix in VIDEO_EXTENSIONS) + ")"
+
+
+def image_dialog_filter() -> str:
+    return "图片 (" + ";".join(f"*{suffix}" for suffix in IMAGE_EXTENSIONS) + ")"
+
+
 def probe_video(path: str | Path) -> dict:
     """探测视频元数据；未知字段保持 None，不猜测。"""
 

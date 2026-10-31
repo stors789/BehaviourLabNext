@@ -7,7 +7,10 @@
     <a class="crumb" href="/projects">项目</a>
     <h1>{{ project.name }}</h1>
   </div>
-  <span class="project-meta">{{ project.group_count }} 组 · {{ project.animal_count }} 只</span>
+  <div class="head-actions">
+    <span class="project-meta">{{ project.group_count }} 组 · {{ project.animal_count }} 只</span>
+    <a class="button" href="/analyze?mode=project&project={{ project.id }}">分析</a>
+  </div>
 </div>
 
 {% if project.description %}

@@ -2,13 +2,64 @@
 {% block title %}{{ '独立分析' if mode == 'independent' else '项目分析' }} · {{ app_name }}{% endblock %}
 
 {% block content %}
-<div class="section-head page-head">
-  <h1>{{ '独立分析' if mode == 'independent' else '项目分析' }}</h1>
+<div class="section-head page-head" data-analyze
+     data-mode="{{ mode }}" data-project="{{ project_id or '' }}">
+  <div>
+    <a class="crumb" href="/">首页</a>
+    <h1>{{ '独立分析' if mode == 'independent' else '项目分析' }}</h1>
+  </div>
+  {% if mode == 'project' %}
+  <label class="select-inline">
+    <span>项目</span>
+    <select id="project-select">
+      <option value="">选择项目</option>
+      {% for project in projects %}
+      <option value="{{ project.id }}" {{ 'selected' if project.id == project_id else '' }}>{{ project.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  {% endif %}
 </div>
 
-<div class="empty-state">
-  <p>分析工作台将在下一块接入。</p>
-  <p class="muted">视频导入、几何与预览尚未开放。</p>
-  <a class="button" href="/">返回首页</a>
+<section class="import-zone" id="dropzone">
+  <div class="import-actions">
+    <button class="button primary" type="button" id="pick-videos">选择视频</button>
+    <button class="button" type="button" id="pick-folder">选择文件夹</button>
+  </div>
+  <p class="drop-hint">拖入视频文件</p>
+  <p class="import-status" id="import-status" hidden></p>
+</section>
+
+<ul class="error-list" id="import-errors" hidden></ul>
+
+<div class="analyze-grid">
+  <section class="panel">
+    <div class="section-head">
+      <h2>视频资产</h2>
+      <span class="project-meta" id="asset-count"></span>
+    </div>
+    <ul class="asset-list" id="asset-list"></ul>
+    <div class="empty-inline" id="asset-empty">
+      <p>还没有视频。</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <h2>已选视频</h2>
+      <span class="project-meta" id="selected-count"></span>
+    </div>
+    <ul class="selected-list" id="selected-list"></ul>
+    <div class="empty-inline" id="selected-empty">
+      <p>未选择视频。</p>
+    </div>
+    <button class="button primary full" type="button" id="setup-videos" disabled>设置视频</button>
+    <p class="muted setup-note" id="setup-note" hidden></p>
+  </section>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='pickers.js') }}" defer></script>
+<script src="{{ url_for('static', filename='analyze.js') }}" defer></script>
 {% endblock %}
