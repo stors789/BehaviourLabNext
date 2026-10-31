@@ -920,10 +920,9 @@ class VideoSource:
         )
         next_target = 0.0
         pending: tuple[RawFrame, ClockMeta] | None = None
-        phase = "before"
+        ended_at_window = False
         last_meta: ClockMeta | None = None
         previous_time: float | None = None
-        eof_boundary: float | None = None
 
         reader = self._pool.get(
             self.path,
@@ -944,40 +943,29 @@ class VideoSource:
             if not selected:
                 continue
 
-            if phase == "before":
-                if time_s < self.start_s:
-                    pending = (raw, meta)
-                    continue
-                if pending is not None:
-                    yield self._frame(pending[0], pending[1], time_s)
-                    pending = None
-                pending = (raw, meta)
-                phase = "inside" if self.end_s is None or time_s < self.end_s else "after"
-                if phase == "after":
-                    yield self._frame(raw, meta, time_s, context_after=True)
-                    break
-                continue
-
-            if phase == "inside":
-                if self.end_s is not None and time_s >= self.end_s:
-                    if pending is not None:
-                        yield self._frame(pending[0], pending[1], time_s)
-                        pending = None
-                    yield self._frame(raw, meta, time_s, context_after=True)
-                    break
-                if pending is not None:
-                    yield self._frame(pending[0], pending[1], time_s)
+            # 窗口之前只保留最近一帧作前向上下文，不输出。
+            if time_s < self.start_s:
                 pending = (raw, meta)
                 continue
 
-            # phase == after 已在上面立即结束
-            break
+            # 进入窗口：先结算上一帧的前向曝光。
+            if pending is not None:
+                yield self._frame(pending[0], pending[1], time_s)
+                pending = None
+
+            # 到达窗口终点：本帧只作后向上下文，随即结束，不是源视频结束。
+            if self.end_s is not None and time_s >= self.end_s:
+                yield self._frame(raw, meta, time_s, context_after=True)
+                ended_at_window = True
+                break
+
+            pending = (raw, meta)
 
         if last_meta is None:
             raise VideoSourceError("没有可解码的源帧")
 
-        eof_boundary = self._eof_boundary(last_meta, previous_time)
-        if pending is not None:
+        if pending is not None and not ended_at_window:
+            eof_boundary = self._eof_boundary(last_meta, previous_time)
             yield self._frame(pending[0], pending[1], eof_boundary)
 
         self._check_coverage()

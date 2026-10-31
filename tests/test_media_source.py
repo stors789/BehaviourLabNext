@@ -135,6 +135,7 @@ def test_native_clock_and_window_sampling(tmp_path):
         decoder_factory=window_factory,
     )
     window_frames = list(window.iter_frames())
+    assert [frame.index for frame in window_frames] == [1, 2]
     context = next(frame for frame in window_frames if frame.index == 1)
     assert abs(context.time_s - 0.05) <= 1e-12
     assert abs(context.dt_s - 0.22) <= 1e-12
@@ -143,6 +144,12 @@ def test_native_clock_and_window_sampling(tmp_path):
     assert abs(window.coverage["duration_s"] - 0.10) <= 1e-12
     assert window.coverage["frame_count"] == 1
     assert abs(window.coverage["end_s"] - 0.25) <= 1e-12
+
+    after = next(frame for frame in window_frames if frame.index == 2)
+    assert abs(after.time_s - 0.27) <= 1e-12
+    assert after.dt_s == 0.0
+    assert abs(after.interval_start_s - 0.25) <= 1e-12
+    assert abs(after.interval_end_s - 0.25) <= 1e-12
 
     pool = ReaderPool(decoder_factory=FakeFactory(make_spec(pts, last_duration=0.04)))
     assert read_frame_at_time(path, 0.269, pool=pool).index == 1
