@@ -230,6 +230,25 @@ def _merged_option(draft: Mapping[str, Any], video: Mapping[str, Any],
     return value
 
 
+def is_manual_path(assay: str, mode: Any, manual: Any) -> bool:
+    """人工路径判定：预览的范围选择与窗口校验共用同一条规则。
+
+    mode=manual 无记录也算人工；已有记录且走人工路径同样算，两种都要拒绝
+    relative 窗口。
+    """
+
+    if assay == "ymaze" and mode == "manual":
+        return True
+    if not isinstance(manual, Mapping):
+        return False
+    if assay == "barnes":
+        return any(manual.get(key) for key in
+                   ("events", "hole_sequence", "entry", "sequence"))
+    if assay == "ymaze":
+        return bool(manual)
+    return False
+
+
 def _exact_misses_video(window: Mapping[str, Any], video_start: float | None,
                         video_end: float | None) -> bool:
     """显式窗口与已声明的视频范围不重叠；视频终点未知时留给运行期。"""
@@ -380,8 +399,9 @@ def validate_draft(draft: Mapping[str, Any]) -> list[dict]:
                         {"field": f"{unit_prefix}.window.end_s",
                          "message": "窗口与视频范围没有重叠"}
                     )
-                if (assay == "ymaze"
-                        and _merged_option(draft, video, unit, "mode") == "manual"
+                if (is_manual_path(assay,
+                                   _merged_option(draft, video, unit, "mode"),
+                                   unit.get("manual"))
                         and unit_window.get("mode") == "relative"):
                     issues.append(
                         {"field": f"{unit_prefix}.window.mode",

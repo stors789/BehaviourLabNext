@@ -11,7 +11,7 @@ from typing import Any, Mapping
 
 from . import detection, experiments, geometry as geo, media, observation
 from .config import DataPaths
-from .engine import resolve_detection
+from .engine import is_manual_path, resolve_detection
 from .schema import ValidationError, is_number, new_id
 from .store import Store
 
@@ -263,22 +263,6 @@ def _find_unit(video: Mapping[str, Any], unit_id: str | None) -> Mapping[str, An
     return units[0]
 
 
-def _is_manual_scope(assay: str, options: Mapping[str, Any],
-                     unit: Mapping[str, Any]) -> bool:
-    """人工 Y 或带人工输入的 Barnes 保持完整配置范围。"""
-
-    if assay == "ymaze" and options.get("mode") == "manual":
-        return True
-    manual = unit.get("manual")
-    if isinstance(manual, Mapping):
-        if assay == "barnes":
-            return any(manual.get(key) for key in
-                       ("events", "hole_sequence", "entry", "sequence"))
-        if assay == "ymaze":
-            return bool(manual)
-    return False
-
-
 def _scope(assay: str, video: Mapping[str, Any], unit: Mapping[str, Any],
            options: Mapping[str, Any], time_s: float, kind: str,
            duration_s: float | None) -> dict:
@@ -289,7 +273,7 @@ def _scope(assay: str, video: Mapping[str, Any], unit: Mapping[str, Any],
     if kind == "detection":
         return {"start_s": time_s, "end_s": time_s, "frame_count": 1,
                 "mode": "frame"}
-    if _is_manual_scope(assay, options, unit):
+    if is_manual_path(assay, options.get("mode"), unit.get("manual")):
         scope_end = end_value if end_value is not None else max(start, time_s)
         scope_end = max(start, scope_end)
         return {
@@ -365,7 +349,8 @@ def create_preview(
 
     height, width = info.image.shape[:2]
     orientation = int(video.get("orientation", 0) or 0)
-    manual_scope = _is_manual_scope(draft.get("assay", ""), options, unit)
+    manual_scope = is_manual_path(
+        draft.get("assay", ""), options.get("mode"), unit.get("manual"))
     # 人工记录路径不运行自动检测，也不为它伪造检测区域。
     detect_here = not (kind == "behavior" and manual_scope)
     region_source = None
@@ -486,8 +471,9 @@ def create_preview(
                 "head_angle": result.head_angle,
                 "head_quality": float(result.head_quality),
             },
-            "manual_preserved": _is_manual_scope(draft.get("assay", ""),
-                                                  options, unit),
+            "manual_preserved": is_manual_path(draft.get("assay", ""),
+                                               options.get("mode"),
+                                               unit.get("manual")),
         },
         "warnings": warnings,
     }

@@ -718,3 +718,51 @@ def test_preview_keeps_unit_evidence_between_requests(client, store, tmp_path,
     recovered = frame(moved, 2)
     assert recovered["missing_reason"] is None
     assert abs(recovered["center"][0] - 38.5) <= 1.0
+
+
+def test_manual_records_without_mode_use_manual_path(client, store, tmp_path,
+                                                     monkeypatch):
+    asset, draft = seed(
+        store, tmp_path, assay="ymaze", duration=60.0,
+        geometry={},
+        window={"start_s": 1.0, "end_s": 20.0},
+        unit_options={},
+        manual={"events": [{"time_s": 2.5, "frame": 75, "kind": "event"}]},
+    )
+    monkeypatch.setattr(preview.media, "read_frame_at_time",
+                        lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "a" * 32,
+              "time_s": 2.99997, "kind": "behavior"},
+    )
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    assert data["preview_scope"]["mode"] == "configured"
+    assert data["summary"]["manual_preserved"] is True
+    assert data["summary"]["detection_available"] is False
+
+
+def test_manual_records_without_mode_use_manual_path(client, store, tmp_path,
+                                                     monkeypatch):
+    asset, draft = seed(
+        store, tmp_path, assay="ymaze", duration=60.0,
+        geometry={},
+        window={"start_s": 1.0, "end_s": 20.0},
+        unit_options={},
+        manual={"events": [{"time_s": 2.5, "frame": 75, "kind": "event"}]},
+    )
+    monkeypatch.setattr(preview.media, "read_frame_at_time",
+                        lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "a" * 32,
+              "time_s": 2.99997, "kind": "behavior"},
+    )
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    assert data["preview_scope"]["mode"] == "configured"
+    assert data["summary"]["manual_preserved"] is True
+    assert data["summary"]["detection_available"] is False

@@ -19,7 +19,6 @@ def test_ymaze_manual_only_allows_global_or_exact_window(client):
                     "units": [
                         {
                             "name": "小鼠 1",
-                            "options": {"mode": "manual"},
                             "window": {"mode": "relative", "offset_s": 0,
                                        "duration_s": 60},
                             "manual": {"entries": [{"time_s": 1.0, "arm": "A"}]},
@@ -207,3 +206,37 @@ def test_manual_y_restriction_follows_mode_not_records(client):
     assert response.status_code == 400
     fields = [issue["field"] for issue in response.get_json()["error"]["fields"]]
     assert "videos[0].units[0].window.mode" in fields
+
+
+def test_automatic_y_keeps_relative_window(client):
+    response = client.post("/api/drafts", json={
+        "assay": "ymaze",
+        "videos": [{
+            "asset_id": new_id(),
+            "units": [{
+                "name": "小鼠 1",
+                "window": {"mode": "relative", "offset_s": 0,
+                           "duration_s": 60},
+            }],
+        }],
+    })
+    assert response.status_code == 201, response.get_json()
+    draft = response.get_json()["data"]["draft"]
+    assert draft["videos"][0]["units"][0]["window"]["mode"] == "relative"
+
+
+def test_automatic_y_keeps_relative_window(client):
+    response = client.post("/api/drafts", json={
+        "assay": "ymaze",
+        "videos": [{
+            "asset_id": new_id(),
+            "units": [{
+                "name": "小鼠 1",
+                "window": {"mode": "relative", "offset_s": 0,
+                           "duration_s": 60},
+            }],
+        }],
+    })
+    assert response.status_code == 201, response.get_json()
+    draft = response.get_json()["data"]["draft"]
+    assert draft["videos"][0]["units"][0]["window"]["mode"] == "relative"
