@@ -188,6 +188,23 @@ function behaviorNote() {
   assert.ok(found.text.includes("行为 3.50 s"), found.text);
   assert.ok(found.text.includes("非挣扎 3.40"), found.text);
   assert.ok(found.text.includes("不确定 0.10"), found.text);
+
+  const oft = previewNoteFor({
+    summary: {
+      detection_available: true,
+      detection: { candidates: 1, missing_reason: null },
+      behavior: {
+        mode: "oft", total_time_s: 4.0, center_percent: 12.5,
+        center_entries: 2, total_distance_cm: 130.25,
+        mean_speed_cm_s: 3.5,
+      },
+    },
+    warnings: [],
+  });
+  assert.ok(oft.text.includes("中心 12.50%"), oft.text);
+  assert.ok(oft.text.includes("进入 2 次"), oft.text);
+  assert.ok(oft.text.includes("路程 130.25 cm"), oft.text);
+  assert.ok(!oft.text.includes("非挣扎"), "OFT 不套用 TST 标签");
 }
 
 async function saveFailureCarriesFieldReason() {

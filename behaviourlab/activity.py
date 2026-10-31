@@ -67,7 +67,11 @@ def body_features(candidate: Mapping[str, Any],
                   arena_points: Sequence[Sequence[float]],
                   elapsed_s: float | None,
                   prev_area: float | None) -> dict | None:
-    """最大外轮廓的形态特征；质心不在场地内就不形成身体形态。"""
+    """最大外轮廓的形态特征；质心不在场地内就不形成身体形态。
+
+    身体面积是外轮廓面积，不是检测候选减去孔洞后的净面积：孔洞属于
+    身体内部，形态量按实体外轮廓计算；候选检测仍保留孔洞规则。
+    """
 
     contour = np.asarray(candidate.get("contour"), dtype=np.float32)
     if contour.size < 6:
@@ -77,7 +81,7 @@ def body_features(candidate: Mapping[str, Any],
     if center is None or not geo.point_in_polygon(center, arena_points):
         return None
     x, y, width, height = candidate["bbox"]
-    area = float(candidate["area"])
+    area = float(cv2.contourArea(contour))
     perimeter = float(cv2.arcLength(contour, True))
     hull = cv2.convexHull(contour)
     hull_area = float(cv2.contourArea(hull))
@@ -521,15 +525,27 @@ def lis_core_peripheral(mask: np.ndarray, length_px: float,
             "ratio": peripheral_mean / max(core_mean, 1e-6), "kernel": size}
 
 
+def lis_hu_log(value: float) -> float:
+    """Hu 分量的有符号对数 −sign(h)·log10(max(|h|,1e−30))。
+
+    注意先取对数再乘符号；h = 0 时 sign(h) = 0，分量必须正好是 0。
+    """
+
+    number = float(value)
+    if number == 0.0:
+        return 0.0
+    magnitude = math.log10(max(abs(number), 1e-30))
+    return -magnitude if number > 0 else magnitude
+
+
 def lis_hu_vector(mask: np.ndarray) -> list[float] | None:
-    """Hu 矩的有符号对数向量 −sign(h)·log10(max(|h|,1e-30))。"""
+    """Hu 矩的有符号对数向量，逐分量按 lis_hu_log 计算。"""
 
     if not isinstance(mask, np.ndarray) or not (mask > 0).any():
         return None
     moments = cv2.moments(mask, binaryImage=True)
     raw = cv2.HuMoments(moments).flatten()
-    return [-math.copysign(math.log10(max(abs(float(value)), 1e-30)),
-                           float(value)) for value in raw]
+    return [lis_hu_log(float(value)) for value in raw]
 
 
 def lis_hu_distance(cur: Sequence[float] | None,

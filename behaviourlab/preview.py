@@ -352,7 +352,7 @@ def create_preview(
 
     behavior = None
     module = experiments.get(draft["assay"])
-    if (kind == "behavior" and draft["assay"] == "tst" and not manual_scope
+    if (kind == "behavior" and not manual_scope
             and hasattr(module, "preview_analysis")):
         core_unit = {
             "id": unit.get("id"),

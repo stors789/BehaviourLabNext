@@ -20,6 +20,32 @@ def make_frame(index: int = 7, time_s: float = 0.28) -> FrameInfo:
     )
 
 
+class RangeSource:
+    """行为预览片段解码头：按窗口给出 640×480 的真实帧，接口同 VideoSource。"""
+
+    def __init__(self, path, *, start_s=0.0, end_s=None, **kwargs):
+        from behaviourlab.schema import Frame
+
+        self._frames = []
+        begin = float(start_s or 0.0)
+        stop = float(end_s if end_s is not None else begin + 1.0)
+        step = 0.04
+        count = max(1, int(round((stop - begin) / step)))
+        for index in range(count):
+            moment = begin + index * step
+            image = np.full((480, 640, 3), 255, dtype=np.uint8)
+            shift = 4 * (index % 5)
+            cv2.rectangle(image, (120 + shift, 100), (180 + shift, 160),
+                          (0, 0, 0), -1)
+            self._frames.append(Frame(
+                image=image, index=index, time_s=moment, dt_s=step,
+                elapsed_s=moment - begin, analysis_fps=1.0 / step,
+                interval_start_s=moment, interval_end_s=moment + step))
+
+    def iter_frames(self):
+        return iter(self._frames)
+
+
 def seed(store, tmp_path, geometry=None, duration=10.0, *, assay="oft",
          window=None, unit_options=None, manual=None):
     if geometry is None:
@@ -93,6 +119,7 @@ def test_behavior_scope_is_bounded_by_window(client, store, tmp_path, monkeypatc
     asset, draft = seed(store, tmp_path)
     monkeypatch.setattr(preview.media, "read_frame_at_time",
                         lambda *args, **kwargs: make_frame(index=50, time_s=2.0))
+    monkeypatch.setattr(media, "VideoSource", RangeSource)
 
     response = client.post(
         f"/api/drafts/{draft['id']}/preview",
@@ -197,6 +224,7 @@ def test_automatic_behavior_scope_stays_local(client, store, tmp_path, monkeypat
                         window={"start_s": 1.0, "end_s": 20.0})
     monkeypatch.setattr(preview.media, "read_frame_at_time",
                         lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
+    monkeypatch.setattr(media, "VideoSource", RangeSource)
 
     response = client.post(
         f"/api/drafts/{draft['id']}/preview",
@@ -287,6 +315,7 @@ def test_automatic_behavior_scope_stays_local(client, store, tmp_path, monkeypat
                         window={"start_s": 1.0, "end_s": 20.0})
     monkeypatch.setattr(preview.media, "read_frame_at_time",
                         lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
+    monkeypatch.setattr(media, "VideoSource", RangeSource)
 
     response = client.post(
         f"/api/drafts/{draft['id']}/preview",

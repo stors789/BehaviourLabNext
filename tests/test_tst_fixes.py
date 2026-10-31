@@ -71,12 +71,14 @@ def test_acceleration_uses_signed_speed_differences():
 
 
 def test_area_rate_uses_source_time_difference():
+    # 身体面积按外轮廓算：轮廓 12×10 = 120，上一身体面积 100。
     candidate = {
-        "contour": [[10, 10], [20, 10], [20, 20], [10, 20]],
-        "bbox": [10.0, 10.0, 10.0, 10.0], "center": [15.0, 15.0],
+        "contour": [[10, 10], [22, 10], [22, 20], [10, 20]],
+        "bbox": [10.0, 10.0, 12.0, 10.0], "center": [16.0, 15.0],
         "area": 120.0,
     }
     body = activity.body_features(candidate, ARENA, 0.22, 100.0)
+    assert body["body_area_px"] == pytest.approx(120.0, abs=TOL)
     assert body["body_area_rate_s"] == pytest.approx(0.2 / 0.22, abs=TOL)
     first = activity.body_features(candidate, ARENA, None, None)
     assert first["body_area_rate_s"] is None

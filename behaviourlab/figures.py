@@ -194,6 +194,12 @@ CURVE_KEYS = {
     "speed_std_mm_s": ("#16684e", "速度波动"),
 }
 
+# lis 的实际 F/S 来自残差模式自己的滚动量，不套用经典阈值。
+LIS_CURVE_KEYS = {
+    "lis_f": ("#1c5f9e", "光流 F"),
+    "lis_s": ("#16684e", "速度波动 S"),
+}
+
 # 决策特征 F 使用的实际阈值参考线（虚线）：key、线型、图例标签。
 FLOW_THRESHOLD_LINES = (
     ("flow_thr_hi_used", "--", "光流高阈值"),
@@ -254,11 +260,12 @@ def threshold_values(rows: Iterable[Mapping[str, Any]], key: str) -> list[float]
 
 def activity_png(path: str | Path, rows: Iterable[Mapping[str, Any]], *,
                  style: Mapping[str, Any] | None = None,
-                 title: str = "") -> bool:
+                 title: str = "", mode: str = "classic") -> bool:
     """上轴画 F/S 活动特征曲线，下轴按最终状态画时间线。
 
     逐行用真实曝光 [start,end)，缺口留白；没有可用状态不出图，
-    没有配对证据时退回只画状态色带。
+    没有配对证据时退回只画状态色带。lis 用 lis_f/lis_s 两条实际曲线，
+    不画经典阈值线。
     """
 
     items = []
@@ -276,7 +283,8 @@ def activity_png(path: str | Path, rows: Iterable[Mapping[str, Any]], *,
     if not items:
         return False
 
-    series = {key: activity_series(rows, key) for key in CURVE_KEYS}
+    curve_keys = LIS_CURVE_KEYS if mode == "lis" else CURVE_KEYS
+    series = {key: activity_series(rows, key) for key in curve_keys}
     has_curves = any(xs for xs, _ in series.values())
     _, _, line_width, dpi = _style(style)
 
@@ -298,18 +306,19 @@ def activity_png(path: str | Path, rows: Iterable[Mapping[str, Any]], *,
         band_axes = figure.add_subplot(111)
 
     if curve_axes is not None:
-        for key, (color, label) in CURVE_KEYS.items():
+        for key, (color, label) in curve_keys.items():
             xs, ys = series[key]
             if not xs:
                 continue
             # 序列已含每行区间起点与终点的阶梯坐标，直接直线连接。
             curve_axes.plot(xs, ys, color=color, linewidth=line_width,
                             label=label)
-        for key, dash, label in FLOW_THRESHOLD_LINES:
-            for value in threshold_values(rows, key):
-                curve_axes.axhline(value, color="#8a8a8a", linestyle=dash,
-                                   linewidth=max(0.8, line_width * 0.6),
-                                   label=label)
+        if mode != "lis":
+            for key, dash, label in FLOW_THRESHOLD_LINES:
+                for value in threshold_values(rows, key):
+                    curve_axes.axhline(value, color="#8a8a8a", linestyle=dash,
+                                       linewidth=max(0.8, line_width * 0.6),
+                                       label=label)
         curve_axes.set_ylabel("mm/s")
         handles, labels = curve_axes.get_legend_handles_labels()
         if handles:

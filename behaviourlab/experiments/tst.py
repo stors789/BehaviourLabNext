@@ -8,7 +8,7 @@ classic 用成对光流与阈值滞回；lis 先保存配准残差等测量证�
 from __future__ import annotations
 
 import math
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import cv2
 import numpy as np
@@ -346,7 +346,7 @@ def capture(context: Any, units: Sequence[Mapping[str, Any]]):
                     background = detection.prepare_background(
                         settings, asset, job,
                         int(job.get("orientation", 0) or 0), width, height)
-                roi_y, roi_x, roi_h, roi_w = cv2.boundingRect(region)
+                roi_x, roi_y, roi_w, roi_h = cv2.boundingRect(region)
                 entry = {
                     "detector": detection.shared_detector(
                         (run_key, unit_id), settings, background=background),
@@ -371,7 +371,8 @@ def capture(context: Any, units: Sequence[Mapping[str, Any]]):
                 previous_area = None
                 if prev is not None and prev.get("body") is not None:
                     elapsed = float(frame.time_s) - float(prev["time_s"])
-                    previous_area = prev.get("area")
+                    # 变化率与身体面积同一定义：都用外轮廓面积。
+                    previous_area = float(prev["body"]["body_area_px"])
                 body = activity.body_features(
                     candidate, entry["arena"], elapsed, previous_area)
             source_start = float(frame.interval_start_s)
@@ -393,7 +394,8 @@ def capture(context: Any, units: Sequence[Mapping[str, Any]]):
             if entry["lis"] and candidate is not None and body is not None:
                 mask = candidate["mask"]
                 metrics = {
-                    "area": float(candidate["area"]),
+                    # 身体形态同一口径：面积取外轮廓，不用检测净面积。
+                    "area": float(body["body_area_px"]),
                     "perimeter": float(body["body_perimeter_px"]),
                     "aspect": float(body["body_aspect"]),
                     "solidity": float(body["body_solidity"]),
@@ -438,6 +440,21 @@ def capture(context: Any, units: Sequence[Mapping[str, Any]]):
     return captured
 
 
+def _lis_climbing(bbox_y: float, body_y: float, aspect: float,
+                  roi: Sequence[float]) -> bool:
+    """攀爬嫌疑：身体框顶贴 ROI 顶 10%、质心在上 25% 且身体狭长。
+
+    roi 是 cv2.boundingRect 的 (x, y, w, h)；只判定，不改可信等级。
+    """
+
+    bounds = [float(value) for value in roi]
+    roi_y, roi_h = bounds[1], bounds[3]
+    return bool(
+        float(bbox_y) <= roi_y + 0.1 * roi_h
+        and float(body_y) <= roi_y + 0.25 * roi_h
+        and float(aspect) >= 1.8)
+
+
 def _lis_pair_evidence(entry: Mapping[str, Any], gray, candidate, body,
                        pair: Mapping[str, Any], prev: Mapping[str, Any],
                        lis_state: Mapping[str, Any],
@@ -458,15 +475,13 @@ def _lis_pair_evidence(entry: Mapping[str, Any], gray, candidate, body,
                                            prev["lis"]["hu"])
     z = activity.lis_deformation(lis_state["metrics"], prev["lis"]["metrics"],
                                  hu_distance, residual["mask_residual"])
-    roi_x, roi_y, roi_w, roi_h = entry["roi"]
-    bbox_x, bbox_y, bbox_w, bbox_h = candidate["bbox"]
+    roi_w, roi_h = float(entry["roi"][2]), float(entry["roi"][3])
+    bbox_y = float(candidate["bbox"][1])
     roi_area = max(roi_w * roi_h, 1e-6)
     area_ratio = float(candidate["area"]) / roi_area
     bad = bool(area_ratio < 0.0005 or area_ratio > 0.70 or length < 14.0)
-    climbing = bool(
-        float(bbox_y) <= roi_y + 0.1 * roi_h
-        and float(body["body_y_px"]) <= roi_y + 0.25 * roi_h
-        and float(body["body_aspect"]) >= 1.8)
+    climbing = _lis_climbing(float(bbox_y), float(body["body_y_px"]),
+                             float(body["body_aspect"]), entry["roi"])
     return {
         "lis_r": float(residual["r"]),
         "lis_mask_residual": float(residual["mask_residual"]),
@@ -516,13 +531,15 @@ def _groups(rows: Sequence[Mapping[str, Any]]) -> list[list[Mapping[str, Any]]]:
 def derive_features(rows: Sequence[dict], arena_height: float,
                     thresholds: Mapping[str, float],
                     *, estimate: bool = False,
-                    sensitivity: float = 0.0) -> dict:
+                    sensitivity: float = 0.0,
+                    cancel: Callable[[], bool] | None = None) -> dict:
     """按连续组派生 F/S/C/A/B/Y、刚体、摆动候选与辅助分。"""
 
     ordered = sorted(rows, key=lambda item: (item["time_s"], item["frame"]))
     pairs = [row for row in ordered
              if row.get("in_window") and row.get("feature_ready")]
     for group in _groups(pairs):
+        _check_cancel(cancel)
         group_body = [row for row in group if row.get("body_x_px") is not None]
         for index, row in enumerate(group):
             _derive_row(row, group[:index + 1], group_body, arena_height,
@@ -691,7 +708,8 @@ def _estimate(samples: Sequence[Mapping[str, Any]],
 
 def classic_states(rows: Sequence[dict], *,
                    flow_hi: float, flow_lo: float,
-                   speed_hi: float, speed_lo: float) -> None:
+                   speed_hi: float, speed_lo: float,
+                   cancel: Callable[[], bool] | None = None) -> None:
     """按连续组跑经典状态机；只读本组证据，不跨 unknown/outside。"""
 
     ordered = sorted(rows, key=lambda item: (item["time_s"], item["frame"]))
@@ -706,6 +724,7 @@ def classic_states(rows: Sequence[dict], *,
                   "speed_hi": float(speed_hi), "speed_lo": float(speed_lo)}
     pairs = [row for row in ordered if row.get("in_window")]
     for group in _groups(pairs):
+        _check_cancel(cancel)
         _run_group(group, thresholds)
     for row in ordered:
         state = row.get("state") or "unknown"
@@ -845,12 +864,29 @@ def _run_group(group: list[Mapping[str, Any]],
 
 LIS_ROLLING_KEYS = ("lis_h", "lis_f", "lis_s", "lis_b", "lis_g")
 LIS_SCORE_FEATURES = ("r", "p", "z", "h", "f", "s")
-LIS_SCORE_WEIGHTS = {"r": 0.24, "p": 0.14, "z": 0.22, "h": 0.08,
+LIS_SCORE_WEIGHTS = {"r": 0.24, "p": 0.14, "z": 0.08, "h": 0.22,
                      "f": 0.18, "s": 0.14}
 # 特征 key → 行字段；周边量 P 在行里叫 lis_peripheral_d。
 LIS_ROW_FIELDS = {"r": "lis_r", "p": "lis_peripheral_d", "z": "lis_z",
                   "h": "lis_h", "f": "lis_f", "s": "lis_s",
                   "g": "lis_g", "b": "lis_b"}
+
+
+CANCEL_STRIDE = 512
+
+
+def _check_cancel(cancel: Callable[[], bool] | None) -> None:
+    """派生/后处理长循环的取消检查；与逐帧捕获同一条合同。"""
+
+    if cancel is not None and cancel():
+        raise ValidationError("分析已取消", "job")
+
+
+def _seconds(options: Mapping[str, Any], key: str, default: float) -> float:
+    """秒数参数：0 是合法值，只有缺失/非数值才用默认。"""
+
+    value = _finite(options.get(key))
+    return default if value is None else max(0.0, value)
 
 
 def _lis_rolling(group: list[dict]) -> None:
@@ -892,12 +928,14 @@ def _lis_rolling(group: list[dict]) -> None:
             [float(item["time_s"]) for item in span_rows])
 
 
-def lis_score_rows(rows: Sequence[dict]) -> dict:
+def lis_score_rows(rows: Sequence[dict],
+                   cancel: Callable[[], bool] | None = None) -> dict:
     """阈值估计、归一化与综合分：只用分割良好的配对行估计 R/P/Z/H/F/S。
 
     无良好分割样本时改用全部配对行并标全局 low_information；
     每行写 lis_score_*、lis_motion_score、lis_motion_prior、
-    lis_score_mode 与 lis_thresholds_used。
+    lis_score_mode 与 lis_thresholds_used。周边/核心比 r 的门来自
+    该比值样本自己的 q80，不借用残差 R 的分位数。
     """
 
     pairs = [row for row in rows
@@ -911,8 +949,14 @@ def lis_score_rows(rows: Sequence[dict]) -> dict:
         values = [float(row[field]) for row in sample
                   if is_number(row.get(field))]
         thresholds[key] = activity.lis_thresholds(values or [0.0])
+    ratio_values = [float(row["lis_core_ratio"]) for row in sample
+                    if is_number(row.get("lis_core_ratio"))]
+    core_ratio = activity.lis_thresholds(ratio_values or [0.0])
+    core_ratio_gate = max(1.15, float(core_ratio["q80"]))
 
-    for row in rows:
+    for index, row in enumerate(rows):
+        if index % CANCEL_STRIDE == 0:
+            _check_cancel(cancel)
         if not (row.get("in_window") and row.get("feature_ready")):
             for key in LIS_ROLLING_KEYS:
                 row.setdefault(key, None)
@@ -936,11 +980,12 @@ def lis_score_rows(rows: Sequence[dict]) -> dict:
                   for name in ("low", "mid", "high", "very_high")}
             for key in ("r", "p", "z", "h", "f", "s", "g", "b")}
     return {"thresholds": thresholds, "samples": len(sample),
-            "low_information": low_information}
+            "low_information": low_information, "core_ratio": core_ratio,
+            "core_ratio_gate": core_ratio_gate}
 
 
-def _lis_evidence(row: Mapping[str, Any], thresholds: Mapping[str, Any]
-                  ) -> tuple[bool, bool, bool]:
+def _lis_evidence(row: Mapping[str, Any], thresholds: Mapping[str, Any],
+                  core_ratio_gate: float) -> tuple[bool, bool, bool]:
     """(活动证据, 不动证据, 被动摆动)。比较带 2%/5% 相对容差。"""
 
     values = {
@@ -951,8 +996,7 @@ def _lis_evidence(row: Mapping[str, Any], thresholds: Mapping[str, Any]
     }
     count = sum(1 for key in ("p", "z", "h")
                 if activity.lis_above(values[key], thresholds[key]["high"]))
-    if activity.lis_above(float(row["lis_core_ratio"]),
-                          max(1.15, thresholds["r"]["q80"])):
+    if activity.lis_above(float(row["lis_core_ratio"]), core_ratio_gate):
         count += 1
     active = ((activity.lis_above(values["r"], thresholds["r"]["high"])
                and count >= 1) or count >= 2)
@@ -976,14 +1020,21 @@ def _lis_evidence(row: Mapping[str, Any], thresholds: Mapping[str, Any]
 
 
 def _lis_window(group: Sequence[Mapping[str, Any]], index: int,
-                seconds: float, evidence_key: str) -> tuple[float, float]:
-    """(t−seconds, t) 内已曝光同组数据的覆盖秒数与证据占比。"""
+                seconds: float, evidence_key: str,
+                since: int = 0) -> tuple[float, float]:
+    """(t−seconds, t) 内已曝光同组数据的覆盖秒数与证据占比。
+
+    since 是坏分割之后的第一个下标：坏分割之前的证据历史已被清除，
+    既不提供覆盖秒数，也不提供活动/不动证据。
+    """
 
     now = float(group[index]["time_s"])
     low = now - seconds
     coverage = 0.0
     marked = 0.0
-    for row in group[:index]:
+    for row in group[since:index]:
+        if row.get("lis_segmentation_bad"):
+            continue
         start = float(row["interval_start_s"])
         end = float(row["interval_end_s"])
         overlap = min(end, now) - max(start, low)
@@ -995,11 +1046,16 @@ def _lis_window(group: Sequence[Mapping[str, Any]], index: int,
 
 
 def _run_lis_group(group: list[dict], thresholds: Mapping[str, Any],
-                   low_information: bool) -> None:
+                   low_information: bool, core_ratio_gate: float,
+                   cancel: Callable[[], bool] | None = None) -> None:
     """lis 状态机：评分分支即时判定，证据分支按曝光窗滞回。"""
 
     state = "immobile"
+    # 坏分割清除此前证据历史；恢复后从零重新积累。
+    history_start = 0
     for index, row in enumerate(group):
+        if index % CANCEL_STRIDE == 0:
+            _check_cancel(cancel)
         if row.get("lis_segmentation_bad"):
             # 坏分割仍有配对：保留上一状态、低可信并清空证据。
             row["state"] = state
@@ -1013,8 +1069,10 @@ def _run_lis_group(group: list[dict], thresholds: Mapping[str, Any],
             row["lis_evidence_ratio"] = None
             if row.get("lis_climbing_suspected"):
                 row["lis_confidence"] = "low"
+            history_start = index + 1
             continue
-        active, immobile_ev, passive = _lis_evidence(row, thresholds)
+        active, immobile_ev, passive = _lis_evidence(row, thresholds,
+                                                     core_ratio_gate)
         row["lis_active_evidence"] = active
         row["lis_immobile_evidence"] = immobile_ev
         row["lis_passive_swing"] = passive
@@ -1030,7 +1088,8 @@ def _run_lis_group(group: list[dict], thresholds: Mapping[str, Any],
             row["lis_confidence"] = "high" if margin >= .15 else "medium"
         elif state != "struggling":
             coverage, ratio = _lis_window(group, index, .35,
-                                          "lis_active_evidence")
+                                          "lis_active_evidence",
+                                          history_start)
             if coverage >= .28 - 1e-9 and ratio >= .45 - 1e-9:
                 state = "struggling"
                 row["lis_reason"] = "活动证据"
@@ -1043,7 +1102,8 @@ def _run_lis_group(group: list[dict], thresholds: Mapping[str, Any],
             row["lis_confidence"] = "medium"
         else:
             coverage, ratio = _lis_window(group, index, .75,
-                                          "lis_immobile_evidence")
+                                          "lis_immobile_evidence",
+                                          history_start)
             if coverage >= .60 - 1e-9 and ratio >= .55 - 1e-9:
                 state = "immobile"
                 row["lis_reason"] = "不动证据"
@@ -1079,17 +1139,20 @@ def _lis_state_segments(group: Sequence[Mapping[str, Any]]
     return segments
 
 
-def _segment_gap(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
-    """两侧挣扎段的判定间隙：同分支用自己的，混合取较小者。"""
+def _segment_gap(left: Mapping[str, Any], right: Mapping[str, Any],
+                 score_gap_s: float, evidence_gap_s: float) -> float:
+    """两侧挣扎段的判定间隙：同分支用本分支参数，混合取较小者。"""
 
     def mode_gap(segment: Mapping[str, Any]) -> float:
         mode = str(segment["rows"][0].get("lis_score_mode") or "score")
-        return 2.0 if mode == "score" else 0.5
+        return float(score_gap_s) if mode == "score" else float(evidence_gap_s)
 
     return min(mode_gap(left), mode_gap(right))
 
 
-def _lis_sandwich(group: list[dict], min_struggle_s: float) -> None:
+def _lis_sandwich(group: list[dict], min_struggle_s: float,
+                  score_gap_s: float = 2.0,
+                  evidence_gap_s: float = 0.5) -> None:
     """夹心处理：短不动段填回挣扎，再删过短挣扎段；两端片段不动。"""
 
     segments = _lis_state_segments(group)
@@ -1101,7 +1164,8 @@ def _lis_sandwich(group: list[dict], min_struggle_s: float) -> None:
         if left["state"] != "struggling" or right["state"] != "struggling":
             continue
         duration = segment["end"] - segment["start"]
-        if duration < _segment_gap(left, right) - 1e-9:
+        if duration < _segment_gap(left, right, score_gap_s,
+                                   evidence_gap_s) - 1e-9:
             for row in segment["rows"]:
                 row["state"] = "struggling"
                 row["state_group"] = "struggling"
@@ -1117,6 +1181,23 @@ def _lis_sandwich(group: list[dict], min_struggle_s: float) -> None:
             for row in segment["rows"]:
                 row["state"] = "immobile"
                 row["state_group"] = "immobile"
+
+
+def _flag_runs(flags: Sequence[bool]) -> list[tuple[bool, int, int]]:
+    """连续同值段：(值, 首下标, 末下标)。"""
+
+    runs: list[tuple[bool, int, int]] = []
+    for index, value in enumerate(flags):
+        if runs and runs[-1][0] == value:
+            runs[-1] = (value, runs[-1][1], index)
+        else:
+            runs.append((value, index, index))
+    return runs
+
+
+def _span_s(group: Sequence[Mapping[str, Any]], first: int, last: int) -> float:
+    return (float(group[last]["interval_end_s"])
+            - float(group[first]["interval_start_s"]))
 
 
 def _lis_rescue_condition(row: Mapping[str, Any]) -> bool:
@@ -1144,56 +1225,60 @@ def _lis_rescue_condition(row: Mapping[str, Any]) -> bool:
 
 
 def _lis_rescue(group: list[dict], rescue_gap_s: float, before_s: float,
-                after_s: float) -> None:
-    """局部微动补救：候选夹心、间隙填充、前后扩展；不跨组不造位置。"""
+                after_s: float, min_struggle_s: float = 0.3,
+                cancel: Callable[[], bool] | None = None) -> None:
+    """局部微动补救：候选夹心、短段回改、前后扩展；不跨组不造位置。
+
+    lis_rescue_raw 只保留原始条件命中，夹心填充不写回它；补救副状态
+    同样执行夹心与 ≤min_struggle 的短段回改。
+    """
 
     for row in group:
         prior = float(row["lis_motion_prior"])
         raw = bool(.28 <= prior < .35 and _lis_rescue_condition(row))
         row["lis_rescue_raw"] = raw
         row["lis_rescue"] = False
-    raw_positions = [index for index, row in enumerate(group)
-                     if row["lis_rescue_raw"]]
-    if not raw_positions:
-        return
+    _check_cancel(cancel)
+    filled = [bool(row["lis_rescue_raw"]) for row in group]
+    runs = _flag_runs(filled)
     # 夹心：两段候选之间严格短于补救间隙的连续非候选行补成候选。
-    for left, right in zip(raw_positions, raw_positions[1:]):
-        between = group[left + 1:right]
-        if not between:
+    for position in range(1, len(runs) - 1):
+        value, first, last = runs[position]
+        if value or not runs[position - 1][0] or not runs[position + 1][0]:
             continue
-        duration = (float(between[-1]["interval_end_s"])
-                    - float(between[0]["interval_start_s"]))
-        if duration < float(rescue_gap_s) - 1e-9:
-            for row in between:
-                row["lis_rescue_raw"] = True
+        if _span_s(group, first, last) < float(rescue_gap_s) - 1e-9:
+            for index in range(first, last + 1):
+                filled[index] = True
+    # 短段回改：两端都不是补救的过短补救段按 ≤min_struggle 撤回。
+    runs = _flag_runs(filled)
+    for position in range(1, len(runs) - 1):
+        value, first, last = runs[position]
+        if not value or runs[position - 1][0] or runs[position + 1][0]:
+            continue
+        if _span_s(group, first, last) <= float(min_struggle_s) + 1e-9:
+            for index in range(first, last + 1):
+                filled[index] = False
     # 候选段前后扩展：与 [起点−before, 终点+after) 有正交集的本组曝光。
-    filled_positions = [index for index, row in enumerate(group)
-                        if row["lis_rescue_raw"]]
-    blocks = []
-    run = [filled_positions[0]]
-    for index in filled_positions[1:]:
-        if index == run[-1] + 1:
-            run.append(index)
-        else:
-            blocks.append(run)
-            run = [index]
-    blocks.append(run)
-    for block in blocks:
-        start = float(group[block[0]]["interval_start_s"]) - float(before_s)
-        end = float(group[block[-1]]["interval_end_s"]) + float(after_s)
-        for row in group:
+    for value, first, last in _flag_runs(filled):
+        if not value:
+            continue
+        _check_cancel(cancel)
+        start = float(group[first]["interval_start_s"]) - float(before_s)
+        end = float(group[last]["interval_end_s"]) + float(after_s)
+        for index, row in enumerate(group):
             overlap = (min(float(row["interval_end_s"]), end)
                        - max(float(row["interval_start_s"]), start))
             if overlap > 1e-9:
-                row["lis_rescue"] = True
-    for row in group:
+                filled[index] = True
+    for index, row in enumerate(group):
+        row["lis_rescue"] = bool(filled[index])
         if row["lis_rescue"]:
             row["state"] = "struggling"
             row["state_group"] = "struggling"
 
 
-def derive_lis_features(rows: Sequence[dict], options: Mapping[str, Any]
-                        ) -> dict:
+def derive_lis_features(rows: Sequence[dict], options: Mapping[str, Any],
+                        cancel: Callable[[], bool] | None = None) -> dict:
     """lis 完整派生：滚动量 → 阈值/评分 → 状态机 → 夹心 → 补救。"""
 
     ordered = sorted(rows, key=lambda item: (item["time_s"], item["frame"]))
@@ -1201,24 +1286,45 @@ def derive_lis_features(rows: Sequence[dict], options: Mapping[str, Any]
              if row.get("in_window") and row.get("feature_ready")]
     groups = _groups(pairs)
     for group in groups:
+        _check_cancel(cancel)
         _lis_rolling(group)
-    info = lis_score_rows(ordered)
+    info = lis_score_rows(ordered, cancel)
     for row in ordered:
         if not row.get("in_window"):
             row["state"] = "outside"
             row["state_group"] = "outside"
+            row["lis_model_state"] = "统计窗外"
+            row["lis_reason"] = "统计窗外"
+            row["lis_rescue_raw"] = False
+            row["lis_rescue"] = False
         elif not row.get("feature_ready"):
             row["state"] = "unknown"
             row["state_group"] = "unknown"
+            row["lis_model_state"] = "无连续合格配对"
+            row["lis_reason"] = "无连续合格配对"
+            row["lis_rescue_raw"] = False
+            row["lis_rescue"] = False
+
     for group in groups:
-        _run_lis_group(group, info["thresholds"], info["low_information"])
+        _run_lis_group(group, info["thresholds"], info["low_information"],
+                       info["core_ratio_gate"], cancel)
+
+    min_struggle = _seconds(options, "lis_min_struggle_s", 0.3)
+    score_gap = _seconds(options, "lis_score_gap_s", 2.0)
+    evidence_gap = _seconds(options, "lis_evidence_gap_s", 0.5)
+    rescue_gap = _seconds(options, "lis_rescue_gap_s", 1.0)
+    before = _seconds(options, "lis_rescue_before_s", 0.7)
+    after = _seconds(options, "lis_rescue_after_s", 0.3)
     rescue_enabled = bool(options.get("lis_rescue_enabled"))
     for group in groups:
-        _lis_sandwich(group, float(options.get("lis_min_struggle_s") or 0.3))
+        _check_cancel(cancel)
+        _lis_sandwich(group, min_struggle, score_gap, evidence_gap)
+        # 夹心之后、补救之前的模型状态单独保存，补救结果另行记录。
+        for row in group:
+            row["lis_model_state"] = row["state"]
         if rescue_enabled:
-            _lis_rescue(group, float(options.get("lis_rescue_gap_s") or 1.0),
-                        float(options.get("lis_rescue_before_s") or 0.7),
-                        float(options.get("lis_rescue_after_s") or 0.3))
+            _lis_rescue(group, rescue_gap, before, after, min_struggle,
+                        cancel)
         else:
             for row in group:
                 row["lis_rescue_raw"] = False
@@ -1429,7 +1535,12 @@ def analyze(context: Any) -> AnalysisResult:
         if issues:
             raise ValidationError(issues[0]["message"], issues[0]["field"])
 
+    if context.cancelled():
+        raise ValidationError("分析已取消", "job")
     captured = capture(context, units)
+    # 捕获完成、评分开始前仍要响应取消；不只依赖逐帧捕获检查。
+    if context.cancelled():
+        raise ValidationError("分析已取消", "job")
     asset = job.get("asset") or {}
     metadata = asset.get("metadata") or {}
     all_rows = [row for rows in captured.values() for row in rows]
@@ -1443,6 +1554,8 @@ def analyze(context: Any) -> AnalysisResult:
     warnings: list[str] = []
 
     for unit in units:
+        if context.cancelled():
+            raise ValidationError("分析已取消", "job")
         unit_id = unit["id"]
         geometry = unit.get("geometry") or {}
         options = unit.get("options") or {}
@@ -1456,7 +1569,7 @@ def analyze(context: Any) -> AnalysisResult:
 
         scale, line_px = activity.line_scale(geometry.get("body_line"))
         if mode == "lis":
-            info = derive_lis_features(rows, options)
+            info = derive_lis_features(rows, options, context.cancelled)
             unit_events = build_events(rows, unit_id,
                                        unit.get("name") or "",
                                        confirm_swing=False)
@@ -1476,11 +1589,13 @@ def analyze(context: Any) -> AnalysisResult:
                 rows, arena_height, thresholds,
                 estimate=bool(options.get("auto_behavior_threshold")),
                 sensitivity=float(
-                    options.get("behavior_threshold_sensitivity") or 0.0))
+                    options.get("behavior_threshold_sensitivity") or 0.0),
+                cancel=context.cancelled)
             classic_states(rows, flow_hi=info["flow_thr_hi"],
                            flow_lo=info["flow_thr_lo"],
                            speed_hi=info["speed_thr_hi"],
-                           speed_lo=info["speed_thr_lo"])
+                           speed_lo=info["speed_thr_lo"],
+                           cancel=context.cancelled)
             unit_events = build_events(rows, unit_id, unit.get("name") or "")
             unit_summary = summarize(rows, unit, window, info, unit_events)
 

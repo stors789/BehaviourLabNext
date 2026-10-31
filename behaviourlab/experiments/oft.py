@@ -664,39 +664,17 @@ def process_unit(unit: Mapping[str, Any], captured: Sequence[Mapping[str, Any]],
             "summary": summary, "metadata": metadata, "warning": warning}
 
 
-def analyze(context: Any) -> AnalysisResult:
-    job = context.job
-    units = list(job.get("units") or [])
-    if not units:
-        raise ValidationError("草稿还没有小鼠", "units")
-
-    for unit in units:
-        issues = validate_unit(unit.get("options") or {},
-                               unit.get("geometry") or {}, complete=True)
-        if issues:
-            raise ValidationError(issues[0]["message"], issues[0]["field"])
-
-    asset = job.get("asset") or {}
-    metadata = asset.get("metadata") or {}
-    source = context.source
-    if source is None:
-        window = job.get("window") or {}
-        source = media.VideoSource(
-            asset.get("path"),
-            start_s=float(window.get("start_s") or 0.0),
-            end_s=window.get("end_s"),
-            orientation=int(job.get("orientation", 0) or 0),
-            fps_override=job.get("fps_override"),
-            sample_fps=job.get("sample_fps"),
-            source_fps=metadata.get("fps"),
-            decode_images=True,
-        )
+def _capture(context: Any, units: Sequence[Mapping[str, Any]],
+             asset: Mapping[str, Any], metadata: Mapping[str, Any],
+             source: Any) -> dict:
+    """逐帧检测：正式分析与行为预览共用同一条捕获路径。"""
 
     detectors: dict[Any, Any] = {}
     regions: dict[Any, np.ndarray] = {}
     backgrounds: dict[tuple, Any] = {}
     captured: dict[Any, list[dict]] = {unit["id"]: [] for unit in units}
     unit_ids = [unit["id"] for unit in units]
+    job = context.job
     run_key = (job.get("run_id"), job.get("job_id"), KEY)
     progress_span = float(metadata.get("duration_s") or 0.0)
 
@@ -736,6 +714,38 @@ def analyze(context: Any) -> AnalysisResult:
             captured[unit_id].append(row)
         context.progress(min(0.9, 0.1 + 0.8 * max(0.0, float(frame.time_s)) /
                              max(1e-9, progress_span or 1.0)))
+    return captured
+
+
+def analyze(context: Any) -> AnalysisResult:
+    job = context.job
+    units = list(job.get("units") or [])
+    if not units:
+        raise ValidationError("草稿还没有小鼠", "units")
+
+    for unit in units:
+        issues = validate_unit(unit.get("options") or {},
+                               unit.get("geometry") or {}, complete=True)
+        if issues:
+            raise ValidationError(issues[0]["message"], issues[0]["field"])
+
+    asset = job.get("asset") or {}
+    metadata = asset.get("metadata") or {}
+    source = context.source
+    if source is None:
+        window = job.get("window") or {}
+        source = media.VideoSource(
+            asset.get("path"),
+            start_s=float(window.get("start_s") or 0.0),
+            end_s=window.get("end_s"),
+            orientation=int(job.get("orientation", 0) or 0),
+            fps_override=job.get("fps_override"),
+            sample_fps=job.get("sample_fps"),
+            source_fps=metadata.get("fps"),
+            decode_images=True,
+        )
+
+    captured = _capture(context, units, asset, metadata, source)
 
     # 视频统计窗按捕获到的真实源区间确定；元数据时长只在没有采样行时回退。
     all_rows = [row for rows in captured.values() for row in rows]
@@ -779,6 +789,78 @@ def analyze(context: Any) -> AnalysisResult:
             "warnings": warnings,
         },
     )
+
+
+def preview_analysis(*, asset: Mapping[str, Any], video: Mapping[str, Any],
+                     unit: Mapping[str, Any], start_s: float,
+                     end_s: float, time_s: float | None = None) -> dict:
+    """行为预览：对实际片段跑同一捕获→分箱→汇总核心，返回片段汇总。
+
+    单帧检测仍走预览自己的路径，这里只补片段行为统计。
+    """
+
+    from ..schema import AnalysisContext, new_id
+
+    options = unit.get("options") or {}
+    issues = validate_unit(options, unit.get("geometry") or {}, complete=True)
+    if issues:
+        raise ValidationError(issues[0]["message"], issues[0]["field"])
+
+    metadata = asset.get("metadata") or {}
+    window = {"start_s": float(start_s), "end_s": float(end_s)}
+    source = media.VideoSource(
+        asset.get("path"),
+        start_s=float(start_s),
+        end_s=float(end_s),
+        orientation=int(video.get("orientation", 0) or 0),
+        fps_override=video.get("fps_override"),
+        sample_fps=video.get("sample_fps"),
+        source_fps=metadata.get("fps"),
+        decode_images=True,
+    )
+    job = {
+        "assay": KEY,
+        "run_id": new_id(),
+        "job_id": "preview",
+        "project_id": None,
+        "window": window,
+        "orientation": int(video.get("orientation", 0) or 0),
+        "fps_override": video.get("fps_override"),
+        "sample_fps": video.get("sample_fps"),
+        "asset": dict(asset),
+        "units": [dict(unit)],
+        "style": {},
+    }
+    context = AnalysisContext(job=job, source=source)
+    captured = _capture(context, [unit], asset, metadata, source)[unit["id"]]
+    video_window = timeline.resolve_video_window(
+        window, captured, metadata.get("duration_s"))
+    geometry = unit.get("geometry") or {}
+    first_seen = timeline.first_seen_in_window(
+        KEY, captured, video_window, geometry)
+    facts = process_unit(unit, captured, video_window, first_seen)
+    summary = facts["summary"]
+    return {
+        "mode": KEY,
+        "start_s": float(start_s),
+        "end_s": float(end_s),
+        "window_start_s": summary["analysis_window_start_s"],
+        "window_end_s": summary["analysis_window_end_s"],
+        "total_time_s": summary["total_time_s"],
+        "observed_time_s": summary["observed_time_s"],
+        "missing_time_s": summary["missing_time_s"],
+        "center_time_s": summary["center_time_s"],
+        "center_percent": summary["center_percent"],
+        "center_entries": summary["center_entries"],
+        "center_latency_s": summary["center_latency_s"],
+        "total_distance_cm": summary["total_distance_cm"],
+        "mean_speed_cm_s": summary["mean_speed_cm_s"],
+        "rows": len(facts["rows"]),
+        "events": len(facts["events"]),
+        "bins": len(facts["bins"]),
+        "arena_width_cm": options.get("arena_width_cm"),
+        "arena_height_cm": options.get("arena_height_cm"),
+    }
 
 
 def validate(job: Any) -> list[dict]:

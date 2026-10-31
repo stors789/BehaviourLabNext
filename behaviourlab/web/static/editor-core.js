@@ -494,10 +494,20 @@
     if (behavior && typeof behavior === "object") {
       const value = (number) => (typeof number === "number" && isFinite(number)
         ? number.toFixed(2) : "—");
-      lines.push("行为 " + value(behavior.total_time_s) + " s：非挣扎 "
-        + value(behavior.immobility_time_s) + " / 挣扎 "
-        + value(behavior.struggling_time_s) + " / 不确定 "
-        + value(behavior.uncertain_time_s) + " s");
+      if (behavior.mode === "oft") {
+        const count = (number) => (typeof number === "number" && isFinite(number)
+          ? String(number) : "—");
+        lines.push("行为 " + value(behavior.total_time_s) + " s：中心 "
+          + value(behavior.center_percent) + "% / 进入 "
+          + count(behavior.center_entries) + " 次 / 路程 "
+          + value(behavior.total_distance_cm) + " cm / 平均速度 "
+          + value(behavior.mean_speed_cm_s) + " cm/s");
+      } else {
+        lines.push("行为 " + value(behavior.total_time_s) + " s：非挣扎 "
+          + value(behavior.immobility_time_s) + " / 挣扎 "
+          + value(behavior.struggling_time_s) + " / 不确定 "
+          + value(behavior.uncertain_time_s) + " s");
+      }
       if (typeof behavior.threshold_note === "string" && behavior.threshold_note) {
         lines.push(behavior.threshold_note);
       }

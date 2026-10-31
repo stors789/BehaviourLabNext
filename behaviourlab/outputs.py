@@ -144,7 +144,8 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
         activity = f"{stem}_activity.png"
         try:
             if figures.activity_png(target / activity, rows, title=name,
-                                    style=style):
+                                    style=style,
+                                    mode=str(summary.get("mode") or "classic")):
                 figures_info["activity"] = activity
             else:
                 notes.append("没有有效状态曝光，未生成活动曲线")

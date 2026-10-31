@@ -881,7 +881,8 @@ class VideoSource:
             index=raw.index,
             time_s=time_s,
             dt_s=dt_s,
-            elapsed_s=time_s,
+            # 相对视频窗起点的时间；源时刻与有效曝光保持原样。
+            elapsed_s=time_s - self.start_s,
             analysis_fps=self.analysis_fps,
             interval_start_s=interval_start,
             interval_end_s=interval_end,
