@@ -17,6 +17,7 @@
     step: root.dataset.step || "select",
     view: root.dataset.view === "detection" ? "detection" : "geometry",
     catalog: [],
+    detectionDefaults: {},
     assets: [],
     selected: new Set(),
     draft: null,
@@ -1147,10 +1148,7 @@
   function renderDetectionInspector(body, unit) {
     const title = document.createElement("h3");
     title.textContent = "检测";
-    const method = document.createElement("p");
-    method.className = "muted";
-    method.textContent = "当前方法：视觉检测（尚未实现）";
-    body.append(title, method);
+    body.append(title, detectionFields(unit));
     appendExperimentSettings(body, unit);
 
     const confirmed = state.previewGate.confirmed(previewConfig("detection"));
@@ -1158,6 +1156,181 @@
     el.secondary.textContent = "更新检测预览";
     el.secondary.hidden = !confirmed;
     el.preview.hidden = !confirmed;
+  }
+
+  const BG_METHOD_LABELS = [
+    ["threshold", "灰度阈值"],
+    ["temporal", "时间中位数"],
+    ["static", "静态背景"],
+    ["mog2", "MOG2"],
+    ["knn", "KNN"],
+  ];
+  const BG_TYPE_LABELS = [["light", "浅底深鼠"], ["dark", "深底浅鼠"]];
+  const INTEGER_DETECTION = new Set(["erosion_kernel", "erosion_iter",
+    "dilation_kernel", "dilation_iter", "temporal_bg_samples"]);
+
+  function detectionValue(unit, key) {
+    const layers = [state.detectionDefaults, state.draft && state.draft.detection,
+      currentVideo() && currentVideo().detection, unit && unit.detection];
+    let value;
+    for (const layer of layers) {
+      if (layer && Object.prototype.hasOwnProperty.call(layer, key)) value = layer[key];
+    }
+    return value;
+  }
+
+  function writeDetection(key, value) {
+    const target = currentUnit();
+    if (!target) return;
+    target.detection = Object.assign({}, target.detection || {}, { [key]: value });
+    invalidatePreview();
+    markDirty();
+    renderInspector();
+  }
+
+  function selectControl(labelText, key, options, value, onChange) {
+    const label = document.createElement("label");
+    label.className = "field";
+    const caption = document.createElement("span");
+    caption.textContent = labelText;
+    const select = document.createElement("select");
+    options.forEach(([optionValue, optionLabel]) => {
+      const option = document.createElement("option");
+      option.value = optionValue;
+      option.textContent = optionLabel;
+      select.append(option);
+    });
+    select.value = value == null ? options[0][0] : String(value);
+    select.addEventListener("change", () => onChange(select.value));
+    label.append(caption, select);
+    return label;
+  }
+
+  function numberControl(labelText, key, value, onChange, options) {
+    const config = options || {};
+    const label = document.createElement("label");
+    label.className = "field";
+    const caption = document.createElement("span");
+    caption.textContent = labelText;
+    const input = document.createElement("input");
+    input.type = "number";
+    input.step = "any";
+    if (config.min != null) input.min = String(config.min);
+    if (config.max != null) input.max = String(config.max);
+    input.value = value == null ? "" : String(value);
+    input.addEventListener("change", () => {
+      const number = Number(input.value);
+      if (!Number.isFinite(number)) {
+        status(labelText + " 必须是数值", "error");
+        input.value = String(value);
+        return;
+      }
+      if (config.integer && !Number.isInteger(number)) {
+        status(labelText + " 必须是整数", "error");
+        input.value = String(value);
+        return;
+      }
+      onChange(number);
+    });
+    label.append(caption, input);
+    return label;
+  }
+
+  function detectionFields(unit) {
+    const wrap = document.createElement("div");
+    wrap.className = "field-stack";
+    const method = detectionValue(unit, "bg_method") || "threshold";
+    wrap.append(
+      selectControl("背景方法", "bg_method", BG_METHOD_LABELS, method,
+        (value) => writeDetection("bg_method", value)),
+      selectControl("明暗", "bg_type", BG_TYPE_LABELS,
+        detectionValue(unit, "bg_type") || "light",
+        (value) => writeDetection("bg_type", value)),
+    );
+
+    if (method === "threshold") {
+      wrap.append(numberControl("灰度阈值", "gray_threshold",
+        detectionValue(unit, "gray_threshold"), (value) =>
+          writeDetection("gray_threshold", value), { min: 0, max: 255 }));
+      wrap.append(numberControl("身体灰度阈值", "body_gray_threshold",
+        detectionValue(unit, "body_gray_threshold"), (value) =>
+          writeDetection("body_gray_threshold", value), { min: 0, max: 255 }));
+    } else if (method === "temporal" || method === "static") {
+      wrap.append(numberControl("差异阈值", "temporal_diff_threshold",
+        detectionValue(unit, "temporal_diff_threshold"), (value) =>
+          writeDetection("temporal_diff_threshold", value), { min: 0, max: 255 }));
+      wrap.append(numberControl("身体灰度阈值", "body_gray_threshold",
+        detectionValue(unit, "body_gray_threshold"), (value) =>
+          writeDetection("body_gray_threshold", value), { min: 0, max: 255 }));
+    }
+
+    if (method === "static") {
+      const row = document.createElement("div");
+      row.className = "field-row-inline";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "button small";
+      button.textContent = "选择背景图";
+      button.addEventListener("click", () => { pickStaticBackground(); });
+      const stateLabel = document.createElement("span");
+      stateLabel.className = "meta";
+      stateLabel.textContent = detectionValue(unit, "static_background")
+        ? "已设置" : "未设置";
+      row.append(button, stateLabel);
+      wrap.append(row);
+    }
+
+    const more = document.createElement("details");
+    more.className = "fold";
+    const summary = document.createElement("summary");
+    summary.textContent = "更多检测参数";
+    const body = document.createElement("div");
+    body.className = "fold-body";
+    const numeric = [
+      ["腐蚀核", "erosion_kernel", 1, true],
+      ["腐蚀次数", "erosion_iter", 0, true],
+      ["膨胀核", "dilation_kernel", 1, true],
+      ["膨胀次数", "dilation_iter", 0, true],
+      ["最小面积", "min_area", 0, false],
+      ["最大面积", "max_area", 0, false],
+      ["背景样本数", "temporal_bg_samples", 1, true],
+      ["质量阈值", "quality_threshold", 0, false],
+    ];
+    numeric.forEach(([labelText, key, minimum, integer]) => {
+      body.append(numberControl(labelText, key, detectionValue(unit, key),
+        (value) => writeDetection(key, value),
+        { min: minimum, integer }));
+    });
+    more.append(summary, body);
+    wrap.append(more);
+    return wrap;
+  }
+
+  async function pickStaticBackground() {
+    const bridge = desktopBridge();
+    let path = null;
+    if (bridge && typeof bridge.choose_image === "function") {
+      path = await bridge.choose_image();
+    } else if (window.BLPickers) {
+      const files = await window.BLPickers.pickFiles({
+        accept: ".png,.jpg,.jpeg,.bmp",
+      });
+      if (files && files.length) {
+        const form = new FormData();
+        form.append("file", files[0]);
+        try {
+          const data = await request("/api/backgrounds/upload",
+            { method: "POST", body: form });
+          path = data.path;
+        } catch (error) {
+          status(error.message, "error");
+          return;
+        }
+      }
+    }
+    if (typeof path === "string" && path) {
+      writeDetection("static_background", path);
+    }
   }
 
   function renderReviewInspector(body, unit) {
@@ -1858,8 +2031,10 @@
       const catalog = await get("/api/catalog");
       state.catalog = catalog.assays || catalog.catalog || catalog;
       if (!Array.isArray(state.catalog)) state.catalog = [];
+      state.detectionDefaults = catalog.detection_defaults || {};
     } catch (error) {
       state.catalog = [];
+      state.detectionDefaults = {};
     }
     if (el.assay && !el.assay.value && state.catalog.length) {
       el.assay.value = state.catalog[0].key;

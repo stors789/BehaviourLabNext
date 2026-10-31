@@ -13,7 +13,7 @@ from typing import Any, Mapping
 
 from . import experiments, media
 from .config import ALGORITHM_VERSION, SCHEMA_VERSION
-from .detection import common_detection_defaults
+from .detection import common_detection_defaults, validate_detection
 from .schema import (
     ValidationError,
     check_json_value,
@@ -272,6 +272,7 @@ def validate_draft(draft: Mapping[str, Any]) -> list[dict]:
     assay = draft.get("assay")
     if not experiments.exists(assay):
         issues.append({"field": "assay", "message": "未知实验"})
+    issues.extend(validate_detection(draft.get("detection"), "detection"))
 
     videos = draft.get("videos")
     if videos is None:
@@ -307,6 +308,9 @@ def validate_draft(draft: Mapping[str, Any]) -> list[dict]:
         for field in ("options", "detection"):
             if not isinstance(video.get(field, {}), Mapping):
                 issues.append({"field": f"{prefix}.{field}", "message": "必须是对象"})
+        if isinstance(video.get("detection"), Mapping):
+            issues.extend(validate_detection(video["detection"],
+                                             f"{prefix}.detection"))
 
         units = video.get("units", [])
         if not isinstance(units, list):
@@ -339,6 +343,9 @@ def validate_draft(draft: Mapping[str, Any]) -> list[dict]:
             for field in ("geometry", "options", "detection"):
                 if not isinstance(unit.get(field, {}), Mapping):
                     issues.append({"field": f"{unit_prefix}.{field}", "message": "必须是对象"})
+            if isinstance(unit.get("detection"), Mapping):
+                issues.extend(validate_detection(unit["detection"],
+                                                 f"{unit_prefix}.detection"))
             manual = unit.get("manual")
             if manual is not None and not isinstance(manual, Mapping):
                 issues.append({"field": f"{unit_prefix}.manual", "message": "必须是对象或 null"})

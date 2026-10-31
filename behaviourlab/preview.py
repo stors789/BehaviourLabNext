@@ -9,8 +9,9 @@ import math
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import experiments, geometry as geo, media
+from . import detection, experiments, geometry as geo, media
 from .config import DataPaths
+from .engine import resolve_detection
 from .schema import ValidationError, is_number, new_id
 from .store import Store
 
@@ -25,6 +26,64 @@ def _bgr(hex_color: str) -> tuple[int, int, int]:
 
 def _thickness(width: int, height: int) -> int:
     return max(2, int(round(min(width, height) / 240)))
+
+
+def _draw_candidates(canvas, result, thickness: int) -> None:
+    """画出真实候选轮廓；最佳候选与其他候选分色，不改动源帧。"""
+
+    import cv2
+    import numpy as np
+
+    for index, candidate in enumerate(result.candidates):
+        color = _bgr("#ff6e46") if index == 0 else _bgr("#8ed7c7")
+        points = np.array(
+            [[int(round(point[0])), int(round(point[1]))]
+             for point in candidate.get("contour") or []],
+            dtype=np.int32,
+        )
+        if len(points) >= 2:
+            cv2.polylines(canvas, [points], True, color, thickness, cv2.LINE_AA)
+    if result.center:
+        cv2.drawMarker(
+            canvas,
+            (int(round(result.center[0])), int(round(result.center[1]))),
+            _bgr("#ff6e46"), cv2.MARKER_CROSS, 12, 1, cv2.LINE_AA,
+        )
+
+
+def _background_for(settings: Mapping[str, Any], asset: Mapping[str, Any],
+                    video: Mapping[str, Any], orientation: int,
+                    width: int, height: int):
+    """按方法准备背景；threshold/local_otsu 不需要。"""
+
+    method = settings.get("bg_method")
+    if method == "static":
+        path = settings.get("static_background")
+        if not path:
+            raise detection.DetectionError("静态背景未设置")
+        return detection.load_static_background(path, orientation, width, height)
+    if method == "temporal":
+        metadata = asset.get("metadata") or {}
+        window = video.get("window") or {}
+        start = float(window.get("start_s") or 0.0)
+        end = window.get("end_s")
+        end_value = float(end) if is_number(end) else None
+        source = media.VideoSource(
+            asset["path"],
+            start_s=start,
+            end_s=end_value,
+            orientation=orientation,
+            fps_override=video.get("fps_override"),
+            sample_fps=video.get("sample_fps"),
+            source_fps=metadata.get("fps"),
+            decode_images=True,
+        )
+        frames = ((frame.time_s, frame.image) for frame in source.iter_frames()
+                  if frame.image is not None)
+        return detection.temporal_background(
+            frames, int(settings.get("temporal_bg_samples", 90)), start, end_value
+        )
+    return None
 
 
 def _draw_shape(canvas, shape: Mapping[str, Any], color, thickness: int) -> None:
@@ -257,9 +316,33 @@ def create_preview(
             asset["path"], float(time_s), orientation, video.get("fps_override")
         )
 
-    canvas = info.image.copy()
     geometry = unit.get("geometry") or {}
-    thickness = _thickness(canvas.shape[1], canvas.shape[0])
+    options: dict = {}
+    for layer in (draft.get("options"), video.get("options"), unit.get("options")):
+        if isinstance(layer, Mapping):
+            options.update(layer)
+    settings = resolve_detection(draft["assay"], draft=draft, video=video, unit=unit)
+
+    height, width = info.image.shape[:2]
+    orientation = int(video.get("orientation", 0) or 0)
+    try:
+        region, region_source = detection.geometry_region(
+            geometry, draft["assay"], options, width, height
+        )
+        background = _background_for(settings, asset, video, orientation,
+                                     width, height)
+        window_key = repr(video.get("window"))
+        detector = detection.shared_detector(
+            (asset.get("id"), orientation, window_key), settings,
+            background=background,
+        )
+        result = detector.detect(info.image, region)
+    except detection.DetectionError as error:
+        raise ValidationError(str(error), "detection") from error
+
+    canvas = info.image.copy()
+    thickness = _thickness(width, height)
+    _draw_candidates(canvas, result, thickness)
     drawn = []
     for key, shape in geometry.items():
         if not isinstance(shape, Mapping):
@@ -286,10 +369,6 @@ def create_preview(
 
     metadata = asset.get("metadata") or {}
     duration_s = metadata.get("duration_s")
-    options: dict = {}
-    for layer in (draft.get("options"), video.get("options"), unit.get("options")):
-        if isinstance(layer, Mapping):
-            options.update(layer)
     scope = _scope(draft.get("assay", ""), video, unit, options,
                    float(info.time_s), kind,
                    float(duration_s) if is_number(duration_s) else None)
@@ -299,7 +378,11 @@ def create_preview(
         step["label"] for step in steps
         if step.get("required") and step.get("key") not in geometry
     ]
-    warnings = ["检测算法尚未实现，预览只核对画面与场地。"]
+    warnings: list[str] = []
+    if result.missing_reason == "foreground_saturated":
+        warnings.append("前景覆盖过高，已拒绝整片掩膜。")
+    elif result.missing_reason == "no_candidate":
+        warnings.append("没有符合面积与质量要求的候选。")
     if missing:
         warnings.append("尚未绘制：" + "、".join(missing))
 
@@ -313,7 +396,14 @@ def create_preview(
             "kind": kind,
             "drawn_steps": drawn,
             "missing_steps": missing,
-            "detection_available": False,
+            "detection_available": True,
+            "detection": {
+                "candidates": len(result.candidates),
+                "missing_reason": result.missing_reason,
+                "region": region_source,
+                "center": list(result.center) if result.center else None,
+                "quality": float(result.quality),
+            },
             "manual_preserved": _is_manual_scope(draft.get("assay", ""),
                                                   options, unit),
         },

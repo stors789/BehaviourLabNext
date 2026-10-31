@@ -90,3 +90,14 @@ def test_barnes_hole_count_persists(client):
     unit = reloaded["videos"][0]["units"][0]
     assert unit["options"]["hole_count"] == 3
     assert unit["geometry"]["disk"]["radii"] == [50, 50]
+
+
+def test_invalid_detection_is_rejected(client):
+    created = client.post("/api/drafts", json=payload(None, assay="barnes"))
+    draft = created.get_json()["data"]["draft"]
+    videos = draft["videos"]
+    videos[0]["units"][0]["detection"] = {"erosion_kernel": 2.5}
+    response = client.put(f"/api/drafts/{draft['id']}", json={"videos": videos})
+    assert response.status_code == 400
+    fields = response.get_json()["error"]["fields"]
+    assert fields[0]["field"] == "videos[0].units[0].detection.erosion_kernel"

@@ -1688,3 +1688,15 @@ summary:focus-visible {
   color: #5c6e7e;
   cursor: not-allowed;
 }
+
+.field-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.field-row-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}

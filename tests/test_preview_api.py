@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 from behaviourlab import media, preview
@@ -21,6 +22,9 @@ def make_frame(index: int = 7, time_s: float = 0.28) -> FrameInfo:
 
 def seed(store, tmp_path, geometry=None, duration=10.0, *, assay="oft",
          window=None, unit_options=None, manual=None):
+    if geometry is None:
+        geometry = {"arena": {"type": "quad",
+                              "points": [[10, 10], [300, 10], [300, 260], [10, 260]]}}
     source = tmp_path / "clip.mp4"
     source.write_bytes(b"placeholder")
     asset = store.create_asset(
@@ -72,8 +76,12 @@ def test_preview_draws_frame_and_reports_scope(client, store, tmp_path, monkeypa
     assert data["clock_source"] == "pts"
     assert data["preview_scope"]["mode"] == "frame"
     assert data["preview_scope"]["start_s"] == data["preview_scope"]["end_s"]
-    assert data["summary"]["detection_available"] is False
+    assert data["summary"]["detection_available"] is True
     assert data["summary"]["drawn_steps"] == ["arena"]
+    detection = data["summary"]["detection"]
+    assert detection["candidates"] == 0
+    assert detection["missing_reason"] == "foreground_saturated"
+    assert detection["region"] == "arena"
     assert data["warnings"]
 
     image = client.get(data["image_url"])
@@ -290,3 +298,33 @@ def test_automatic_behavior_scope_stays_local(client, store, tmp_path, monkeypat
     assert scope["mode"] == "range"
     assert abs(scope["start_s"] - 1.99997) <= 1e-9
     assert abs(scope["end_s"] - 5.99997) <= 1e-9
+
+
+def test_preview_reports_real_candidate(client, store, tmp_path, monkeypatch):
+    asset, draft = seed(store, tmp_path, geometry={
+        "arena": {"type": "quad",
+                  "points": [[0, 0], [159, 0], [159, 119], [0, 119]]},
+    })
+    image = np.full((120, 160, 3), 255, dtype=np.uint8)
+    cv2.rectangle(image, (60, 50), (90, 80), (0, 0, 0), -1)
+    frame = FrameInfo(image=image, index=3, time_s=0.12, pts=300,
+                      time_base=None, clock_source="pts")
+    monkeypatch.setattr(preview.media, "read_frame_info",
+                        lambda *args, **kwargs: frame)
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "a" * 32,
+              "frame_index": 3, "kind": "detection"},
+    )
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    found = data["summary"]["detection"]
+    assert found["candidates"] == 1
+    assert found["missing_reason"] is None
+    assert found["region"] == "arena"
+    assert abs(found["center"][0] - 75.0) <= 1.0
+    assert abs(found["center"][1] - 65.0) <= 1.0
+    image_response = client.get(data["image_url"])
+    assert image_response.status_code == 200
+    assert image_response.data[:8] == b"\x89PNG\r\n\x1a\n"

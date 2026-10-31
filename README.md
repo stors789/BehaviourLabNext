@@ -31,6 +31,7 @@ python -m venv .venv
 - `behaviourlab/assets.py`：路径导入、上传副本、背景图
 - `behaviourlab/media.py`：视频探测、源帧读取、解释时钟与采样
 - `behaviourlab/geometry.py`：画布映射、单应、形状包含与方向变换
+- `behaviourlab/detection.py`：经典前景、检测区域与候选质量
 - `behaviourlab/preview.py`：真实源帧叠画预览
 - `behaviourlab/experiments/`：十项实验注册、参数与几何步骤
 - `behaviourlab/engine.py`：配置合并、冻结与校验
