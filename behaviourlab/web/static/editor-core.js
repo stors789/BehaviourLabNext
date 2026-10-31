@@ -386,6 +386,30 @@
     return Object.assign({}, spec, { count, modes });
   }
 
+  async function pickMedia(kind, options) {
+    const opts = options || {};
+    const bridge = opts.bridge || null;
+    const method = kind === "folder" ? "choose_folder" : "choose_videos";
+    if (bridge && typeof bridge[method] === "function") {
+      const result = await bridge[method]();
+      if (kind === "folder") {
+        if (typeof result === "string" && result) await opts.onPaths([result]);
+      } else if (Array.isArray(result) && result.length) {
+        const paths = result.filter((item) => typeof item === "string" && item);
+        if (paths.length) await opts.onPaths(paths);
+      }
+      return "desktop";
+    }
+    const picker = opts.picker;
+    if (!picker || typeof picker.pickFiles !== "function") return "none";
+    const files = await picker.pickFiles({
+      multiple: true,
+      directory: kind === "folder",
+    });
+    if (Array.isArray(files) && files.length) await opts.onFiles(files);
+    return "browser";
+  }
+
   function viewportToSource(view, pageX, pageY) {
     const scale = Math.min(view.cssWidth / view.sourceWidth,
       view.cssHeight / view.sourceHeight);
@@ -469,6 +493,7 @@
     stableStringify,
     resolveStep,
     rotateGeometry,
+    pickMedia,
     viewportToSource,
     moveVertex,
     moveHole,

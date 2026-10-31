@@ -1544,27 +1544,21 @@
   }
 
   async function pickVideos() {
-    const bridge = desktopBridge();
-    if (bridge && typeof bridge.choose_videos === "function") {
-      const paths = await bridge.choose_videos();
-      if (Array.isArray(paths) && paths.length) await importPaths(paths);
-      return;
-    }
-    if (!window.BLPickers) return;
-    const files = await window.BLPickers.pickFiles({ multiple: true });
-    if (files.length) await uploadFiles(files);
+    await window.BLCore.pickMedia("videos", {
+      bridge: desktopBridge(),
+      picker: window.BLPickers,
+      onPaths: importPaths,
+      onFiles: uploadFiles,
+    });
   }
 
   async function pickFolder() {
-    const bridge = desktopBridge();
-    if (bridge && typeof bridge.choose_folder === "function") {
-      const folder = await bridge.choose_folder();
-      if (typeof folder === "string" && folder) await importPaths([folder]);
-      return;
-    }
-    if (!window.BLPickers) return;
-    const files = await window.BLPickers.pickFiles({ multiple: true, directory: true });
-    if (files.length) await uploadFiles(files);
+    await window.BLCore.pickMedia("folder", {
+      bridge: desktopBridge(),
+      picker: window.BLPickers,
+      onPaths: importPaths,
+      onFiles: uploadFiles,
+    });
   }
 
   function bind() {

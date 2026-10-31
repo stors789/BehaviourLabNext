@@ -8,6 +8,7 @@ const {
   PreviewGate,
   SaveQueue,
   TOOLBAR_HEIGHT,
+  pickMedia,
   resolveStep,
   rotateGeometry,
   viewportToSource,
@@ -161,6 +162,44 @@ assert.strictEqual(restored.platform.angle, 20);
 // 7. 保存队列：串行快照、旧响应不回写、失败后仍可重试。
 (async () => {
   const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  // 8. 桌面桥优先；取消不产生导入；无桥才回退浏览器上传。
+  const seen = { paths: [], files: [] };
+  const picker = { pickFiles: async () => { throw new Error("不应调用浏览器输入"); } };
+  const mode = await pickMedia("videos", {
+    bridge: { choose_videos: async () => ["C:/实验数据/动物 甲.mp4", "C:/实验数据/动物 乙.mp4"] },
+    picker,
+    onPaths: (paths) => seen.paths.push(paths),
+    onFiles: (files) => seen.files.push(files),
+  });
+  assert.strictEqual(mode, "desktop");
+  assert.deepStrictEqual(seen.paths,
+    [["C:/实验数据/动物 甲.mp4", "C:/实验数据/动物 乙.mp4"]]);
+  assert.deepStrictEqual(seen.files, []);
+
+  const cancelled = [];
+  await pickMedia("videos", {
+    bridge: { choose_videos: async () => [] },
+    picker,
+    onPaths: (paths) => cancelled.push(paths),
+  });
+  assert.deepStrictEqual(cancelled, [], "取消不应导入任何路径");
+
+  const folders = [];
+  await pickMedia("folder", {
+    bridge: { choose_folder: async () => "C:/实验数据/动物" },
+    onPaths: (paths) => folders.push(paths),
+  });
+  assert.deepStrictEqual(folders, [["C:/实验数据/动物"]]);
+
+  const uploads = [];
+  const files = [{ name: "a.mp4" }];
+  const browserMode = await pickMedia("videos", {
+    picker: { pickFiles: async () => files },
+    onFiles: (items) => uploads.push(items),
+  });
+  assert.strictEqual(browserMode, "browser");
+  assert.deepStrictEqual(uploads, [files]);
   const sends = [];
   const echoes = [];
   const queue = new SaveQueue((snapshot) => new Promise((resolve, reject) => {
