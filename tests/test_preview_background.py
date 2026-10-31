@@ -68,3 +68,20 @@ def test_unknown_duration_leaves_end_unknown(monkeypatch):
         [FakeFrame(0.0, 10, 0.1)],
     )
     assert seen["end"] is None
+
+
+def test_fps_override_uses_interpreted_duration(monkeypatch):
+    # 10 帧、源 20 Hz、原时长 0.5 秒；按 10 Hz 解释后时长是 1 秒。
+    frames = [FakeFrame(index / 10.0, (index + 1) * 10, 0.1) for index in range(10)]
+    FakeSource.frames = frames
+    monkeypatch.setattr(preview.media, "VideoSource", FakeSource)
+    background = preview._background_for(
+        {"bg_method": "temporal", "temporal_bg_samples": 3},
+        {"path": "clip.mp4",
+         "metadata": {"fps": 20.0, "duration_s": 0.5, "frame_count": 10}},
+        {"window": {"start_s": 0.0, "end_s": None},
+         "fps_override": 10.0, "sample_fps": None},
+        0, 4, 4,
+    )
+    # 目标 0/0.333/0.667 → 真实帧 0/4/7（灰度 10/50/80），中位数 50。
+    assert int(background[0, 0]) == 50

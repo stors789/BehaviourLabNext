@@ -51,6 +51,27 @@ def _draw_candidates(canvas, result, thickness: int) -> None:
         )
 
 
+def _interpreted_duration(metadata: Mapping[str, Any],
+                          video: Mapping[str, Any]) -> float | None:
+    """把已知时长换到与 Frame.time_s 相同的解释时钟；无法换算时返回 None。"""
+
+    duration = metadata.get("duration_s")
+    if not is_number(duration) or float(duration) <= 0:
+        return None
+    seconds = float(duration)
+    override = video.get("fps_override")
+    if not is_number(override) or float(override) <= 0:
+        return seconds
+    # 覆盖帧率下帧时间按 index/fps_override 解释，原始容器时长不能直接使用。
+    frames = metadata.get("frame_count")
+    if is_number(frames) and float(frames) > 0:
+        return float(frames) / float(override)
+    source_fps = metadata.get("fps")
+    if is_number(source_fps) and float(source_fps) > 0:
+        return seconds * float(source_fps) / float(override)
+    return None
+
+
 def _background_for(settings: Mapping[str, Any], asset: Mapping[str, Any],
                     video: Mapping[str, Any], orientation: int,
                     width: int, height: int):
@@ -68,11 +89,11 @@ def _background_for(settings: Mapping[str, Any], asset: Mapping[str, Any],
         start = float(window.get("start_s") or 0.0)
         end = window.get("end_s")
         end_value = float(end) if is_number(end) else None
-        # 窗口终点未写时用同一源时钟的已知时长安排采样；时长也未知才取前 N 帧。
+        # 窗口终点未写时用同一解释时钟的已知时长安排采样；时长也未知才取前 N 帧。
         sample_end = end_value
-        duration = metadata.get("duration_s")
-        if sample_end is None and is_number(duration) and float(duration) > start:
-            sample_end = float(duration)
+        known_end = _interpreted_duration(metadata, video)
+        if sample_end is None and known_end is not None and known_end > start:
+            sample_end = known_end
         source = media.VideoSource(
             asset["path"],
             start_s=start,
