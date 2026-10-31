@@ -2063,7 +2063,8 @@
 
     el.primary.addEventListener("click", primaryAction);
     el.secondary.addEventListener("click", () => {
-      runPreview(state.step === "review" ? "behavior" : "detection");
+      // 沿用当前预览类型：行为预览下点“更新行为预览”不能退回单帧检测。
+      runPreview(state.step === "review" || state.previewKind === "behavior" ? "behavior" : "detection");
     });
 
     if (el.tasknav) {

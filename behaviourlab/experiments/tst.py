@@ -1019,6 +1019,14 @@ def preview_analysis(*, asset: Mapping[str, Any], video: Mapping[str, Any],
 
     from ..schema import AnalysisContext, new_id
 
+    # 与正式分析同一规则：lis 明确拒绝，不静默按 classic 计算。
+    options = unit.get("options") or {}
+    mode = options.get("mode", "classic")
+    if mode != "classic":
+        message = ("微动残差模式尚未接入，本块只能运行经典行为"
+                   if mode == "lis" else "未知行为算法")
+        raise ValidationError(message, "options.mode")
+
     metadata = asset.get("metadata") or {}
     window = {"start_s": float(start_s), "end_s": float(end_s)}
     source = media.VideoSource(
@@ -1056,7 +1064,6 @@ def preview_analysis(*, asset: Mapping[str, Any], video: Mapping[str, Any],
     rows = timeline.clip_rows(rows_all, unit_window)
     _filter_pairs(rows, unit_window)
 
-    options = unit.get("options") or {}
     scale, _ = activity.line_scale(geometry.get("body_line"))
     arena_points = activity.shape_points(geometry.get("arena"))
     arena_height = max(1.0, max(point[1] for point in arena_points)

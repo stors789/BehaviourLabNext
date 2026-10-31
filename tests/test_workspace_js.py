@@ -45,8 +45,12 @@ def test_secondary_preview_passes_stage_kind():
         encoding="utf-8")
     # 事件对象不能直接当 kind 传给后端。
     assert 'el.secondary.addEventListener("click", runPreview)' not in source
-    assert ('runPreview(state.step === "review" ? "behavior" : "detection")'
+    # 次级按钮沿用当前预览类型：行为预览下不能退回单帧检测。
+    assert ('runPreview(state.step === "review" || '
+            'state.previewKind === "behavior" ? "behavior" : "detection")'
             in source)
+    assert 'runPreview(state.step === "review" ? "behavior" : "detection")' \
+        not in source
 
 
 def test_parameter_sections_render_as_folds():

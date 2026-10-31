@@ -188,11 +188,76 @@ STATE_COLORS = {
     "unknown": "#CFC8BE",
 }
 
+# 活动特征曲线：决策 F 与速度波动 S，单位都是 mm/s。
+CURVE_KEYS = {
+    "decision_flow_p90_mm_s": ("#1c5f9e", "决策光流 p90"),
+    "speed_std_mm_s": ("#16684e", "速度波动"),
+}
+
+# 决策特征 F 使用的实际阈值参考线（虚线）：key、线型、图例标签。
+FLOW_THRESHOLD_LINES = (
+    ("flow_thr_hi_used", "--", "光流高阈值"),
+    ("flow_thr_lo_used", ":", "光流低阈值"),
+)
+
+
+def activity_series(rows: Iterable[Mapping[str, Any]], key: str
+                    ) -> tuple[list[float], list[float]]:
+    """特征 key 的真实曝光阶梯序列 (x, y)。
+
+    每行取 [interval_start_s, interval_end_s)，值在整段曝光内成立；
+    曝光不连续处用 NaN 断开。feature_ready 为 False 的行不算证据，
+    它的特征值是派生层的缺省 0，画出来就是伪造。
+    """
+
+    xs: list[float] = []
+    ys: list[float] = []
+    previous_end: float | None = None
+    for row in rows:
+        if not row.get("in_window"):
+            continue
+        if row.get("feature_ready") is False:
+            continue
+        start = _finite(row.get("interval_start_s"))
+        end = _finite(row.get("interval_end_s"))
+        value = _finite(row.get(key))
+        if start is None or end is None or end <= start or value is None:
+            continue
+        if previous_end is not None and abs(start - previous_end) <= 1e-7:
+            # 与上一行曝光相接：steps-post 直接延伸，不重复写起点。
+            pass
+        else:
+            if xs:
+                xs.append(float("nan"))
+                ys.append(float("nan"))
+            xs.append(start)
+            ys.append(value)
+        xs.append(end)
+        ys.append(value)
+        previous_end = end
+    return xs, ys
+
+
+def threshold_values(rows: Iterable[Mapping[str, Any]], key: str) -> list[float]:
+    """行内实际使用的阈值；正常整段统一，取出现过的去重值。"""
+
+    values: list[float] = []
+    for row in rows:
+        value = _finite(row.get(key))
+        if value is not None and not any(abs(value - seen) <= 1e-12
+                                         for seen in values):
+            values.append(value)
+    return values
+
 
 def activity_png(path: str | Path, rows: Iterable[Mapping[str, Any]], *,
                  style: Mapping[str, Any] | None = None,
                  title: str = "") -> bool:
-    """按最终状态画时间线；逐行用真实曝光 [start,end)，缺口留白。"""
+    """上轴画 F/S 活动特征曲线，下轴按最终状态画时间线。
+
+    逐行用真实曝光 [start,end)，缺口留白；没有可用状态不出图，
+    没有配对证据时退回只画状态色带。
+    """
 
     items = []
     for row in rows:
@@ -209,18 +274,55 @@ def activity_png(path: str | Path, rows: Iterable[Mapping[str, Any]], *,
     if not items:
         return False
 
+    series = {key: activity_series(rows, key) for key in CURVE_KEYS}
+    has_curves = any(xs for xs, _ in series.values())
     _, _, line_width, dpi = _style(style)
+
     begin = min(item[0] for item in items)
     finish = max(item[1] for item in items)
-    figure = Figure(figsize=(6.4, 1.9))
+    for xs, _ in series.values():
+        finite = [x for x in xs if math.isfinite(x)]
+        if finite:
+            begin = min(begin, finite[0])
+            finish = max(finish, finite[-1])
+
+    figure = Figure(figsize=(6.4, 3.4 if has_curves else 1.9))
     FigureCanvasAgg(figure)
-    axes = figure.add_subplot(111)
-    axes.set_xlim(begin, finish)
-    axes.set_ylim(0.0, 1.0)
-    axes.set_yticks([])
-    axes.set_xlabel("time (s)")
+    if has_curves:
+        curve_axes, band_axes = figure.subplots(
+            2, 1, sharex=True, gridspec_kw={"height_ratios": [2.2, 1.0]})
+    else:
+        curve_axes = None
+        band_axes = figure.add_subplot(111)
+
+    if curve_axes is not None:
+        for key, (color, label) in CURVE_KEYS.items():
+            xs, ys = series[key]
+            if not xs:
+                continue
+            curve_axes.plot(xs, ys, color=color, linewidth=line_width,
+                            drawstyle="steps-post", label=label)
+        for key, dash, label in FLOW_THRESHOLD_LINES:
+            for value in threshold_values(rows, key):
+                curve_axes.axhline(value, color="#8a8a8a", linestyle=dash,
+                                   linewidth=max(0.8, line_width * 0.6),
+                                   label=label)
+        curve_axes.set_ylabel("mm/s")
+        handles, labels = curve_axes.get_legend_handles_labels()
+        if handles:
+            curve_axes.legend(handles, labels, loc="upper right", fontsize=7,
+                              frameon=False, ncol=2)
+        curve_axes.spines["top"].set_visible(False)
+        curve_axes.spines["right"].set_visible(False)
+        if title:
+            curve_axes.set_title(title, fontsize=9, color="#333333")
+
+    band_axes.set_xlim(begin, finish)
+    band_axes.set_ylim(0.0, 1.0)
+    band_axes.set_yticks([])
+    band_axes.set_xlabel("time (s)")
     for start, end, state in items:
-        axes.add_patch(patches.Rectangle(
+        band_axes.add_patch(patches.Rectangle(
             (start, 0.0), end - start, 1.0,
             facecolor=STATE_COLORS[state], edgecolor="none"))
     present = []
@@ -228,13 +330,13 @@ def activity_png(path: str | Path, rows: Iterable[Mapping[str, Any]], *,
         if any(item[2] == state for item in items):
             present.append(patches.Patch(color=STATE_COLORS[state], label=state))
     if present:
-        axes.legend(handles=present, loc="upper right", fontsize=7,
-                    frameon=False, ncol=len(present))
-    axes.spines["top"].set_visible(False)
-    axes.spines["right"].set_visible(False)
-    axes.spines["left"].set_linewidth(min(1.0, line_width))
-    if title:
-        axes.set_title(title, fontsize=9, color="#333333")
+        band_axes.legend(handles=present, loc="upper right", fontsize=7,
+                         frameon=False, ncol=len(present))
+    band_axes.spines["top"].set_visible(False)
+    band_axes.spines["right"].set_visible(False)
+    band_axes.spines["left"].set_linewidth(min(1.0, line_width))
+    if not has_curves and title:
+        band_axes.set_title(title, fontsize=9, color="#333333")
     figure.tight_layout()
     figure.savefig(path, format="png", dpi=dpi)
     return True

@@ -217,6 +217,36 @@ def test_tst_behavior_preview_runs_core(client, store, tmp_path, monkeypatch):
                                            "speed_std_thr_lo"}
 
 
+def test_tst_behavior_preview_rejects_lis_mode(client, store, tmp_path,
+                                               monkeypatch):
+    from behaviourlab import media, preview
+    from behaviourlab.media import FrameInfo
+
+    # lis 保存照常，但行为预览也必须明确拒绝，不能静默按 classic 跑。
+    values = dict(tst.DEFAULTS)
+    values["mode"] = "lis"
+    asset, draft = seed(store, tmp_path, options=values)
+    videos = draft["videos"]
+    videos[0]["window"] = {"start_s": 1.0, "end_s": 4.0}
+    store.update_draft(draft["id"], {"videos": videos})
+    monkeypatch.setattr(media, "VideoSource", PreviewSource)
+    monkeypatch.setattr(
+        preview.media, "read_frame_at_time",
+        lambda *args, **kwargs: FrameInfo(
+            image=__import__("numpy").full((200, 200, 3), 255, dtype="uint8"),
+            index=20, time_s=2.0, pts=None, time_base=None,
+            clock_source="fps_override"))
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "e" * 32,
+              "time_s": 2.0, "kind": "behavior"})
+    assert response.status_code == 400, response.get_json()
+    fields = response.get_json()["error"]["fields"]
+    assert any(issue["field"] == "options.mode" for issue in fields)
+    assert any("微动残差模式尚未接入" in issue["message"] for issue in fields)
+
+
 def test_tst_relative_behavior_preview_uses_configured_range(
         client, store, tmp_path, monkeypatch):
     from behaviourlab import media, preview
