@@ -29,15 +29,18 @@
     frameInfo: null,
     editor: new EditorCore(),
     stepKey: null,
-    dirty: false,
+    saver: null,
     saveTimer: null,
-    saveChain: Promise.resolve(),
     savedSnapshot: null,
     previewGate: new PreviewGate(),
-    previewShown: false,
     loading: false,
     recordMode: false,
     canvasMessage: "正在读取源帧…",
+    navToken: 0,
+    pendingNav: null,
+    positionTimer: null,
+    applyingHistory: false,
+    draftRequest: null,
   };
 
   const el = {
@@ -137,44 +140,62 @@
     return state.assets.find((asset) => asset.id === id) || null;
   }
 
+  function saver() {
+    if (!state.saver) {
+      state.saver = new window.BLCore.SaveQueue((snapshot) =>
+        send("PUT", "/api/drafts/" + state.draftId, snapshot)
+          .then((data) => data.draft));
+    }
+    return state.saver;
+  }
+
   function markDirty() {
-    state.dirty = true;
+    saver().mark();
     clearTimeout(state.saveTimer);
     state.saveTimer = setTimeout(() => { flushSave(); }, 600);
   }
 
+  function isDirty() {
+    return Boolean(state.saver) && state.saver.dirty();
+  }
+
   function invalidatePreview() {
     state.previewGate.invalidate();
-    state.previewShown = false;
     if (el.preview) {
       el.preview.hidden = true;
       el.preview.removeAttribute("src");
     }
     if (el.secondary) el.secondary.hidden = true;
     if (el.primary && state.view === "detection") el.primary.textContent = "检测预览";
+    if (state.step === "review" && el.primary) el.primary.textContent = "行为预览";
   }
 
-  function flushSave() {
-    if (!state.draftId || !state.draft || !state.dirty) {
-      return state.saveChain;
-    }
-    const snapshot = clone({
+  function currentSnapshot() {
+    return clone({
       videos: state.draft.videos,
       options: state.draft.options,
       detection: state.draft.detection,
       output: state.draft.output,
       style: state.draft.style,
     });
-    state.dirty = false;
-    state.saveChain = state.saveChain.catch(() => {}).then(async () => {
-      const data = await send("PUT", "/api/drafts/" + state.draftId, snapshot);
-      state.draft = data.draft;
-      state.savedSnapshot = clone(data.draft);
-    }).catch((error) => {
-      state.dirty = true;
-      status(error.message, "error");
+  }
+
+  function flushSave() {
+    if (!state.draftId || !state.draft) return Promise.resolve(true);
+    return saver().save(currentSnapshot, (draft) => {
+      state.draft = draft;
+      state.savedSnapshot = clone(draft);
+    }).then((ok) => {
+      if (!ok && state.saver && state.saver.lastError) {
+        status(state.saver.lastError.message, "error");
+      }
+      return ok && !isDirty();
     });
-    return state.saveChain;
+  }
+
+  async function saveThen() {
+    clearTimeout(state.saveTimer);
+    return flushSave();
   }
 
   // -- 步骤与历史 -----------------------------------------------------
@@ -211,21 +232,55 @@
     return "/analyze?" + params.toString();
   }
 
-  function goStep(step, options) {
+  function analysisState() {
+    return {
+      draftId: state.draftId || null,
+      step: state.step,
+      video: state.videoIndex,
+      unit: state.unitIndex,
+      frame: state.frame,
+      arenaView: state.view,
+    };
+  }
+
+  function rememberPosition() {
+    if (!state.draftId || state.applyingHistory) return;
+    history.replaceState({ analysis: analysisState() }, "", location.href);
+  }
+
+  function schedulePosition() {
+    if (state.applyingHistory) return;
+    clearTimeout(state.positionTimer);
+    state.positionTimer = setTimeout(rememberPosition, 250);
+  }
+
+  async function goStep(step, options) {
     const opts = options || {};
+    const leavingEditor = state.step === "arena" || state.step === "review";
+    if (leavingEditor) {
+      const token = ++state.navToken;
+      const ok = await saveThen();
+      if (token !== state.navToken) return false;
+      if (!ok) {
+        status("保存失败，仍停留在当前页", "error");
+        return false;
+      }
+    }
     state.step = step;
     root.dataset.step = step;
     if (opts.view) state.view = opts.view;
     showPanel();
     renderTasknav();
-    if (opts.replace) history.replaceState({ step, view: state.view }, "", stepUrl(step));
-    else history.pushState({ step, view: state.view }, "", stepUrl(step));
+    const entry = { analysis: analysisState() };
+    if (opts.replace) history.replaceState(entry, "", stepUrl(step));
+    else history.pushState(entry, "", stepUrl(step));
     if (step === "range") renderRange();
     if (step === "arena" || step === "review") {
       ensureContext();
       loadFrame();
       renderInspector();
     }
+    return true;
   }
 
   function showPanel() {
@@ -346,7 +401,7 @@
       id,
       name,
       animal_id: null,
-      window: { start_s: 0, end_s: null },
+      window: null,
       geometry: {},
       options: {},
       detection: {},
@@ -354,35 +409,69 @@
     };
   }
 
-  async function setupVideos() {
-    if (!state.draftId) {
-      const chosen = state.assets.filter((asset) => state.selected.has(asset.id));
-      if (!chosen.length) return;
-      const videos = chosen.map((asset) => ({
-        asset_id: asset.id,
-        window: { start_s: 0, end_s: null },
-        orientation: 0,
-        fps_override: null,
-        sample_fps: null,
-        units: [newUnit("小鼠 1")],
-      }));
-      try {
-        const data = await send("POST", "/api/drafts", {
-          assay: state.assay || "tst",
-          project_id: state.projectId || null,
-          videos,
-        });
+  function selectionKey() {
+    return [state.assay, state.projectId,
+      Array.from(state.selected).sort().join(",")].join("|");
+  }
+
+  function createDraftOnce() {
+    const key = selectionKey();
+    const chosen = state.assets.filter((asset) => state.selected.has(asset.id));
+    if (!chosen.length) {
+      return Promise.reject(new Error("没有选择视频"));
+    }
+    if (state.draftRequest && state.draftRequest.key === key) {
+      return state.draftRequest.promise;
+    }
+    const videos = chosen.map((asset) => ({
+      asset_id: asset.id,
+      window: { start_s: 0, end_s: null },
+      orientation: 0,
+      fps_override: null,
+      sample_fps: null,
+      units: [newUnit("小鼠 1")],
+    }));
+    const promise = send("POST", "/api/drafts", {
+      assay: state.assay || "tst",
+      project_id: state.projectId || null,
+      videos,
+    }).then((data) => {
+      // 只接纳与当前选择一致的创建结果；过期响应不绑定。
+      if (state.draftRequest && state.draftRequest.key === key &&
+          selectionKey() === key && !state.draftId) {
         state.draft = data.draft;
         state.draftId = data.draft.id;
         state.savedSnapshot = clone(data.draft);
-        history.replaceState({ step: "range" }, "", stepUrl("range"));
-        goStep("range", { replace: true });
-      } catch (error) {
-        showErrors(error.fields && error.fields.length ? error.fields : [{ name: "草稿", message: error.message }]);
+        state.saver = null;
       }
-      return;
+      return data;
+    }).finally(() => {
+      if (state.draftRequest && state.draftRequest.key === key) {
+        state.draftRequest = null;
+      }
+    });
+    state.draftRequest = { key, promise };
+    return promise;
+  }
+
+  async function setupVideos() {
+    if (!state.draftId) {
+      const key = selectionKey();
+      try {
+        await createDraftOnce();
+      } catch (error) {
+        showErrors(error.fields && error.fields.length
+          ? error.fields
+          : [{ name: "草稿", message: error.message }]);
+        return;
+      }
+      if (selectionKey() !== key) {
+        status("选择已改变，请重新设置视频", "warn");
+        return;
+      }
+      if (!state.draftId) return;
     }
-    goStep("range");
+    await goStep("range", { replace: true });
   }
 
   // -- 视频设置 -------------------------------------------------------
@@ -500,40 +589,7 @@
   }
 
   function rotateGeometry(geometry, width, height, from, to) {
-    const delta = ((to - from) % 360 + 360) % 360;
-    const point = (p) => {
-      let x = p[0];
-      let y = p[1];
-      if (from === 90) { const nx = y; y = height - 1 - x; x = nx; }
-      else if (from === 180) { x = width - 1 - x; y = height - 1 - y; }
-      else if (from === 270) { const nx = width - 1 - y; y = x; x = nx; }
-      if (to === 90) { const nx = height - 1 - y; y = x; x = nx; }
-      else if (to === 180) { x = width - 1 - x; y = height - 1 - y; }
-      else if (to === 270) { const nx = y; y = width - 1 - x; x = nx; }
-      return [x, y];
-    };
-    const next = {};
-    Object.entries(geometry).forEach(([key, shape]) => {
-      if (!shape || typeof shape !== "object") return;
-      if (shape.type === "ellipse" && shape.center) {
-        next[key] = {
-          type: "ellipse",
-          center: point(shape.center),
-          radii: [shape.radii[0], shape.radii[1]],
-          angle: ((Number(shape.angle) || 0) + delta) % 180,
-        };
-      } else if (shape.type === "holes") {
-        next[key] = {
-          type: "holes",
-          holes: (shape.holes || []).map((hole) => ({ id: hole.id, center: point(hole.center) })),
-        };
-      } else if (shape.points) {
-        next[key] = { type: shape.type, points: shape.points.map(point) };
-      } else {
-        next[key] = shape;
-      }
-    });
-    return next;
+    return window.BLCore.rotateGeometry(geometry, width, height, from, to);
   }
 
   function applyAll() {
@@ -541,11 +597,18 @@
     const source = currentVideo();
     state.draft.videos.forEach((video) => {
       if (video === source) return;
+      const from = video.orientation || 0;
+      const to = source.orientation || 0;
+      if (from !== to) {
+        // 每个目标按自己的原始宽高换算，不复制当前视频的几何。
+        rotateVideoGeometry(video, from, to);
+      }
       video.window = clone(source.window);
-      video.orientation = source.orientation;
+      video.orientation = to;
       video.fps_override = source.fps_override;
       video.sample_fps = source.sample_fps;
     });
+    invalidatePreview();
     markDirty();
     status("已应用到其他视频", "ok");
   }
@@ -560,10 +623,14 @@
         state.unitIndex = 0;
       }
     });
-    await flushSave();
-    goStep("arena", { view: "geometry" });
-    loadFrame();
-    renderInspector();
+    markDirty();
+    clearTimeout(state.saveTimer);
+    const ok = await saveThen();
+    if (!ok) {
+      status("保存失败，未进入场地", "error");
+      return;
+    }
+    await goStep("arena", { view: "geometry" });
   }
 
   // -- 工作台上下文 ---------------------------------------------------
@@ -626,14 +693,43 @@
     return steps.find((step) => step.key === state.stepKey) || steps[0];
   }
 
+  function effectiveOptions(unit) {
+    const target = unit || currentUnit();
+    const video = currentVideo();
+    return Object.assign({},
+      (state.draft && state.draft.options) || {},
+      (video && video.options) || {},
+      (target && target.options) || {});
+  }
+
   function selectStep(key) {
     const step = geometrySteps().find((item) => item.key === key);
     if (!step) return;
     state.stepKey = key;
     const unit = currentUnit();
-    state.editor.reset(step, unit && unit.geometry ? unit.geometry[key] : null);
+    const resolved = window.BLCore.resolveStep(step, effectiveOptions(unit));
+    state.editor.reset(resolved, unit && unit.geometry ? unit.geometry[key] : null);
+    syncTools();
     renderInspector();
     draw();
+  }
+
+  function syncTools() {
+    const unit = currentUnit();
+    const hasGeometry = Boolean(unit && unit.geometry && unit.geometry[state.stepKey]);
+    const hasPending = state.editor.points.length > 0;
+    el.toolFinish.hidden = !state.editor.canFinish();
+    el.toolUndo.disabled = !hasGeometry && !hasPending;
+    el.toolRedraw.disabled = !hasGeometry && !hasPending;
+  }
+
+  function refreshEditorSpec() {
+    const step = geometrySteps().find((item) => item.key === state.stepKey);
+    if (!step) return;
+    const unit = currentUnit();
+    const resolved = window.BLCore.resolveStep(step, effectiveOptions(unit));
+    state.editor.reset(resolved, unit && unit.geometry ? unit.geometry[state.stepKey] : null);
+    syncTools();
   }
 
   // -- 源帧 -----------------------------------------------------------
@@ -666,9 +762,7 @@
       if (token !== state.imageToken) return;
       state.image = image;
       state.canvasMessage = "";
-      state.previewGate.invalidate();
-      state.previewShown = false;
-      el.preview.hidden = true;
+      invalidatePreview();
       state.frameInfo = { time, frame: frameIndex, clock };
       if (Number.isFinite(frameIndex) && frameIndex !== state.frame) state.frame = frameIndex;
       el.frameRange.value = String(state.frame);
@@ -678,6 +772,7 @@
         : "";
       state.loading = false;
       status("");
+      schedulePosition();
       draw();
     } catch (error) {
       if (token !== state.imageToken) return;
@@ -857,6 +952,7 @@
       ctx.stroke();
     }
     ctx.restore();
+    syncTools();
   }
 
   // -- 编辑器交互 -----------------------------------------------------
@@ -866,9 +962,8 @@
     if (!unit.geometry) unit.geometry = {};
     unit.geometry[state.stepKey] = geometry;
     markDirty();
-    state.previewGate.invalidate();
-    state.previewShown = false;
-    el.preview.hidden = true;
+    invalidatePreview();
+    syncTools();
     renderInspector();
     draw();
   }
@@ -892,14 +987,16 @@
       canvas.setPointerCapture(event.pointerId);
       return;
     }
-    if (spec.type === "ellipse" && state.editor.mode !== "points") {
+    if (state.editor.isEllipseDrag()) {
       state.editor.drag = { hit: null, box: { x1: point.x, y1: point.y, x2: point.x, y2: point.y } };
       canvas.setPointerCapture(event.pointerId);
       return;
     }
     const result = state.editor.addPoint(point);
-    if (result.status === "committed") commitGeometry(result.geometry);
-    else {
+    if (result.status === "committed") {
+      commitGeometry(result.geometry);
+    } else {
+      syncTools();
       renderInspector();
       draw();
     }
@@ -960,9 +1057,9 @@
     const body = el.inspectBody;
     body.innerHTML = "";
     if (state.recordMode) {
-      renderRecordInspector(body, unit);
-      el.primary.textContent = "下一步：复核";
-      el.secondary.hidden = true;
+      if (state.step === "review") renderReviewInspector(body, unit);
+      else renderRecordInspector(body, unit);
+      el.toolFinish.hidden = true;
       return;
     }
     if (state.view === "detection") {
@@ -990,10 +1087,42 @@
       fold.append(inner);
       body.append(fold);
     }
+    appendExperimentSettings(body, unit);
+    appendModeControl(body);
     const missing = required.filter((step) => !drawn(step));
     el.primary.textContent = "下一步：检测";
     el.secondary.hidden = true;
+    syncTools();
     status(missing.length ? "缺少：" + missing.map((step) => step.label).join("、") : "");
+  }
+
+  const MODE_LABELS = {
+    center: "标记中心",
+    ellipse: "拖出椭圆",
+    drag: "拖出椭圆",
+    points: "标记边缘点",
+  };
+
+  function appendModeControl(body) {
+    const spec = state.editor.spec;
+    if (!spec || !spec.modes || spec.modes.length < 2) return;
+    const wrap = document.createElement("div");
+    wrap.className = "mode-row";
+    spec.modes.forEach((mode) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "mode-button" + (state.editor.mode === mode ? " is-current" : "");
+      button.textContent = MODE_LABELS[mode] || mode;
+      button.addEventListener("click", () => {
+        if (!state.editor.setMode(mode)) return;
+        syncTools();
+        renderInspector();
+        draw();
+        canvas.focus();
+      });
+      wrap.append(button);
+    });
+    body.append(wrap);
   }
 
   function stepRow(step, done) {
@@ -1021,7 +1150,39 @@
     method.className = "muted";
     method.textContent = "当前方法：视觉检测（尚未实现）";
     body.append(title, method);
+    appendExperimentSettings(body, unit);
 
+    const confirmed = state.previewGate.confirmed(previewConfig("detection"));
+    el.primary.textContent = confirmed ? "检查并开始分析" : "检测预览";
+    el.secondary.textContent = "更新检测预览";
+    el.secondary.hidden = !confirmed;
+    el.preview.hidden = !confirmed;
+  }
+
+  function renderReviewInspector(body, unit) {
+    const title = document.createElement("h3");
+    title.textContent = "复核";
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent = "复核人工记录后生成行为预览。";
+    body.append(title, note);
+    appendPathMode(body);
+    appendExperimentSettings(body, unit);
+
+    const events = (unit.manual && unit.manual.events) || [];
+    const summary = document.createElement("p");
+    summary.className = "muted";
+    summary.textContent = events.length ? "已记录 " + events.length + " 条事件" : "还没有记录。";
+    body.append(summary);
+
+    const confirmed = state.previewGate.confirmed(previewConfig("behavior"));
+    el.primary.textContent = confirmed ? "检查并开始分析" : "行为预览";
+    el.secondary.textContent = "更新行为预览";
+    el.secondary.hidden = !confirmed;
+    el.preview.hidden = !confirmed;
+  }
+
+  function appendExperimentSettings(body, unit) {
     const settings = document.createElement("details");
     settings.className = "fold";
     settings.open = false;
@@ -1042,10 +1203,41 @@
     animalBody.append(nameField(unit));
     animal.append(animalSummary, animalBody);
     body.append(animal);
+  }
 
-    el.primary.textContent = "检测预览";
-    el.secondary.textContent = "更新检测预览";
-    el.secondary.hidden = !state.previewShown;
+  function appendPathMode(body) {
+    if (state.assay !== "ymaze") return;
+    const unit = currentUnit();
+    const current = (unit && unit.options && unit.options.mode) === "manual"
+      ? "manual" : "auto";
+    const wrap = document.createElement("div");
+    wrap.className = "mode-row";
+    [["auto", "自动几何"], ["manual", "人工记录"]].forEach(([value, label]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "mode-button" + (current === value ? " is-current" : "");
+      button.textContent = label;
+      button.addEventListener("click", () => { setPathMode(value); });
+      wrap.append(button);
+    });
+    body.append(wrap);
+  }
+
+  async function setPathMode(mode) {
+    const unit = currentUnit();
+    if (!unit) return;
+    unit.options = Object.assign({}, unit.options || {}, { mode });
+    state.recordMode = mode === "manual";
+    invalidatePreview();
+    markDirty();
+    renderTasknav();
+    if (state.step === "review") {
+      await goStep("arena", { view: "geometry" });
+      return;
+    }
+    state.view = "geometry";
+    renderInspector();
+    draw();
   }
 
   function parameterFields(unit) {
@@ -1087,17 +1279,35 @@
       else input.value = value == null ? "" : String(value);
       input.addEventListener("change", () => {
         if (!unit.options) unit.options = {};
-        if (input.type === "checkbox") unit.options[param.key] = input.checked;
-        else if (input.type === "number") {
+        let changed = null;
+        if (input.type === "checkbox") {
+          unit.options[param.key] = input.checked;
+          changed = input.checked;
+        } else if (input.type === "number") {
           const number = Number(input.value);
           if (!Number.isFinite(number)) {
-            input.value = String(param.default);
+            input.value = String(effectiveOption(unit, param.key, param.default));
+            return;
+          }
+          if (param.step === 1 && !Number.isInteger(number)) {
+            status(param.label + " 必须是整数", "error");
+            input.value = String(effectiveOption(unit, param.key, param.default));
             return;
           }
           unit.options[param.key] = number;
-        } else unit.options[param.key] = input.value;
+          changed = number;
+        } else {
+          unit.options[param.key] = input.value;
+          changed = input.value;
+        }
+        invalidatePreview();
         markDirty();
-        state.previewGate.invalidate();
+        if (param.key === "mode") {
+          state.recordMode = changed === "manual";
+          if (state.recordMode) state.view = "geometry";
+          renderTasknav();
+        }
+        refreshEditorSpec();
         renderInspector();
         draw();
       });
@@ -1141,6 +1351,7 @@
     note.className = "muted";
     note.textContent = "按当前帧记录事件；播放器在第 16 块接入。";
     body.append(title, note);
+    appendPathMode(body);
 
     const record = document.createElement("button");
     record.className = "button full";
@@ -1156,6 +1367,7 @@
         return;
       }
       unit.manual.events.push({ time_s: time, frame: state.frame, kind: "event" });
+      invalidatePreview();
       markDirty();
       renderInspector();
     });
@@ -1180,6 +1392,7 @@
       remove.textContent = "移除";
       remove.addEventListener("click", () => {
         events.splice(index, 1);
+        invalidatePreview();
         markDirty();
         renderInspector();
       });
@@ -1187,13 +1400,16 @@
       list.append(item);
     });
     body.append(list);
+    el.primary.textContent = "下一步：复核";
+    el.secondary.hidden = true;
   }
 
   // -- 预览与校验 -----------------------------------------------------
-  function previewConfig() {
+  function previewConfig(kind) {
     const video = currentVideo();
     const unit = currentUnit();
     return {
+      kind: kind || "detection",
       asset_id: video.asset_id,
       frame_index: state.frame,
       orientation: video.orientation || 0,
@@ -1201,35 +1417,32 @@
       sample_fps: video.sample_fps,
       window: clone(video.window),
       unit: clone(unit),
-      draft_options: state.draft.options || {},
-      draft_detection: state.draft.detection || {},
-      video_options: video.options || {},
-      video_detection: video.detection || {},
+      draft_options: clone(state.draft.options || {}),
+      draft_detection: clone(state.draft.detection || {}),
+      video_options: clone(video.options || {}),
+      video_detection: clone(video.detection || {}),
     };
   }
 
-  async function runPreview() {
+  async function runPreview(kind) {
     if (!state.draftId) return;
+    const type = kind || "detection";
     const video = currentVideo();
     const unit = currentUnit();
-    const request = state.previewGate.begin(previewConfig());
-    state.previewShown = false;
+    const request = state.previewGate.begin(previewConfig(type));
     el.primary.disabled = true;
     el.secondary.disabled = true;
-    status("正在生成预览…");
+    status(type === "behavior" ? "正在生成行为预览…" : "正在生成检测预览…");
     try {
       const data = await send("POST", "/api/drafts/" + state.draftId + "/preview", {
         asset_id: video.asset_id,
         unit_id: unit.id,
         frame_index: state.frame,
-        kind: "detection",
+        kind: type,
       });
       if (!state.previewGate.accept(request, data)) return;
-      state.previewShown = true;
       el.preview.src = data.image_url;
       el.preview.hidden = false;
-      el.primary.textContent = "检查并开始分析";
-      el.secondary.hidden = false;
       status((data.preview_scope && data.preview_scope.mode === "frame"
         ? "本帧预览" : "片段预览") + " · 帧 " + data.frame_index, "ok");
     } catch (error) {
@@ -1243,7 +1456,16 @@
   }
 
   async function primaryAction() {
-    if (state.step === "arena" && state.view === "geometry" && !state.recordMode) {
+    if (state.step === "review") {
+      if (state.previewGate.confirmed(previewConfig("behavior"))) await startAnalysis();
+      else await runPreview("behavior");
+      return;
+    }
+    if (state.recordMode) {
+      await goStep("review");
+      return;
+    }
+    if (state.view === "geometry") {
       const unit = currentUnit();
       const missing = geometrySteps().filter((step) =>
         step.required && !(unit.geometry && unit.geometry[step.key]));
@@ -1253,29 +1475,29 @@
         canvas.focus();
         return;
       }
-      await flushSave();
-      state.view = "detection";
-      state.previewGate.invalidate();
-      el.preview.hidden = true;
-      history.pushState({ step: "arena", view: "detection" }, "", stepUrl("arena", "detection"));
-      renderInspector();
+      await goStep("arena", { view: "detection" });
       return;
     }
-    if (state.step === "arena" && state.recordMode) {
-      await flushSave();
-      goStep("review");
-      return;
-    }
-    if (state.view === "detection" && state.previewShown) {
+    if (state.previewGate.confirmed(previewConfig("detection"))) {
       await startAnalysis();
       return;
     }
-    await runPreview();
+    await runPreview("detection");
   }
 
   async function startAnalysis() {
     if (!state.draftId) return;
-    await flushSave();
+    const kind = state.step === "review" ? "behavior" : "detection";
+    if (!state.previewGate.confirmed(previewConfig(kind))) {
+      status("配置已改变，请重新预览", "warn");
+      renderInspector();
+      return;
+    }
+    const settled = await saveThen();
+    if (!settled) {
+      status("保存失败，未开始分析", "error");
+      return;
+    }
     try {
       const data = await get("/api/drafts/" + state.draftId + "/validate");
       const issues = data.issues || [];
@@ -1290,17 +1512,64 @@
   }
 
   // -- 事件绑定 -------------------------------------------------------
+  function desktopBridge() {
+    return window.pywebview && window.pywebview.api ? window.pywebview.api : null;
+  }
+
+  function mergeAssets(assets, errors) {
+    showErrors(errors || []);
+    (assets || []).forEach((asset) => {
+      if (!state.assets.some((item) => item.id === asset.id)) state.assets.push(asset);
+      state.selected.add(asset.id);
+    });
+    if (!state.draft) renderAssets();
+  }
+
+  async function importPaths(paths) {
+    const list = (paths || []).filter((item) => typeof item === "string" && item.trim());
+    if (!list.length) return;
+    el.importStatus.hidden = false;
+    el.importStatus.textContent = "正在导入视频…";
+    try {
+      const data = await send("POST", "/api/assets/import", {
+        paths: list,
+        project_id: state.projectId || null,
+      });
+      mergeAssets(data.assets, data.errors);
+    } catch (error) {
+      showErrors([{ name: "导入失败", message: error.message }]);
+    } finally {
+      el.importStatus.hidden = true;
+    }
+  }
+
+  async function pickVideos() {
+    const bridge = desktopBridge();
+    if (bridge && typeof bridge.choose_videos === "function") {
+      const paths = await bridge.choose_videos();
+      if (Array.isArray(paths) && paths.length) await importPaths(paths);
+      return;
+    }
+    if (!window.BLPickers) return;
+    const files = await window.BLPickers.pickFiles({ multiple: true });
+    if (files.length) await uploadFiles(files);
+  }
+
+  async function pickFolder() {
+    const bridge = desktopBridge();
+    if (bridge && typeof bridge.choose_folder === "function") {
+      const folder = await bridge.choose_folder();
+      if (typeof folder === "string" && folder) await importPaths([folder]);
+      return;
+    }
+    if (!window.BLPickers) return;
+    const files = await window.BLPickers.pickFiles({ multiple: true, directory: true });
+    if (files.length) await uploadFiles(files);
+  }
+
   function bind() {
-    el.pickVideos.addEventListener("click", async () => {
-      if (!window.BLPickers) return;
-      const files = await window.BLPickers.pickFiles({ multiple: true });
-      if (files.length) await uploadFiles(files);
-    });
-    el.pickFolder.addEventListener("click", async () => {
-      if (!window.BLPickers) return;
-      const files = await window.BLPickers.pickFiles({ multiple: true, directory: true });
-      if (files.length) await uploadFiles(files);
-    });
+    el.pickVideos.addEventListener("click", () => { pickVideos(); });
+    el.pickFolder.addEventListener("click", () => { pickFolder(); });
     ["dragenter", "dragover"].forEach((name) => {
       el.dropzone.addEventListener(name, (event) => {
         event.preventDefault();
@@ -1417,6 +1686,11 @@
       state.frame = Number(el.frameRange.value);
       loadFrame();
     });
+    el.frameRange.addEventListener("change", () => {
+      state.frame = Number(el.frameRange.value);
+      loadFrame();
+      rememberPosition();
+    });
     el.frameNumber.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
       event.preventDefault();
@@ -1440,27 +1714,80 @@
           ? (index === 2 ? "detection" : "geometry")
           : state.view;
         if (step === state.step && (step !== "arena" || targetView === state.view)) return;
-        if (state.step === "arena") flushSave();
         goStep(step, { view: targetView });
       });
     }
 
-    window.addEventListener("popstate", (event) => {
-      const data = event.state || {};
-      state.step = data.step || "select";
-      root.dataset.step = state.step;
-      state.view = data.view === "detection" ? "detection" : "geometry";
-      showPanel();
-      renderTasknav();
-      if (state.step === "range") renderRange();
-      if (state.step === "arena") {
-        ensureContext();
-        loadFrame();
-        renderInspector();
+    window.addEventListener("popstate", async (event) => {
+      const target = event.state && event.state.analysis;
+      const token = ++state.navToken;
+      const ok = await saveThen();
+      if (token !== state.navToken) return;
+      if (!ok) {
+        history.pushState({ analysis: analysisState() }, "", location.href);
+        status("保存失败，未切换历史记录", "error");
+        return;
+      }
+      if (!target) return;
+      if (target.draftId && target.draftId !== state.draftId) {
+        location.reload();
+        return;
+      }
+      state.applyingHistory = true;
+      try {
+        state.step = target.step || "select";
+        root.dataset.step = state.step;
+        state.videoIndex = Number.isInteger(target.video) ? target.video : 0;
+        state.unitIndex = Number.isInteger(target.unit) ? target.unit : 0;
+        state.frame = Number.isInteger(target.frame) ? target.frame : 0;
+        state.view = target.arenaView === "detection" ? "detection" : "geometry";
+        showPanel();
+        renderTasknav();
+        if (state.step === "range") renderRange();
+        if (state.step === "arena" || state.step === "review") {
+          ensureContext();
+          loadFrame();
+          renderInspector();
+        }
+      } finally {
+        state.applyingHistory = false;
       }
     });
+
+    document.addEventListener("click", async (event) => {
+      if (event.defaultPrevented || event.button !== 0) return;
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const link = event.target.closest("a[href]");
+      if (!link || link.target === "_blank" || link.hasAttribute("download")) return;
+      const url = new URL(link.getAttribute("href"), location.href);
+      if (url.origin !== location.origin) return;
+      if (url.pathname === location.pathname && url.search === location.search &&
+          url.hash === location.hash) {
+        return;
+      }
+      event.preventDefault();
+      const token = ++state.navToken;
+      state.pendingNav = { token, href: url.href };
+      const ok = await saveThen();
+      if (token !== state.navToken) return;
+      state.pendingNav = null;
+      if (!ok) {
+        status("保存失败，仍留在当前页", "error");
+        return;
+      }
+      location.href = url.href;
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !state.pendingNav) return;
+      state.navToken += 1;
+      state.pendingNav = null;
+      status("已取消跳转", "warn");
+    });
+
     window.addEventListener("beforeunload", (event) => {
-      if (!state.dirty) return;
+      rememberPosition();
+      if (!isDirty()) return;
       event.preventDefault();
       event.returnValue = "";
     });
@@ -1487,6 +1814,7 @@
     state.frame = next;
     el.frameRange.value = String(next);
     loadFrame();
+    rememberPosition();
   }
 
   async function uploadFiles(files) {
@@ -1539,11 +1867,21 @@
         const data = await get("/api/drafts/" + state.draftId);
         state.draft = data.draft;
         state.savedSnapshot = clone(data.draft);
+        state.saver = null;
         state.assay = data.draft.assay;
         if (data.draft.project_id) state.projectId = data.draft.project_id;
         if (el.assay) el.assay.value = state.assay;
       } catch (error) {
         status(error.message, "error");
+      }
+    }
+    const entry = history.state && history.state.analysis;
+    if (entry && entry.draftId === state.draftId) {
+      state.videoIndex = Number.isInteger(entry.video) ? entry.video : 0;
+      state.unitIndex = Number.isInteger(entry.unit) ? entry.unit : 0;
+      state.frame = Number.isInteger(entry.frame) ? entry.frame : 0;
+      if (state.step === "arena") {
+        state.view = entry.arenaView === "detection" ? "detection" : "geometry";
       }
     }
     await loadAssets();

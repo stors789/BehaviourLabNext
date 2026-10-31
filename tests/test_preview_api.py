@@ -19,7 +19,8 @@ def make_frame(index: int = 7, time_s: float = 0.28) -> FrameInfo:
     )
 
 
-def seed(store, tmp_path, geometry=None, duration=10.0):
+def seed(store, tmp_path, geometry=None, duration=10.0, *, assay="oft",
+         window=None, unit_options=None, manual=None):
     source = tmp_path / "clip.mp4"
     source.write_bytes(b"placeholder")
     asset = store.create_asset(
@@ -30,10 +31,10 @@ def seed(store, tmp_path, geometry=None, duration=10.0):
                   "fps": 25.0, "frame_count": 250},
     )
     draft = store.create_draft(
-        "oft",
+        assay,
         videos=[{
             "asset_id": asset["id"],
-            "window": {"start_s": 0, "end_s": None},
+            "window": window or {"start_s": 0, "end_s": None},
             "orientation": 0,
             "fps_override": None,
             "sample_fps": None,
@@ -42,9 +43,9 @@ def seed(store, tmp_path, geometry=None, duration=10.0):
                 "name": "小鼠 1",
                 "window": None,
                 "geometry": geometry or {},
-                "options": {},
+                "options": unit_options or {},
                 "detection": {},
-                "manual": None,
+                "manual": manual,
             }],
         }],
     )
@@ -109,3 +110,183 @@ def test_preview_rejects_bad_frame_index(client, store, tmp_path):
         assert response.status_code == 400, value
         fields = response.get_json()["error"]["fields"]
         assert fields and fields[0]["field"] == "frame_index"
+
+
+def test_nor_object_point_preview_returns_png(client, store, tmp_path, monkeypatch):
+    asset, draft = seed(store, tmp_path, assay="nor", geometry={
+        "arena": {"type": "quad",
+                  "points": [[20, 20], [300, 20], [300, 260], [20, 260]]},
+        "object1": {"type": "point", "points": [[100, 120]]},
+        "object2": {"type": "point", "points": [[300, 220]]},
+    })
+    monkeypatch.setattr(preview.media, "read_frame_info",
+                        lambda *args, **kwargs: make_frame(index=12, time_s=0.48))
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "a" * 32,
+              "frame_index": 12, "kind": "detection"},
+    )
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    assert data["frame_index"] == 12
+    assert data["summary"]["drawn_steps"] == ["arena", "object1", "object2"]
+    image = client.get(data["image_url"])
+    assert image.status_code == 200
+    assert image.data[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_manual_y_keeps_configured_window(client, store, tmp_path, monkeypatch):
+    asset, draft = seed(
+        store, tmp_path, assay="ymaze", duration=60.0,
+        window={"start_s": 1.0, "end_s": 20.0},
+        unit_options={"mode": "manual"},
+        manual={"events": [{"time_s": 2.5, "frame": 75, "kind": "event"}]},
+    )
+    monkeypatch.setattr(preview.media, "read_frame_at_time",
+                        lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "a" * 32,
+              "time_s": 2.99997, "kind": "behavior"},
+    )
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    scope = data["preview_scope"]
+    assert scope["mode"] == "configured"
+    assert scope.get("manual") is True
+    assert abs(scope["start_s"] - 1.0) <= 1e-12
+    assert abs(scope["end_s"] - 20.0) <= 1e-12
+    assert data["summary"]["manual_preserved"] is True
+    assert data["frame_index"] == 90
+
+
+def test_manual_barnes_keeps_configured_window(client, store, tmp_path, monkeypatch):
+    asset, draft = seed(
+        store, tmp_path, assay="barnes", duration=60.0,
+        window={"start_s": 1.0, "end_s": 20.0},
+        unit_options={"hole_count": 20},
+        manual={"hole_sequence": [3, 7, 11], "entry": 7},
+    )
+    monkeypatch.setattr(preview.media, "read_frame_at_time",
+                        lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "a" * 32,
+              "time_s": 2.99997, "kind": "behavior"},
+    )
+    assert response.status_code == 201, response.get_json()
+    scope = response.get_json()["data"]["preview_scope"]
+    assert scope["mode"] == "configured"
+    assert abs(scope["start_s"] - 1.0) <= 1e-12
+    assert abs(scope["end_s"] - 20.0) <= 1e-12
+
+
+def test_automatic_behavior_scope_stays_local(client, store, tmp_path, monkeypatch):
+    asset, draft = seed(store, tmp_path,
+                        window={"start_s": 1.0, "end_s": 20.0})
+    monkeypatch.setattr(preview.media, "read_frame_at_time",
+                        lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "a" * 32,
+              "time_s": 2.99997, "kind": "behavior"},
+    )
+    assert response.status_code == 201, response.get_json()
+    scope = response.get_json()["data"]["preview_scope"]
+    assert scope["mode"] == "range"
+    assert abs(scope["start_s"] - 1.99997) <= 1e-9
+    assert abs(scope["end_s"] - 5.99997) <= 1e-9
+
+
+def test_nor_object_point_preview_returns_png(client, store, tmp_path, monkeypatch):
+    asset, draft = seed(store, tmp_path, assay="nor", geometry={
+        "arena": {"type": "quad",
+                  "points": [[20, 20], [300, 20], [300, 260], [20, 260]]},
+        "object1": {"type": "point", "points": [[100, 120]]},
+        "object2": {"type": "point", "points": [[300, 220]]},
+    })
+    monkeypatch.setattr(preview.media, "read_frame_info",
+                        lambda *args, **kwargs: make_frame(index=12, time_s=0.48))
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "a" * 32,
+              "frame_index": 12, "kind": "detection"},
+    )
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    assert data["frame_index"] == 12
+    assert data["summary"]["drawn_steps"] == ["arena", "object1", "object2"]
+    image = client.get(data["image_url"])
+    assert image.status_code == 200
+    assert image.data[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_manual_y_keeps_configured_window(client, store, tmp_path, monkeypatch):
+    asset, draft = seed(
+        store, tmp_path, assay="ymaze", duration=60.0,
+        window={"start_s": 1.0, "end_s": 20.0},
+        unit_options={"mode": "manual"},
+        manual={"events": [{"time_s": 2.5, "frame": 75, "kind": "event"}]},
+    )
+    monkeypatch.setattr(preview.media, "read_frame_at_time",
+                        lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "a" * 32,
+              "time_s": 2.99997, "kind": "behavior"},
+    )
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    scope = data["preview_scope"]
+    assert scope["mode"] == "configured"
+    assert scope.get("manual") is True
+    assert abs(scope["start_s"] - 1.0) <= 1e-12
+    assert abs(scope["end_s"] - 20.0) <= 1e-12
+    assert data["summary"]["manual_preserved"] is True
+    assert data["frame_index"] == 90
+
+
+def test_manual_barnes_keeps_configured_window(client, store, tmp_path, monkeypatch):
+    asset, draft = seed(
+        store, tmp_path, assay="barnes", duration=60.0,
+        window={"start_s": 1.0, "end_s": 20.0},
+        unit_options={"hole_count": 20},
+        manual={"hole_sequence": [3, 7, 11], "entry": 7},
+    )
+    monkeypatch.setattr(preview.media, "read_frame_at_time",
+                        lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "a" * 32,
+              "time_s": 2.99997, "kind": "behavior"},
+    )
+    assert response.status_code == 201, response.get_json()
+    scope = response.get_json()["data"]["preview_scope"]
+    assert scope["mode"] == "configured"
+    assert abs(scope["start_s"] - 1.0) <= 1e-12
+    assert abs(scope["end_s"] - 20.0) <= 1e-12
+
+
+def test_automatic_behavior_scope_stays_local(client, store, tmp_path, monkeypatch):
+    asset, draft = seed(store, tmp_path,
+                        window={"start_s": 1.0, "end_s": 20.0})
+    monkeypatch.setattr(preview.media, "read_frame_at_time",
+                        lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "a" * 32,
+              "time_s": 2.99997, "kind": "behavior"},
+    )
+    assert response.status_code == 201, response.get_json()
+    scope = response.get_json()["data"]["preview_scope"]
+    assert scope["mode"] == "range"
+    assert abs(scope["start_s"] - 1.99997) <= 1e-9
+    assert abs(scope["end_s"] - 5.99997) <= 1e-9

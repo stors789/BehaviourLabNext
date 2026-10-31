@@ -28,7 +28,7 @@
     this.spec = spec || null;
     this.points = [];
     this.committed = geometry ? clone(geometry) : null;
-    this.mode = spec && spec.modes ? spec.modes[0] : null;
+    this.mode = spec && spec.modes && spec.modes.length ? spec.modes[0] : null;
     this.drag = null;
   };
 
@@ -57,12 +57,7 @@
     const spec = this.spec;
     if (!spec || !point) return { status: "ignored" };
     if (this.committed) return { status: "ignored" };
-    if (this.isEllipseDrag() && spec.type === "ellipse_or_point") {
-      return { status: "ignored" };
-    }
-    if (spec.type === "ellipse" && this.mode !== "points") {
-      return { status: "ignored" };
-    }
+    if (this.isEllipseDrag()) return { status: "ignored" };
 
     this.points.push([Number(point.x), Number(point.y)]);
     return this._settle();
@@ -71,26 +66,48 @@
   EditorCore.prototype._settle = function () {
     const spec = this.spec;
     const count = Number(spec.count) || 0;
-    const fixed = Boolean(spec.fixed);
-    const auto = Boolean(spec.auto_commit) || spec.type === "point" ||
-      spec.type === "line" || spec.type === "quad" || spec.type === "holes" ||
-      (spec.type === "ellipse_or_point" && this.mode === "center");
+    const minimum = Math.max(3, Number(spec.min_points) || 3);
 
-    if (spec.type === "polygon" && !(fixed && auto)) {
-      const ready = this.points.length >= Math.max(3, Number(spec.min_points) || 3);
-      return { status: "pending", ready };
+    switch (spec.type) {
+      case "point":
+        return { status: "committed", geometry: this._commit() };
+      case "line":
+        return this._atLeast(2);
+      case "quad":
+        return this._atLeast(4);
+      case "holes":
+        // 洞数来自实验参数；非整数或缺失时不自动提交。
+        return count > 0 && this.points.length >= count
+          ? { status: "committed", geometry: this._commit() }
+          : { status: "pending", ready: false };
+      case "polygon":
+        if (spec.fixed && count > 0) return this._atLeast(count);
+        return {
+          status: "pending",
+          ready: this.points.length >= minimum,
+        };
+      case "ellipse":
+        if (this.mode === "points") {
+          return {
+            status: "pending",
+            ready: this.points.length >= Math.max(5, Number(spec.min_points) || 5),
+          };
+        }
+        return { status: "ignored" };
+      case "ellipse_or_point":
+        if (this.mode === "center") {
+          return { status: "committed", geometry: this._commit() };
+        }
+        return { status: "ignored" };
+      default:
+        return { status: "pending", ready: false };
     }
-    if (spec.type === "ellipse") {
-      const ready = this.points.length >= Math.max(5, Number(spec.min_points) || 5);
-      return { status: "pending", ready };
-    }
-    if (count > 0 && this.points.length >= count) {
-      return { status: "committed", geometry: this._commit() };
-    }
-    if (count === 0 && spec.type === "point") {
-      return { status: "committed", geometry: this._commit() };
-    }
-    return { status: "pending", ready: false };
+  };
+
+  EditorCore.prototype._atLeast = function (target) {
+    return this.points.length >= target
+      ? { status: "committed", geometry: this._commit() }
+      : { status: "pending", ready: false };
   };
 
   EditorCore.prototype.canFinish = function () {
@@ -120,6 +137,8 @@
       this.committed = { type: "holes", holes };
     } else if (spec.type === "ellipse" && this.mode === "points") {
       this.committed = { type: "ellipse", points };
+    } else if (spec.type === "ellipse_or_point" && this.mode === "center") {
+      this.committed = { type: "point", points: [points[0]] };
     } else {
       this.committed = { type: spec.type, points };
     }
@@ -252,6 +271,121 @@
     return next;
   }
 
+  function SaveQueue(send) {
+    this.send = send;
+    this.editVersion = 0;
+    this.savedVersion = 0;
+    this.chain = Promise.resolve();
+    this.lastError = null;
+    this._draining = false;
+    this._drainPromise = null;
+    this._snapshotFactory = null;
+    this._onEcho = null;
+  }
+
+  SaveQueue.prototype.mark = function () {
+    this.editVersion += 1;
+  };
+
+  SaveQueue.prototype.dirty = function () {
+    return this.editVersion > this.savedVersion;
+  };
+
+  SaveQueue.prototype.reset = function () {
+    this.editVersion = 0;
+    this.savedVersion = 0;
+    this.chain = Promise.resolve();
+    this.lastError = null;
+    this._draining = false;
+    this._drainPromise = null;
+    this._snapshotFactory = null;
+    this._onEcho = null;
+  };
+
+  SaveQueue.prototype.save = function (snapshotFactory, onEcho) {
+    this._snapshotFactory = snapshotFactory;
+    this._onEcho = onEcho;
+    if (this._draining) return this._drainPromise;
+    this._draining = true;
+    this._drainPromise = (async () => {
+      try {
+        while (this.dirty()) {
+          const version = this.editVersion;
+          // 每次发送都取最新快照，旧响应只在无新编辑时回写。
+          const snapshot = this._snapshotFactory();
+          let echo;
+          try {
+            echo = await this.send(snapshot);
+          } catch (error) {
+            this.lastError = error;
+            return false;
+          }
+          this.savedVersion = Math.max(this.savedVersion, version);
+          if (version === this.editVersion && this._onEcho) this._onEcho(echo);
+        }
+        this.lastError = null;
+        return true;
+      } finally {
+        this._draining = false;
+        this._drainPromise = null;
+      }
+    })();
+    return this._drainPromise;
+  };
+
+  function rotateGeometry(geometry, width, height, from, to) {
+    const delta = ((to - from) % 360 + 360) % 360;
+    const point = (p) => {
+      let x = p[0];
+      let y = p[1];
+      if (from === 90) { const nx = y; y = height - 1 - x; x = nx; }
+      else if (from === 180) { x = width - 1 - x; y = height - 1 - y; }
+      else if (from === 270) { const nx = width - 1 - y; y = x; x = nx; }
+      if (to === 90) { const nx = height - 1 - y; y = x; x = nx; }
+      else if (to === 180) { x = width - 1 - x; y = height - 1 - y; }
+      else if (to === 270) { const nx = y; y = width - 1 - x; x = nx; }
+      return [x, y];
+    };
+    const next = {};
+    Object.entries(geometry || {}).forEach(([key, shape]) => {
+      if (!shape || typeof shape !== "object") return;
+      if (shape.type === "ellipse" && shape.center) {
+        next[key] = {
+          type: "ellipse",
+          center: point(shape.center),
+          radii: [shape.radii[0], shape.radii[1]],
+          angle: ((Number(shape.angle) || 0) + delta) % 180,
+        };
+      } else if (shape.type === "holes") {
+        next[key] = {
+          type: "holes",
+          holes: (shape.holes || []).map((hole) => ({ id: hole.id, center: point(hole.center) })),
+        };
+      } else if (shape.points) {
+        next[key] = { type: shape.type, points: shape.points.map(point) };
+      } else {
+        next[key] = shape;
+      }
+    });
+    return next;
+  }
+
+  function resolveStep(spec, context) {
+    if (!spec) return null;
+    const options = context || {};
+    let count = Number(spec.count) || 0;
+    if (spec.count_key) {
+      const raw = Number(options[spec.count_key]);
+      count = Number.isInteger(raw) && raw > 0 ? raw : 0;
+    }
+    if (spec.type === "ellipse_or_point" && count === 0) count = 1;
+    const modes = spec.modes && spec.modes.length
+      ? spec.modes.slice()
+      : spec.type === "ellipse" ? ["drag", "points"]
+        : spec.type === "ellipse_or_point" ? ["center", "ellipse"] : [];
+    return Object.assign({}, spec, { count, modes });
+  }
+
   function viewportToSource(view, pageX, pageY) {
     const scale = Math.min(view.cssWidth / view.sourceWidth,
       view.cssHeight / view.sourceHeight);
@@ -330,8 +464,11 @@
     HANDLE_HIT_PX,
     EditorCore,
     PreviewGate,
+    SaveQueue,
     previewSignature,
     stableStringify,
+    resolveStep,
+    rotateGeometry,
     viewportToSource,
     moveVertex,
     moveHole,

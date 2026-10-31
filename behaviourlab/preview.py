@@ -41,7 +41,7 @@ def _draw_shape(canvas, shape: Mapping[str, Any], color, thickness: int) -> None
             cv2.line(canvas, points[0], points[1], color, thickness, cv2.LINE_AA)
     elif kind == "point":
         points = _integer_points(shape.get("points") or [])
-        if points:
+        if len(points):
             radius = max(3, thickness * 2)
             cv2.circle(canvas, points[0], radius, color, thickness, cv2.LINE_AA)
     elif kind == "ellipse":
@@ -164,15 +164,42 @@ def _find_unit(video: Mapping[str, Any], unit_id: str | None) -> Mapping[str, An
     return units[0]
 
 
-def _scope(video: Mapping[str, Any], unit: Mapping[str, Any], time_s: float,
-           kind: str, duration_s: float | None) -> dict:
-    window = unit.get("window") or video.get("window") or {}
+def _is_manual_scope(assay: str, options: Mapping[str, Any],
+                     unit: Mapping[str, Any]) -> bool:
+    """人工 Y 或带人工输入的 Barnes 保持完整配置范围。"""
+
+    if assay == "ymaze" and options.get("mode") == "manual":
+        return True
+    manual = unit.get("manual")
+    if isinstance(manual, Mapping):
+        if assay == "barnes":
+            return any(manual.get(key) for key in
+                       ("events", "hole_sequence", "entry", "sequence"))
+        if assay == "ymaze":
+            return bool(manual)
+    return False
+
+
+def _scope(assay: str, video: Mapping[str, Any], unit: Mapping[str, Any],
+           options: Mapping[str, Any], time_s: float, kind: str,
+           duration_s: float | None) -> dict:
+    window = video.get("window") or {}
     start = float(window.get("start_s") or 0.0)
     end = window.get("end_s")
     end_value = float(end) if is_number(end) else duration_s
     if kind == "detection":
         return {"start_s": time_s, "end_s": time_s, "frame_count": 1,
                 "mode": "frame"}
+    if _is_manual_scope(assay, options, unit):
+        scope_end = end_value if end_value is not None else max(start, time_s)
+        scope_end = max(start, scope_end)
+        return {
+            "start_s": start,
+            "end_s": scope_end,
+            "duration_s": scope_end - start,
+            "mode": "configured",
+            "manual": True,
+        }
     scope_start = max(start, time_s - 1.0)
     scope_end = time_s + 3.0
     if end_value is not None:
@@ -259,7 +286,12 @@ def create_preview(
 
     metadata = asset.get("metadata") or {}
     duration_s = metadata.get("duration_s")
-    scope = _scope(video, unit, float(info.time_s), kind,
+    options: dict = {}
+    for layer in (draft.get("options"), video.get("options"), unit.get("options")):
+        if isinstance(layer, Mapping):
+            options.update(layer)
+    scope = _scope(draft.get("assay", ""), video, unit, options,
+                   float(info.time_s), kind,
                    float(duration_s) if is_number(duration_s) else None)
 
     steps = experiments.get(draft["assay"]).SPEC.get("geometry", [])
@@ -282,6 +314,8 @@ def create_preview(
             "drawn_steps": drawn,
             "missing_steps": missing,
             "detection_available": False,
+            "manual_preserved": _is_manual_scope(draft.get("assay", ""),
+                                                  options, unit),
         },
         "warnings": warnings,
     }

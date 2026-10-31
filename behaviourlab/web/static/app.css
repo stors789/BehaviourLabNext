@@ -1657,3 +1657,34 @@ summary:focus-visible {
 .import-zone {
   border-radius: var(--radius);
 }
+
+.mode-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.mode-button {
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid var(--control);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.mode-button.is-current {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+}
+
+.tool:disabled {
+  border-color: #c5d0d9;
+  background: #e9eef3;
+  color: #5c6e7e;
+  cursor: not-allowed;
+}
