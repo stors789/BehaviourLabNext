@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import http.client
+import json
+import socket
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,7 +14,9 @@ import pytest
 from behaviourlab.config import DataPaths
 from behaviourlab.launcher import record_startup_failure
 from behaviourlab.processes import (
+    JobOwnerRegistry,
     ManagedProcess,
+    OwnershipError,
     child_creation_flags,
 )
 from behaviourlab.service import (
@@ -18,6 +24,7 @@ from behaviourlab.service import (
     LocalService,
     ReadinessError,
 )
+from behaviourlab.web import create_app
 
 
 class FakeServer:
@@ -90,10 +97,119 @@ def test_service_refuses_second_instance_for_same_data_root(tmp_path):
         )
         with pytest.raises(AlreadyRunningError):
             second.start()
+        second.stop()
         assert first_server.closed is False
         assert (paths.logs / "job_owner.json").exists()
     finally:
         first.stop()
+
+
+def test_registry_lock_is_exclusive_and_only_owner_releases(tmp_path):
+    paths = DataPaths.from_dir(tmp_path / "data").ensure()
+    first = JobOwnerRegistry(paths)
+    second = JobOwnerRegistry(paths)
+
+    first.acquire()
+    with pytest.raises(OwnershipError):
+        second.acquire()
+
+    second.release()  # 未持有者不能删除成功者的记录
+    assert (paths.logs / "job_owner.json").exists()
+
+    first.release()
+    assert not (paths.logs / "job_owner.json").exists()
+    third = JobOwnerRegistry(paths)
+    third.acquire()
+    third.release()
+
+
+def test_owner_lock_is_atomic_across_processes(tmp_path):
+    root = (tmp_path / "data").resolve()
+    script = r"""
+import sys
+from behaviourlab.config import DataPaths
+from behaviourlab.processes import JobOwnerRegistry
+paths = DataPaths.from_dir(sys.argv[1]).ensure()
+registry = JobOwnerRegistry(paths)
+registry.acquire()
+print("LOCKED", flush=True)
+sys.stdin.readline()
+registry.release()
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(root)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        cwd=str(Path(__file__).resolve().parents[1]),
+    )
+    try:
+        line = process.stdout.readline().strip() if process.stdout else ""
+        assert line == "LOCKED", line
+        contender = JobOwnerRegistry(DataPaths.from_dir(root))
+        with pytest.raises(OwnershipError):
+            contender.acquire()
+        contender.release()
+        assert (root / "logs" / "job_owner.json").exists()
+        record = json.loads((root / "logs" / "job_owner.json").read_text("utf-8"))
+        assert record.get("pid")
+    finally:
+        if process.poll() is None:
+            if process.stdin is not None:
+                process.stdin.write("\n")
+                process.stdin.flush()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        if process.stdout is not None:
+            process.stdout.close()
+
+    fresh = JobOwnerRegistry(DataPaths.from_dir(root))
+    fresh.acquire()
+    fresh.release()
+
+
+def test_stop_closes_keepalive_listener_and_restarts(tmp_path):
+    paths = DataPaths.from_dir(tmp_path / "data").ensure()
+    app = create_app(data_dir=str(paths.root), testing=True)
+    service = LocalService(app, paths, port=0)
+    service.start()
+    port = service.port
+    server = service._server
+    thread = service._thread
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+    try:
+        connection.request("GET", "/api/health")
+        response = connection.getresponse()
+        assert response.status == 200
+        response.read()
+
+        service.stop()
+
+        with pytest.raises((OSError, http.client.HTTPException)):
+            connection.request("GET", "/api/health")
+            connection.getresponse()
+        assert thread is not None and thread.is_alive() is False
+        assert len(getattr(server.task_dispatcher, "threads", [])) == 0
+        with pytest.raises(OSError):
+            socket.create_connection(("127.0.0.1", port), timeout=0.5)
+    finally:
+        connection.close()
+        service.stop()
+
+    restarted = LocalService(app, paths, port=port)
+    restarted.start()
+    try:
+        restarted_connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        restarted_connection.request("GET", "/api/health")
+        response = restarted_connection.getresponse()
+        assert response.status == 200
+        response.read()
+        restarted_connection.close()
+    finally:
+        restarted.stop()
 
 
 def test_stop_order_stops_workers_before_server_and_owner(tmp_path):

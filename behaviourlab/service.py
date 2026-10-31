@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .config import DataPaths
-from .processes import JobOwnerRegistry
+from .processes import JobOwnerRegistry, OwnershipError
 
 LOGGER = logging.getLogger("behaviourlab.service")
 
@@ -105,14 +105,16 @@ class LocalService:
             if self._server is not None:
                 return self.url
             self._stopped = False
-            record = self._owner.read()
-            if record and self._owner.is_active():
-                pid = record.get("pid")
-                raise AlreadyRunningError(
-                    f"数据目录已有运行实例（PID {pid}），请先关闭后再启动。"
-                )
 
-            self._owner.acquire(pid=os.getpid())
+            try:
+                self._owner.acquire(pid=os.getpid())
+            except OwnershipError as error:
+                record = self._owner.read() or {}
+                pid = record.get("pid")
+                detail = f"（PID {pid}）" if isinstance(pid, int) else ""
+                raise AlreadyRunningError(
+                    f"数据目录已有运行实例{detail}，请先关闭后再启动。"
+                ) from error
             self._owner_acquired = True
             try:
                 server = self._server_factory(
@@ -143,6 +145,29 @@ class LocalService:
         except KeyboardInterrupt:
             return
 
+    def _shutdown_server(self, server: Any) -> None:
+        try:
+            server.close()
+        except Exception:
+            LOGGER.exception("关闭本地服务监听失败")
+
+        channels = getattr(server, "active_channels", None)
+        if isinstance(channels, dict):
+            for channel in list(channels.values()):
+                try:
+                    channel.close()
+                except Exception:
+                    LOGGER.exception("关闭所属连接失败")
+
+        dispatcher = getattr(server, "task_dispatcher", None)
+        if dispatcher is not None and hasattr(dispatcher, "shutdown"):
+            try:
+                dispatcher.shutdown(cancel_pending=True, timeout=3.0)
+            except TypeError:
+                dispatcher.shutdown()
+            except Exception:
+                LOGGER.exception("关闭服务调度线程失败")
+
     def stop(self) -> None:
         with self._lock:
             if self._stopped:
@@ -156,14 +181,13 @@ class LocalService:
             server = self._server
             self._server = None
             if server is not None:
-                try:
-                    server.close()
-                except Exception:
-                    LOGGER.exception("关闭本地服务失败")
+                self._shutdown_server(server)
             thread = self._thread
             self._thread = None
             if thread is not None and thread.is_alive():
                 thread.join(timeout=3.0)
+                if thread.is_alive():
+                    LOGGER.warning("服务线程在 3 秒内未退出")
             if self._owner_acquired:
                 self._owner.release()
                 self._owner_acquired = False

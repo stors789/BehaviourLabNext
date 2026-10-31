@@ -8,15 +8,25 @@ from __future__ import annotations
 import ctypes
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 from .config import DataPaths
+from .schema import new_id
 from .store import atomic_write_json, read_json_file, utc_now
 
 OWNER_FILENAME = "job_owner.json"
+OWNER_LOCK_FILENAME = "job_owner.lock"
 CREATE_NO_WINDOW = 0x08000000
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+
+_LOCAL_LOCKS: set[str] = set()
+_LOCAL_LOCKS_LOCK = threading.Lock()
+
+
+class OwnershipError(RuntimeError):
+    """数据目录的排他所有权已被其他实例持有。"""
 
 
 def child_creation_flags(flags: int = 0) -> int:
@@ -48,10 +58,51 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+def _lock_handle(handle) -> bool:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+
+    import fcntl
+
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock_handle(handle) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
 class JobOwnerRegistry:
+    """以操作系统文件锁持续持有的所有权；只有持有者可释放记录。"""
+
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
         self.path = Path(paths.logs) / OWNER_FILENAME
+        self.lock_path = Path(paths.logs) / OWNER_LOCK_FILENAME
+        self._lock_key = os.path.normcase(str(self.lock_path.resolve()))
+        self._handle = None
+        self._token: str | None = None
 
     def read(self) -> dict | None:
         try:
@@ -72,19 +123,66 @@ class JobOwnerRegistry:
         return pid_alive(pid)
 
     def acquire(self, *, pid: int | None = None, run_id: str | None = None) -> dict:
-        record = {
-            "pid": int(pid if pid is not None else os.getpid()),
-            "run_id": run_id,
-            "started_at": utc_now(),
-        }
-        atomic_write_json(self.path, record)
-        return record
+        if self._handle is not None:
+            return self.read() or {}
+
+        with _LOCAL_LOCKS_LOCK:
+            if self._lock_key in _LOCAL_LOCKS:
+                raise OwnershipError("数据目录已被本进程中的实例占用")
+            _LOCAL_LOCKS.add(self._lock_key)
+
+        handle = None
+        locked = False
+        try:
+            handle = self.lock_path.open("a+b")
+            if not _lock_handle(handle):
+                raise OwnershipError("数据目录已被其他实例占用")
+            locked = True
+            token = new_id()
+            record = {
+                "pid": int(pid if pid is not None else os.getpid()),
+                "run_id": run_id,
+                "token": token,
+                "started_at": utc_now(),
+            }
+            atomic_write_json(self.path, record)
+            self._handle = handle
+            self._token = token
+            return record
+        except BaseException:
+            if handle is not None:
+                if locked:
+                    _unlock_handle(handle)
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+            with _LOCAL_LOCKS_LOCK:
+                _LOCAL_LOCKS.discard(self._lock_key)
+            raise
 
     def release(self) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        token = self._token
+        self._handle = None
+        self._token = None
         try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
+            record = self.read()
+            if token and record and record.get("token") == token:
+                try:
+                    self.path.unlink()
+                except FileNotFoundError:
+                    pass
+        finally:
+            _unlock_handle(handle)
+            try:
+                handle.close()
+            except OSError:
+                pass
+            with _LOCAL_LOCKS_LOCK:
+                _LOCAL_LOCKS.discard(self._lock_key)
 
 
 class _IoCounters(ctypes.Structure):

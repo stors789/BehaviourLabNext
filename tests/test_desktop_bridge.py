@@ -25,9 +25,38 @@ class FakeWindow:
         return self.result
 
 
+class TrackingWindow(FakeWindow):
+    def __init__(self, result=None):
+        self.reads = []
+        super().__init__(result)
+
+    def __getattr__(self, name):
+        self.reads.append(name)
+        raise AttributeError(name)
+
+
+PUBLIC_API = {"choose_videos", "choose_folder", "choose_image", "open_directory"}
+
+
+def public_names(bridge):
+    return {name for name in dir(bridge) if not name.startswith("_")}
+
+
+def test_public_api_is_stable_and_does_not_touch_window():
+    bridge = DesktopBridge(webview_module=FakeWebview())
+    assert public_names(bridge) == PUBLIC_API
+
+    window = TrackingWindow(())
+    bridge._bind(window)
+    assert public_names(bridge) == PUBLIC_API
+    for name in PUBLIC_API:
+        assert callable(getattr(bridge, name))
+    assert window.reads == []
+
+
 def test_bridge_has_no_window_until_bound():
     bridge = DesktopBridge(webview_module=FakeWebview())
-    assert bridge.window is None
+    assert bridge._window is None
     with pytest.raises(RuntimeError) as captured:
         bridge.choose_videos()
     assert "窗口尚未准备好" in str(captured.value)
@@ -38,7 +67,7 @@ def test_bridge_returns_selected_paths_unchanged():
     window = FakeWindow(
         ("C:/实验数据/动物 甲.mp4", "C:/实验数据/动物 乙.mp4")
     )
-    bridge.bind(window)
+    bridge._bind(window)
 
     assert bridge.choose_videos() == [
         "C:/实验数据/动物 甲.mp4",
@@ -62,7 +91,7 @@ def test_bridge_returns_selected_paths_unchanged():
 def test_bridge_cancel_keeps_image_and_folder():
     bridge = DesktopBridge(webview_module=FakeWebview())
     window = FakeWindow(("C:/背景/场地.png",))
-    bridge.bind(window)
+    bridge._bind(window)
 
     background = "C:/背景/旧图.png"
     chosen = bridge.choose_image()
@@ -83,6 +112,30 @@ def test_bridge_cancel_keeps_image_and_folder():
     assert bridge.choose_folder() is None
 
 
+def test_open_directory_validates_and_reports(tmp_path):
+    opened = []
+    bridge = DesktopBridge(
+        webview_module=FakeWebview(),
+        path_opener=lambda path: opened.append(path) or True,
+    )
+    folder = tmp_path / "实验 数据"
+    folder.mkdir()
+
+    assert bridge.open_directory(str(folder)) is True
+    assert opened == [str(folder.resolve())]
+
+    assert bridge.open_directory(str(tmp_path / "不存在")) is False
+
+    file_path = tmp_path / "note.txt"
+    file_path.write_text("x", encoding="utf-8")
+    assert bridge.open_directory(str(file_path)) is False
+
+    failing = DesktopBridge(
+        webview_module=FakeWebview(), path_opener=lambda path: False
+    )
+    assert failing.open_directory(str(folder)) is False
+
+
 def test_window_binds_bridge_before_event_loop(monkeypatch):
     created = {}
     window = FakeWindow()
@@ -95,7 +148,7 @@ def test_window_binds_bridge_before_event_loop(monkeypatch):
 
     def start():
         bridge = created["js_api"]
-        assert bridge.window is window
+        assert bridge._window is window
         created["started"] = True
 
     fake_module = types.SimpleNamespace(
@@ -110,4 +163,4 @@ def test_window_binds_bridge_before_event_loop(monkeypatch):
     assert created["width"] == 1360
     assert created["height"] == 900
     assert created["min_size"] == (1000, 680)
-    assert created["js_api"].window is window
+    assert created["js_api"]._window is window
