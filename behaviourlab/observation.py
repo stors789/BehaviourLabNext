@@ -6,10 +6,11 @@ unit 独立，缺失帧只保留证据供下一次选择，不把保留位置当
 
 from __future__ import annotations
 
+import atexit
 import json
 import math
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import cv2
 import numpy as np
@@ -33,19 +34,16 @@ HEAD_TAIL_GAP_RATIO = 0.6
 HEAD_THIN_LIMIT = 1.5
 HEAD_EXTREME_PIXELS = 1.0
 
-TRACKER_COUNT = 8
-UNIT_COUNT = 16
-
 
 def signature_of(geometry: Mapping[str, Any] | None,
                  settings: Mapping[str, Any] | None,
-                 dark_box_visible: bool = False) -> str:
-    """配置签名：unit 几何、完整合并检测参数与暗箱可见性。"""
+                 dark_visible: bool = False) -> str:
+    """配置签名：unit 几何、完整合并检测参数与暗室可见性（取实际生效值）。"""
 
     payload = {
         "geometry": geometry or {},
         "detection": settings or {},
-        "dark_box_visible": bool(dark_box_visible),
+        "dark_visible": bool(dark_visible),
     }
     return json.dumps(payload, sort_keys=True, ensure_ascii=False,
                       separators=(",", ":"), default=str)
@@ -271,9 +269,24 @@ class ObservationTracker:
         if evidence is None:
             evidence = Evidence()
             self._evidence[unit_key] = evidence
-            while len(self._evidence) > UNIT_COUNT:
-                self._evidence.pop(next(iter(self._evidence)))
         return evidence
+
+    def release(self, unit_key: Any) -> bool:
+        """单位被移除时释放它的证据。"""
+
+        return self._evidence.pop(unit_key, None) is not None
+
+    def retain(self, unit_keys: Iterable[Any]) -> list[Any]:
+        """只保留仍在该视频里的单位，不按数量淘汰在场单位。"""
+
+        keep = set(unit_keys)
+        dropped = [key for key in self._evidence if key not in keep]
+        for key in dropped:
+            self._evidence.pop(key, None)
+        return dropped
+
+    def clear(self) -> None:
+        self._evidence.clear()
 
     def observe(self, unit_key: Any, *,
                 candidates: Sequence[Mapping[str, Any]],
@@ -361,15 +374,35 @@ _TRACKERS: dict[tuple, ObservationTracker] = {}
 
 
 def tracker_for(key: tuple) -> ObservationTracker:
-    """不同视频各用自己的关联证据。"""
+    """每条视频（含所属会话）各用自己的证据；随会话释放，不按数量淘汰。"""
 
     tracker = _TRACKERS.get(key)
     if tracker is None:
         tracker = ObservationTracker(key)
         _TRACKERS[key] = tracker
-        if len(_TRACKERS) > TRACKER_COUNT:
-            _TRACKERS.pop(next(iter(_TRACKERS)))
     return tracker
+
+
+def retain_videos(session: Any, keys: Iterable[tuple]) -> list[tuple]:
+    """只保留该会话仍在用的视频证据，释放已移除的视频。"""
+
+    keep = set(keys)
+    dropped = [key for key in _TRACKERS
+               if key and key[0] == session and key not in keep]
+    for key in dropped:
+        _TRACKERS.pop(key, None)
+    return dropped
+
+
+def release_video(key: tuple) -> bool:
+    return _TRACKERS.pop(key, None) is not None
+
+
+def release_all() -> None:
+    _TRACKERS.clear()
+
+
+atexit.register(release_all)
 
 
 def track(key: tuple, unit_key: Any, *,
@@ -377,12 +410,16 @@ def track(key: tuple, unit_key: Any, *,
           settings: Mapping[str, Any],
           signature: str, assay: str, frame_index: int, time_s: float,
           foreground: np.ndarray,
-          previous: Sequence[float] | None = None) -> Detection:
+          previous: Sequence[float] | None = None,
+          retain_units: Iterable[Any] | None = None) -> Detection:
     """分割候选 → 关联；不接受保持位置，也不产生中间轨迹。"""
 
     candidates, reason = detection.find_candidates(
         foreground, region, settings)
-    return tracker_for(key).observe(
+    tracker = tracker_for(key)
+    if retain_units is not None:
+        tracker.retain(retain_units)
+    return tracker.observe(
         unit_key, candidates=candidates, reason=reason,
         frame_index=frame_index, time_s=time_s, signature=signature,
         image=image, region=region, settings=settings, assay=assay,

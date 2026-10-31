@@ -195,3 +195,69 @@ def test_head_only_with_thin_tail_evidence():
     assert merged.nose is None and merged.tail_base is None
     assert merged.head_angle is None
     assert merged.head_quality == 0
+
+
+def test_evidence_survives_many_units_and_videos():
+    # 17 个 unit：返回首个 unit 时旧体型证据仍在，十倍墙块仍被拒绝。
+    tracker = observation.ObservationTracker(("life-units", 0))
+    assert tracker.observe(
+        "unit-0", candidates=[candidate(100.0, (100.0, 100.0), (10.0, 10.0))],
+        reason=None, frame_index=0, time_s=0.0, signature="s").detected is True
+    for index in range(1, 17):
+        assert tracker.observe(
+            f"unit-{index}",
+            candidates=[candidate(100.0, (100.0, 100.0), (10.0, 10.0))],
+            reason=None, frame_index=0, time_s=0.0,
+            signature="s").detected is True
+    assert len(tracker._evidence) == 17
+
+    back = tracker.observe(
+        "unit-0", candidates=[candidate(1000.0, (100.0, 100.0), (40.0, 25.0))],
+        reason=None, frame_index=1, time_s=0.1, signature="s")
+    assert back.detected is False
+    assert back.missing_reason == "inconsistent_candidate_size"
+    assert back.center is None and back.mask is None and back.contour == []
+    assert back.nose is None and back.tail_base is None
+    assert back.head_angle is None and back.head_quality == 0
+
+    # 9 条视频：返回首条视频时它的证据同样还在。
+    first = observation.tracker_for(("life-video-0", 0, "w"))
+    assert first.observe(
+        "unit-0", candidates=[candidate(100.0, (100.0, 100.0), (10.0, 10.0))],
+        reason=None, frame_index=0, time_s=0.0, signature="s").detected is True
+    for index in range(1, 9):
+        observation.tracker_for((f"life-video-{index}", 0, "w")).observe(
+            "unit-0", candidates=[candidate(100.0, (100.0, 100.0), (10.0, 10.0))],
+            reason=None, frame_index=0, time_s=0.0, signature="s")
+    assert len(observation._TRACKERS) >= 9
+
+    returned = observation.tracker_for(("life-video-0", 0, "w")).observe(
+        "unit-0", candidates=[candidate(1000.0, (100.0, 100.0), (40.0, 25.0))],
+        reason=None, frame_index=1, time_s=0.1, signature="s")
+    assert returned.detected is False
+    assert returned.missing_reason == "inconsistent_candidate_size"
+    assert returned.mask is None and returned.head_quality == 0
+
+
+def test_evidence_is_released_with_the_session():
+    tracker = observation.ObservationTracker(("life-release", 0))
+    for unit in ("unit-1", "unit-2"):
+        tracker.observe(unit, candidates=[candidate(100.0, (100.0, 100.0),
+                                                    (10.0, 10.0))],
+                        reason=None, frame_index=0, time_s=0.0, signature="s")
+    assert tracker.retain(["unit-1"]) == ["unit-2"]
+    rebuilt = tracker.observe(
+        "unit-2", candidates=[candidate(1000.0, (100.0, 100.0), (40.0, 25.0))],
+        reason=None, frame_index=1, time_s=0.1, signature="s")
+    assert rebuilt.detected is True
+
+    keep = ("draft-y", "asset-a", 0, "w")
+    gone = ("draft-y", "asset-b", 0, "w")
+    other = ("draft-z", "asset-a", 0, "w")
+    for key in (keep, gone, other):
+        observation.tracker_for(key)
+    dropped = observation.retain_videos("draft-y", [keep])
+    assert dropped == [gone]
+    assert observation.release_video(keep) is True
+    assert observation.release_video(keep) is False
+    assert other in observation._TRACKERS

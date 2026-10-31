@@ -1628,7 +1628,9 @@
 
   async function runPreview(kind) {
     if (!state.draftId) return;
-    const type = kind || "detection";
+    // 只接受显式的阶段名；事件对象等非字符串一律按当前阶段处理。
+    const type = typeof kind === "string"
+      ? kind : (state.step === "review" ? "behavior" : "detection");
     const video = currentVideo();
     const unit = currentUnit();
     if (!video || !unit) return;
@@ -1927,7 +1929,9 @@
     el.frameNumber.addEventListener("blur", commitFrameNumber);
 
     el.primary.addEventListener("click", primaryAction);
-    el.secondary.addEventListener("click", runPreview);
+    el.secondary.addEventListener("click", () => {
+      runPreview(state.step === "review" ? "behavior" : "detection");
+    });
 
     if (el.tasknav) {
       el.tasknav.addEventListener("click", (event) => {

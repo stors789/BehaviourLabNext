@@ -382,14 +382,26 @@ def create_preview(
             detector = detection.shared_detector(
                 video_key, settings, background=background,
             )
+            session_key = (draft.get("id"),) + video_key
+            # 证据随会话保留：视频被移出草稿、单位被删时才释放。
+            observation.retain_videos(
+                draft.get("id"),
+                [(draft.get("id"), item.get("asset_id"),
+                  int(item.get("orientation", 0) or 0),
+                  repr(item.get("window")))
+                 for item in draft.get("videos") or []
+                 if isinstance(item, Mapping)],
+            )
             result = observation.track(
-                video_key, unit.get("id") or id(unit),
+                session_key, unit.get("id") or id(unit),
                 image=info.image, region=region, settings=settings,
                 signature=observation.signature_of(
-                    geometry, settings, bool(options.get("dark_box_visible"))),
+                    geometry, settings, bool(options.get("dark_visible"))),
                 assay=draft["assay"], frame_index=info.index,
                 time_s=float(info.time_s),
                 foreground=detector.foreground(info.image),
+                retain_units=[item.get("id") for item in video.get("units") or []
+                              if isinstance(item, Mapping) and item.get("id")],
             )
         except detection.DetectionError as error:
             raise ValidationError(str(error), "detection") from error

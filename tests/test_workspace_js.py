@@ -38,3 +38,12 @@ def test_analyze_page_exposes_preview_note():
     html = (ROOT / "behaviourlab/web/templates/analyze.html").read_text(
         encoding="utf-8")
     assert 'id="preview-note"' in html
+
+
+def test_secondary_preview_passes_stage_kind():
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    # 事件对象不能直接当 kind 传给后端。
+    assert 'el.secondary.addEventListener("click", runPreview)' not in source
+    assert ('runPreview(state.step === "review" ? "behavior" : "detection")'
+            in source)
