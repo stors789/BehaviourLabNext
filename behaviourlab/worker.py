@@ -9,4 +9,8 @@ from typing import Any, Mapping
 
 
 def run_frozen_job(resolved: Mapping[str, Any]) -> Any:
-    raise NotImplementedError("工作进程将在后续块接入")
+    """执行一个已冻结任务；身份不符直接拒绝，不返回假结果。"""
+
+    from . import engine
+
+    return engine.execute(resolved)

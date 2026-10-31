@@ -6,8 +6,25 @@
   <h1>任务</h1>
 </div>
 
+{% if not jobs %}
 <div class="empty-state">
   <p>还没有分析任务。</p>
-  <p class="muted">任务调度在后续块接入。</p>
 </div>
+{% else %}
+<table class="simple-table">
+  <thead>
+    <tr><th>实验</th><th>状态</th><th>创建时间</th><th>结果</th></tr>
+  </thead>
+  <tbody>
+    {% for job in jobs %}
+    <tr>
+      <td>{{ job.assay }}</td>
+      <td>{{ job.status }}</td>
+      <td>{{ job.created_at }}</td>
+      <td><a href="/results/{{ job.run_id }}">查看</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 {% endblock %}

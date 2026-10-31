@@ -1733,16 +1733,21 @@
       status("保存失败，未开始分析", "error");
       return;
     }
+    el.primary.disabled = true;
+    status("正在分析…");
     try {
-      const data = await get("/api/drafts/" + state.draftId + "/validate");
-      const issues = data.issues || [];
-      if (issues.length) {
-        status(issues.map((issue) => issue.message || issue.field).join("；"), "error");
+      const data = await send("POST", "/api/drafts/" + state.draftId + "/analyze", {});
+      const failed = (data.jobs || []).find((job) => job.status !== "done");
+      if (failed) {
+        status(failed.error || "分析失败", "error");
         return;
       }
-      status("校验通过；分析执行将在后续块接入。", "ok");
+      status("分析完成", "ok");
+      window.location.href = "/results/" + data.run_id;
     } catch (error) {
       status(error.message, "error");
+    } finally {
+      el.primary.disabled = false;
     }
   }
 

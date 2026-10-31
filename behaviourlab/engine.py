@@ -15,6 +15,7 @@ from . import experiments, media
 from .config import ALGORITHM_VERSION, SCHEMA_VERSION
 from .detection import common_detection_defaults, validate_detection
 from .schema import (
+    AnalysisContext,
     ValidationError,
     check_json_value,
     is_number,
@@ -412,6 +413,21 @@ def validate_draft(draft: Mapping[str, Any]) -> list[dict]:
             for field in ("geometry", "options", "detection"):
                 if not isinstance(unit.get(field, {}), Mapping):
                     issues.append({"field": f"{unit_prefix}.{field}", "message": "必须是对象"})
+            checker = (getattr(experiments.get(assay), "validate_unit", None)
+                       if experiments.exists(assay) else None)
+            if checker is not None:
+                layers = (draft.get("options"), video.get("options"),
+                          unit.get("options"))
+                provided = {key for layer in layers if isinstance(layer, Mapping)
+                            for key in layer}
+                merged = resolve_options(assay, draft=draft, video=video,
+                                         unit=unit)
+                for issue in checker(merged, unit.get("geometry") or {}, provided):
+                    entry = dict(issue)
+                    field = issue.get("field")
+                    entry["field"] = (f"{unit_prefix}.{field}" if field
+                                      else unit_prefix)
+                    issues.append(entry)
             if isinstance(unit.get("detection"), Mapping):
                 issues.extend(validate_detection(unit["detection"],
                                                  f"{unit_prefix}.detection"))
@@ -576,4 +592,10 @@ def require_identity(asset: Mapping[str, Any]) -> None:
 
 
 def execute(resolved: Mapping[str, Any]) -> Any:
-    raise NotImplementedError("单视频分析引擎将在后续块接入")
+    """执行一个冻结任务；实验模块自己完成一次捕获与统计。"""
+
+    module = _module(resolved.get("assay"))
+    asset = resolved.get("asset") or {}
+    require_identity(asset)
+    context = AnalysisContext(job=resolved)
+    return module.analyze(context)

@@ -62,23 +62,7 @@ def _draw_candidates(canvas, result, thickness: int) -> None:
 
 def _interpreted_duration(metadata: Mapping[str, Any],
                           video: Mapping[str, Any]) -> float | None:
-    """把已知时长换到与 Frame.time_s 相同的解释时钟；无法换算时返回 None。"""
-
-    duration = metadata.get("duration_s")
-    if not is_number(duration) or float(duration) <= 0:
-        return None
-    seconds = float(duration)
-    override = video.get("fps_override")
-    if not is_number(override) or float(override) <= 0:
-        return seconds
-    # 覆盖帧率下帧时间按 index/fps_override 解释，原始容器时长不能直接使用。
-    frames = metadata.get("frame_count")
-    if is_number(frames) and float(frames) > 0:
-        return float(frames) / float(override)
-    source_fps = metadata.get("fps")
-    if is_number(source_fps) and float(source_fps) > 0:
-        return seconds * float(source_fps) / float(override)
-    return None
+    return detection.interpreted_duration(metadata, video)
 
 
 def _background_for(settings: Mapping[str, Any], asset: Mapping[str, Any],
@@ -86,44 +70,8 @@ def _background_for(settings: Mapping[str, Any], asset: Mapping[str, Any],
                     width: int, height: int):
     """按方法准备背景；threshold/local_otsu 不需要。"""
 
-    method = settings.get("bg_method")
-    if method == "static":
-        path = settings.get("static_background")
-        if not path:
-            raise detection.DetectionError("静态背景未设置")
-        return detection.load_static_background(path, orientation, width, height)
-    if method == "temporal":
-        metadata = asset.get("metadata") or {}
-        window = video.get("window") or {}
-        start = float(window.get("start_s") or 0.0)
-        end = window.get("end_s")
-        end_value = float(end) if is_number(end) else None
-        # 窗口终点未写时用同一解释时钟的已知时长安排采样；时长也未知才取前 N 帧。
-        sample_end = end_value
-        known_end = _interpreted_duration(metadata, video)
-        if sample_end is None and known_end is not None and known_end > start:
-            sample_end = known_end
-        source = media.VideoSource(
-            asset["path"],
-            start_s=start,
-            end_s=end_value,
-            orientation=orientation,
-            fps_override=video.get("fps_override"),
-            sample_fps=video.get("sample_fps"),
-            source_fps=metadata.get("fps"),
-            decode_images=True,
-        )
-        # 只把正有效曝光的帧交给背景；窗口外零曝光的上下文帧不参与中位数。
-        frames = (
-            (frame.time_s, frame.image,
-             frame.interval_end_s - frame.interval_start_s)
-            for frame in source.iter_frames()
-            if frame.image is not None
-        )
-        return detection.temporal_background(
-            frames, int(settings.get("temporal_bg_samples", 90)), start, sample_end
-        )
-    return None
+    return detection.prepare_background(settings, asset, video, orientation,
+                                        width, height)
 
 
 def _draw_shape(canvas, shape: Mapping[str, Any], color, thickness: int) -> None:

@@ -10,8 +10,70 @@
   <code class="code">{{ run_id }}</code>
 </div>
 
+{% if not results %}
 <div class="empty-state">
-  <p>结果查看将在分析块接入。</p>
+  <p>这次运行还没有写入结果。</p>
   <a class="button" href="/tasks">返回任务</a>
 </div>
+{% endif %}
+
+{% for entry in results %}
+<section class="panel">
+  <h2>{{ entry.result.summary[0].unit_name if entry.result and entry.result.summary else entry.job_id }}</h2>
+  {% if entry.error %}
+  <p class="status" data-tone="error">{{ entry.error }}</p>
+  {% else %}
+  {% set units = entry.result.summary or [] %}
+  {% if units %}
+  <table class="simple-table">
+    <thead>
+      <tr>
+        <th>动物</th>
+        <th>中心占比 %</th>
+        <th>外围占比 %</th>
+        <th>壁区占比 %</th>
+        <th>场地内路程 cm</th>
+        <th>平均速度 cm/s</th>
+        <th>中心进入</th>
+        <th>窗口 s</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for unit in units %}
+      <tr>
+        <td>{{ unit.unit_name }}</td>
+        <td>{{ "%.1f"|format(unit.center_percent) if unit.center_percent is not none else "" }}</td>
+        <td>{{ "%.1f"|format(unit.outer_percent) if unit.outer_percent is not none else "" }}</td>
+        <td>{{ "%.1f"|format(unit.wall_percent) if unit.wall_percent is not none else "" }}</td>
+        <td>{{ "%.2f"|format(unit.total_distance_cm) if unit.total_distance_cm is not none else "" }}</td>
+        <td>{{ "%.2f"|format(unit.mean_speed_cm_s) if unit.mean_speed_cm_s is not none else "" }}</td>
+        <td>{{ unit.center_entries }}</td>
+        <td>
+          {% if unit.analysis_window_start_s is not none %}
+          {{ "%.2f"|format(unit.analysis_window_start_s) }}–{{ "%.2f"|format(unit.analysis_window_end_s) }}
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if entry.result.warnings %}
+  <ul class="warn-list">
+    {% for text in entry.result.warnings %}<li>{{ text }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if entry.files %}
+  <p class="muted">文件</p>
+  <ul class="file-list">
+    {% for name in entry.files %}
+    <li><a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}">{{ name }}</a></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% endif %}
+</section>
+{% endfor %}
 {% endblock %}

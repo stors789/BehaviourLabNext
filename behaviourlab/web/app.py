@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import re
 from copy import deepcopy
 from pathlib import Path
@@ -25,6 +26,8 @@ from ..engine import (
     validate_draft,
     validate_settings_value,
 )
+from ..jobs import JobScheduler
+from .. import outputs as output_service
 from ..processes import JobOwnerRegistry
 from ..schema import ValidationError, is_valid_id, new_id
 from ..store import NotFoundError, Store
@@ -34,6 +37,9 @@ LOGGER = logging.getLogger(__name__)
 SETTINGS_SECTIONS = ("defaults", "detection", "output", "style")
 BACKGROUND_NAME = re.compile(r"[0-9a-f]{32}\.png")
 PREVIEW_NAME = re.compile(r"[0-9a-f]{32}\.(?:png|jpg|jpeg)")
+RUN_FILES = ("observations.csv", "summary.csv", "events.csv", "bins.csv",
+             "frozen_job.json", "results.json", "result_manifest.json",
+             "report.md")
 
 
 class ApiError(Exception):
@@ -128,6 +134,32 @@ def _normalize_videos(videos: Any) -> list[dict]:
                            [{"field": f"videos[{index}]", "message": "必须是对象"}])
         normalized.append(_video_defaults(video, index))
     return normalized
+
+
+def _run_payloads(directory: Path) -> list[dict]:
+    """读取一次运行的每个任务结果；缺失或损坏时如实标记。"""
+
+    payloads: list[dict] = []
+    if not directory.is_dir():
+        return payloads
+    for job_dir in sorted(item for item in directory.iterdir() if item.is_dir()):
+        entry: dict = {"job_id": job_dir.name, "files": []}
+        result_file = job_dir / "results.json"
+        if not result_file.is_file():
+            entry["error"] = "结果文件缺失"
+            payloads.append(entry)
+            continue
+        try:
+            entry["result"] = json.loads(result_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            entry["error"] = f"结果文件不可读取：{error}"
+            payloads.append(entry)
+            continue
+        entry["files"] = sorted(
+            path.name for path in job_dir.iterdir()
+            if path.is_file() and path.name in RUN_FILES)
+        payloads.append(entry)
+    return payloads
 
 
 def create_app(*, data_dir: Any = None, store: Store | None = None,
@@ -357,6 +389,17 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
             raise ApiError("背景不存在", 404)
         return send_file(path, mimetype="image/png", conditional=True)
 
+    @app.get("/runs/<run_id>/<job_id>/<filename>")
+    def get_run_file(run_id: str, job_id: str, filename: str):
+        if not (is_valid_id(run_id) and is_valid_id(job_id)):
+            raise ApiError("结果不存在", 404)
+        if filename not in RUN_FILES:
+            raise ApiError("结果文件不存在", 404)
+        path = Path(paths.runs) / run_id / job_id / filename
+        if not path.is_file():
+            raise ApiError("结果文件不存在", 404)
+        return send_file(path, as_attachment=True, download_name=filename)
+
     @app.get("/api/previews/<filename>")
     def get_preview(filename: str):
         if not PREVIEW_NAME.fullmatch(filename):
@@ -564,6 +607,48 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         draft = _require_draft(draft_id)
         return success({"issues": validate_draft(draft)})
 
+    @app.post("/api/drafts/<draft_id>/analyze")
+    def analyze_draft(draft_id: str):
+        draft = _require_draft(draft_id)
+        issues = validate_draft(draft)
+        if issues:
+            raise ApiError("草稿未通过校验", 400, issues)
+        assets = {}
+        for video in draft.get("videos") or []:
+            asset = store.get_asset(video.get("asset_id"))
+            if asset is None:
+                raise ApiError("素材不存在", 404,
+                               [{"field": "asset_id", "message": "素材不存在"}])
+            assets[video["asset_id"]] = asset
+        scheduler = JobScheduler(store)
+        try:
+            resolved = scheduler.freeze_batch(draft=draft, assets=assets)
+        except ValidationError as error:
+            raise ApiError(error.message, 400, [error.as_issue()])
+        if not resolved:
+            raise ApiError("草稿还没有视频", 400,
+                           [{"field": "videos", "message": "草稿还没有视频"}])
+        run_id = resolved[0]["run_id"]
+        outcomes = scheduler.run(draft=draft, resolved=resolved)
+        jobs = []
+        for outcome in outcomes:
+            job = outcome["job"]
+            entry = {"job_id": job.get("job_id"), "status": outcome["status"]}
+            if outcome["status"] == "done":
+                try:
+                    manifest = output_service.export_result(
+                        Path(paths.runs) / run_id / job["job_id"], job,
+                        outcome["result"])
+                    entry["manifest"] = manifest
+                except OSError as error:
+                    store.update_job_status(job["job_id"], "error")
+                    entry["status"] = "error"
+                    entry["error"] = f"结果文件写入失败：{error}"
+            else:
+                entry["error"] = outcome.get("error")
+            jobs.append(entry)
+        return success({"run_id": run_id, "jobs": jobs}, 201)
+
     @app.post("/api/drafts/<draft_id>/preview")
     def create_preview(draft_id: str):
         _require_draft(draft_id)
@@ -635,11 +720,16 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
 
     @app.get("/tasks")
     def page_tasks():
-        return render_template("tasks.html", active="tasks")
+        return render_template("tasks.html", active="tasks",
+                               jobs=store.list_jobs())
 
     @app.get("/results/<run_id>")
     def page_result(run_id: str):
-        return render_template("result.html", active="tasks", run_id=run_id)
+        if not is_valid_id(run_id):
+            return render_template("not_found.html"), 404
+        results = _run_payloads(Path(paths.runs) / run_id)
+        return render_template("result.html", active="tasks", run_id=run_id,
+                               results=results)
 
     @app.get("/settings")
     def page_settings():

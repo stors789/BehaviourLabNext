@@ -1,0 +1,107 @@
+"""OFT 分析接口：冻结、执行、结果文件与结果页。"""
+
+from __future__ import annotations
+
+from behaviourlab import worker
+from behaviourlab.experiments import oft
+from behaviourlab.schema import AnalysisResult
+
+ARENA = {"type": "quad", "points": [[0, 0], [199, 0], [199, 199], [0, 199]]}
+
+
+def seed(store, tmp_path, options=None, window=None):
+    source = tmp_path / "oft.mp4"
+    source.write_bytes(b"placeholder")
+    asset = store.create_asset(
+        name="旷场.mp4", path=str(source), project_id=None,
+        metadata={"width": 200, "height": 200, "duration_s": 1.0,
+                  "fps": 5.0, "frame_count": 5},
+    )
+    draft = store.create_draft("oft", videos=[{
+        "asset_id": asset["id"],
+        "window": window or {"start_s": 0.0, "end_s": 1.0},
+        "orientation": 0, "fps_override": None, "sample_fps": None,
+        "units": [{
+            "id": "d" * 32, "name": "小鼠 1", "window": None,
+            "geometry": {"arena": ARENA},
+            "options": dict(oft.DEFAULTS if options is None else options),
+            "detection": {}, "manual": None,
+        }],
+    }])
+    return asset, draft
+
+
+def fake_result():
+    return AnalysisResult(
+        observations=[],
+        summary=[{
+            "unit_id": "d" * 32, "unit_name": "小鼠 1",
+            "center_percent": 50.0, "outer_percent": 50.0, "wall_percent": 0.0,
+            "total_distance_cm": 3.0, "mean_speed_cm_s": 1.5,
+            "center_entries": 1,
+            "analysis_window_start_s": 0.0, "analysis_window_end_s": 1.0,
+        }],
+        events=[], bins=[], warnings=["示例警告"],
+        metadata={"units": {"d" * 32: {"coordinate_unit": "cm"}}},
+    )
+
+
+def test_analyze_endpoint_writes_results(client, store, tmp_path, monkeypatch):
+    asset, draft = seed(store, tmp_path)
+    monkeypatch.setattr(
+        "behaviourlab.engine.media.probe_video",
+        lambda path: {"width": 200, "height": 200, "duration_s": 1.0,
+                      "fps": 5.0, "frame_count": 5})
+    monkeypatch.setattr(worker, "run_frozen_job", lambda job: fake_result())
+
+    response = client.post(f"/api/drafts/{draft['id']}/analyze")
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    run_id = data["run_id"]
+    assert data["jobs"] and data["jobs"][0]["status"] == "done"
+    job_id = data["jobs"][0]["job_id"]
+
+    page = client.get(f"/results/{run_id}")
+    assert page.status_code == 200
+    body = page.get_data(as_text=True)
+    assert "小鼠 1" in body
+    assert "示例警告" in body
+
+    summary_csv = client.get(f"/runs/{run_id}/{job_id}/summary.csv")
+    assert summary_csv.status_code == 200
+    assert "center_percent" in summary_csv.get_data(as_text=True)
+    report = client.get(f"/runs/{run_id}/{job_id}/report.md")
+    assert report.status_code == 200
+    assert client.get(f"/runs/{run_id}/{job_id}/secret.txt").status_code == 404
+
+    tasks = client.get("/tasks").get_data(as_text=True)
+    assert run_id in tasks
+
+
+def test_analyze_endpoint_rejects_invalid_options(client, store, tmp_path):
+    values = dict(oft.DEFAULTS)
+    values["arena_width_cm"] = 0.0
+    asset, draft = seed(store, tmp_path, options=values)
+    response = client.post(f"/api/drafts/{draft['id']}/analyze")
+    assert response.status_code == 400
+    fields = [issue["field"] for issue in response.get_json()["error"]["fields"]]
+    assert "videos[0].units[0].options.arena_width_cm" in fields
+
+
+def test_analyze_endpoint_rejects_crossed_arena(client, store, tmp_path,
+                                                monkeypatch):
+    asset, draft = seed(store, tmp_path)
+    videos = draft["videos"]
+    videos[0]["units"][0]["geometry"] = {
+        "arena": {"type": "quad",
+                  "points": [[0, 0], [199, 199], [199, 0], [0, 199]]}}
+    # 已保存的坏四角：保存入口已拒绝，这里绕过它以检查最终分析入口。
+    store.update_draft(draft["id"], {"videos": videos})
+    monkeypatch.setattr(
+        "behaviourlab.engine.media.probe_video",
+        lambda path: {"width": 200, "height": 200, "duration_s": 1.0,
+                      "fps": 5.0, "frame_count": 5})
+    response = client.post(f"/api/drafts/{draft['id']}/analyze")
+    assert response.status_code == 400
+    messages = [issue["message"] for issue in response.get_json()["error"]["fields"]]
+    assert "场地四角必须凸且不交叉" in messages
