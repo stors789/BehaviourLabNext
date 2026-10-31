@@ -40,14 +40,13 @@ REGISTRY: dict[str, ModuleType] = {
 
 
 def get(assay: str) -> ModuleType:
-    module = REGISTRY.get(assay)
-    if module is None:
-        raise KeyError(f"未知实验：{assay}")
-    return module
+    if not isinstance(assay, str) or assay not in REGISTRY:
+        raise KeyError(f"未知实验：{assay!r}")
+    return REGISTRY[assay]
 
 
-def exists(assay: str) -> bool:
-    return assay in REGISTRY
+def exists(assay: object) -> bool:
+    return isinstance(assay, str) and assay in REGISTRY
 
 
 def _catalog_parameters(module: ModuleType) -> list[dict]:

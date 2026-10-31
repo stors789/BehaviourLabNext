@@ -71,12 +71,19 @@ def _video_defaults(video: Mapping[str, Any], index: int) -> dict:
     item.setdefault("sample_fps", None)
     item.setdefault("options", {})
     item.setdefault("detection", {})
-    units = item.get("units")
-    if units is None:
+    if "units" in item:
+        units = item["units"]
+        if units is None:
+            raise ApiError(
+                "units 不能为 null", 400,
+                [{"field": f"videos[{index}].units",
+                  "message": "不能用 null 清空；空数组表示没有单位"}],
+            )
+    else:
         units = []
     if not isinstance(units, list):
         raise ApiError("units 必须是数组", 400,
-                       [{"field": "videos.units", "message": "必须是数组"}])
+                       [{"field": f"videos[{index}].units", "message": "必须是数组"}])
     normalized_units = []
     for unit_index, unit in enumerate(units):
         if not isinstance(unit, Mapping):
@@ -100,7 +107,9 @@ def _video_defaults(video: Mapping[str, Any], index: int) -> dict:
 
 def _normalize_videos(videos: Any) -> list[dict]:
     if videos is None:
-        return []
+        raise ApiError("videos 不能为 null", 400,
+                       [{"field": "videos",
+                         "message": "不能用 null 清空；空数组表示没有视频"}])
     if not isinstance(videos, list):
         raise ApiError("videos 必须是数组", 400,
                        [{"field": "videos", "message": "必须是数组"}])
@@ -271,13 +280,15 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
             if not isinstance(entries, list) or not entries:
                 raise ApiError("groups 必须是非空数组", 400,
                                [{"field": "groups", "message": "必须是非空数组"}])
+            names = []
             for index, entry in enumerate(entries):
                 if not isinstance(entry, Mapping):
                     raise ApiError("分组条目必须是对象", 400,
                                    [{"field": f"groups[{index}]", "message": "必须是对象"}])
-                created.append(store.create_group(project_id, entry.get("name")))
+                names.append(entry.get("name"))
+            created = store.create_groups(project_id, names)
         else:
-            created.append(store.create_group(project_id, body.get("name")))
+            created = [store.create_group(project_id, body.get("name"))]
         return success({"groups": created}, 201)
 
     @app.get("/api/projects/<project_id>/animals")
@@ -308,7 +319,7 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
     def create_draft():
         body = _json_body()
         assay = body.get("assay")
-        if not experiments.exists(assay):
+        if not isinstance(assay, str) or not experiments.exists(assay):
             raise ApiError("未知实验", 400, [{"field": "assay", "message": "未知实验"}])
         project_id = body.get("project_id")
         if project_id is not None and not is_valid_id(project_id):
@@ -332,7 +343,7 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
             style=store.get_setting("settings.style", default=None),
         )
 
-        videos = _normalize_videos(body.get("videos"))
+        videos = _normalize_videos(body["videos"]) if "videos" in body else []
         draft = {
             "assay": assay,
             "project_id": project_id,

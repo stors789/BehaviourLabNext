@@ -361,6 +361,9 @@ def validate_draft(draft: Mapping[str, Any]) -> list[dict]:
             for issue in issues[start:end]:
                 issue.setdefault("asset_id", asset_key)
 
+    issues.extend(validate_style(draft.get("style") or {}))
+    issues.extend(validate_output(draft.get("output") or {}))
+
     return issues
 
 

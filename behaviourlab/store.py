@@ -350,25 +350,44 @@ class Store:
         if row is None:
             raise NotFoundError("项目不存在")
 
-    def create_group(self, project_id: str, name: str) -> dict:
+    def _insert_groups(
+        self, project_id: str, names: Sequence[Any], fields: Sequence[str]
+    ) -> list[dict]:
         require_id(project_id, "project_id")
-        group_id = new_id()
         now = utc_now()
-        clean_name = _text(name, "name")
+        prepared = [
+            {"id": new_id(), "name": _text(name, field)}
+            for name, field in zip(names, fields)
+        ]
         with self.transaction() as connection:
             self._require_project(connection, project_id)
-            connection.execute(
-                "INSERT INTO groups(id, project_id, name, created_at, updated_at)"
-                " VALUES(?, ?, ?, ?, ?)",
-                (group_id, project_id, clean_name, now, now),
-            )
-        return {
-            "id": group_id,
-            "project_id": project_id,
-            "name": clean_name,
-            "created_at": now,
-            "updated_at": now,
-        }
+            for entry in prepared:
+                connection.execute(
+                    "INSERT INTO groups(id, project_id, name, created_at, updated_at)"
+                    " VALUES(?, ?, ?, ?, ?)",
+                    (entry["id"], project_id, entry["name"], now, now),
+                )
+        return [
+            {
+                "id": entry["id"],
+                "project_id": project_id,
+                "name": entry["name"],
+                "created_at": now,
+                "updated_at": now,
+            }
+            for entry in prepared
+        ]
+
+    def create_group(self, project_id: str, name: str) -> dict:
+        return self._insert_groups(project_id, [name], ["name"])[0]
+
+    def create_groups(self, project_id: str, names: Sequence[Any]) -> list[dict]:
+        """批量新增分组；任一名称无效则整批失败，不写入任何一行。"""
+
+        if not isinstance(names, (list, tuple)) or not names:
+            raise ValidationError("groups 必须是非空数组", "groups")
+        fields = [f"groups[{index}].name" for index in range(len(names))]
+        return self._insert_groups(project_id, names, fields)
 
     def list_groups(self, project_id: str) -> list[dict]:
         require_id(project_id, "project_id")
