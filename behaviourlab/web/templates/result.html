@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}结果 · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="section-head page-head">
+  <div>
+    <a class="crumb" href="/tasks">任务</a>
+    <h1>分析结果</h1>
+  </div>
+  <code class="code">{{ run_id }}</code>
+</div>
+
+<div class="empty-state">
+  <p>结果查看将在分析块接入。</p>
+  <a class="button" href="/tasks">返回任务</a>
+</div>
+{% endblock %}

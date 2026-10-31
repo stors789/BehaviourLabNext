@@ -1,0 +1,9 @@
+[project]
+name = "behaviourlabnext"
+version = "0.1.0"
+description = "Windows 本地经典视觉动物行为分析应用"
+requires-python = ">=3.11,<3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

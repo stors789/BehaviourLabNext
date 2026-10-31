@@ -23,6 +23,7 @@ Thumbs.db
 
 # 工作区数据
 .workbuddy/
+.tmp-smoke/
 
 # 视频素材
 *.mp4

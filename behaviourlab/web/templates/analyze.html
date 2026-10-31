@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}{{ '独立分析' if mode == 'independent' else '项目分析' }} · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="section-head page-head">
+  <h1>{{ '独立分析' if mode == 'independent' else '项目分析' }}</h1>
+</div>
+
+<div class="empty-state">
+  <p>分析工作台将在下一块接入。</p>
+  <p class="muted">视频导入、几何与预览尚未开放。</p>
+  <a class="button" href="/">返回首页</a>
+</div>
+{% endblock %}

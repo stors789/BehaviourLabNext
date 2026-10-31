@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}设置 · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="section-head page-head">
+  <h1>设置</h1>
+</div>
+
+{% set labels = {
+  'defaults': '实验默认参数',
+  'detection': '检测默认',
+  'output': '输出',
+  'style': '图形样式'
+} %}
+
+<div class="settings-grid">
+  {% for section in ['defaults', 'detection', 'output', 'style'] %}
+  <section class="panel settings-block">
+    <div class="section-head">
+      <h2>{{ labels[section] }}</h2>
+    </div>
+    <form data-settings-section="{{ section }}">
+      <textarea name="value" rows="9" spellcheck="false">{{ values[section] | tojson(indent=2) }}</textarea>
+      <div class="form-actions">
+        <span class="form-error" role="alert"></span>
+        <span class="form-note" role="status"></span>
+        <button class="button primary" type="submit">保存</button>
+      </div>
+    </form>
+  </section>
+  {% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}项目 · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="section-head page-head">
+  <h1>项目</h1>
+  <button class="button primary" type="button" id="new-project-toggle">新建项目</button>
+</div>
+
+<form class="panel form hidden" id="project-form" autocomplete="off">
+  <div class="field">
+    <label for="project-name">名称</label>
+    <input id="project-name" name="name" type="text" maxlength="200" required>
+  </div>
+  <div class="field">
+    <label for="project-description">说明</label>
+    <input id="project-description" name="description" type="text" maxlength="2000">
+  </div>
+  <div class="form-actions">
+    <span class="form-error" role="alert"></span>
+    <button class="button primary" type="submit">创建</button>
+  </div>
+</form>
+
+{% if projects %}
+<ul class="project-list roomy">
+  {% for project in projects %}
+  <li class="project-row">
+    <a href="/projects/{{ project.id }}">
+      <span class="project-name">{{ project.name }}</span>
+      <span class="project-meta">{{ project.group_count }} 组 · {{ project.animal_count }} 只</span>
+      {% if project.description %}<span class="project-desc">{{ project.description }}</span>{% endif %}
+    </a>
+    <time datetime="{{ project.updated_at }}">{{ project.updated_at[:10] }}</time>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<div class="empty-state">
+  <p>还没有项目。</p>
+  <p class="muted">新建项目后，可以按分组与动物组织视频分析。</p>
+</div>
+{% endif %}
+{% endblock %}

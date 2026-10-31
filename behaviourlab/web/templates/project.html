@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }} · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="section-head page-head">
+  <div>
+    <a class="crumb" href="/projects">项目</a>
+    <h1>{{ project.name }}</h1>
+  </div>
+  <span class="project-meta">{{ project.group_count }} 组 · {{ project.animal_count }} 只</span>
+</div>
+
+{% if project.description %}
+<p class="lede">{{ project.description }}</p>
+{% endif %}
+
+<div class="split">
+  <section class="panel">
+    <div class="section-head">
+      <h2>分组</h2>
+    </div>
+    {% if groups %}
+    <ul class="plain-list">
+      {% for group in groups %}
+      <li>{{ group.name }}</li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">还没有分组。</p>
+    {% endif %}
+
+    <form class="form inline" data-form="group" data-project="{{ project.id }}" autocomplete="off">
+      <div class="field grow">
+        <label for="group-name">新分组</label>
+        <input id="group-name" name="name" type="text" maxlength="200" required>
+      </div>
+      <button class="button" type="submit">添加</button>
+      <span class="form-error" role="alert"></span>
+    </form>
+  </section>
+
+  <section class="panel">
+    <div class="section-head">
+      <h2>动物</h2>
+    </div>
+    {% if animals %}
+    <table class="simple-table">
+      <thead>
+        <tr><th>名称</th><th>分组</th><th>性别</th></tr>
+      </thead>
+      <tbody>
+        {% for animal in animals %}
+        <tr>
+          <td>{{ animal.name }}</td>
+          <td>{{ animal.group_name or '—' }}</td>
+          <td>{{ animal.sex or '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">还没有动物。</p>
+    {% endif %}
+
+    <form class="form inline" data-form="animal" data-project="{{ project.id }}" autocomplete="off">
+      <div class="field grow">
+        <label for="animal-name">新动物</label>
+        <input id="animal-name" name="name" type="text" maxlength="120" required>
+      </div>
+      <div class="field">
+        <label for="animal-group">分组</label>
+        <select id="animal-group" name="group_id">
+          <option value="">未分组</option>
+          {% for group in groups %}
+          <option value="{{ group.id }}">{{ group.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <button class="button" type="submit">添加</button>
+      <span class="form-error" role="alert"></span>
+    </form>
+  </section>
+</div>
+{% endblock %}

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}分析 · {{ app_name }}{% endblock %}
+
+{% block content %}
+<section class="entry-grid">
+  <a class="entry-card" href="/analyze?mode=project">
+    <span class="entry-index">01</span>
+    <h1>项目分析</h1>
+    <p class="entry-note">多视频 · 多动物 · 项目归档</p>
+    <span class="entry-arrow" aria-hidden="true">→</span>
+  </a>
+  <a class="entry-card" href="/analyze?mode=independent">
+    <span class="entry-index">02</span>
+    <h1>独立分析</h1>
+    <p class="entry-note">单视频 · 不绑定项目</p>
+    <span class="entry-arrow" aria-hidden="true">→</span>
+  </a>
+</section>
+
+{% if projects %}
+<section class="recent">
+  <div class="section-head">
+    <h2>最近项目</h2>
+    <a class="link" href="/projects">全部项目</a>
+  </div>
+  <ul class="project-list">
+    {% for project in projects %}
+    <li class="project-row">
+      <a href="/projects/{{ project.id }}">
+        <span class="project-name">{{ project.name }}</span>
+        <span class="project-meta">{{ project.group_count }} 组 · {{ project.animal_count }} 只</span>
+      </a>
+      <time datetime="{{ project.updated_at }}">{{ project.updated_at[:10] }}</time>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% else %}
+<section class="recent">
+  <div class="section-head">
+    <h2>最近项目</h2>
+  </div>
+  <div class="empty-inline">
+    <p>还没有项目。</p>
+    <a class="button" href="/projects">新建项目</a>
+  </div>
+</section>
+{% endif %}
+{% endblock %}
