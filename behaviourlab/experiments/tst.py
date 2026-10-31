@@ -889,10 +889,16 @@ def _seconds(options: Mapping[str, Any], key: str, default: float) -> float:
     return default if value is None else max(0.0, value)
 
 
-def _lis_rolling(group: list[dict]) -> None:
-    """组内滚动量：H(.5s)、F/S(.3s)、g、b(1.5s)，只看 (t−w, t] 的同组行。"""
+def _lis_rolling(group: list[dict],
+                 cancel: Callable[[], bool] | None = None) -> None:
+    """组内滚动量：H(.5s)、F/S(.3s)、g、b(1.5s)，只看 (t−w, t] 的同组行。
+
+    连续组也可能很长，循环内按固定步长响应取消，不只检查组首。
+    """
 
     for index, row in enumerate(group):
+        if index % CANCEL_STRIDE == 0:
+            _check_cancel(cancel)
         moment = float(row["time_s"])
         recent = [item for item in group[:index + 1]
                   if float(item["time_s"]) > moment - 0.5 + 1e-9]
@@ -1287,20 +1293,21 @@ def derive_lis_features(rows: Sequence[dict], options: Mapping[str, Any],
     groups = _groups(pairs)
     for group in groups:
         _check_cancel(cancel)
-        _lis_rolling(group)
+        _lis_rolling(group, cancel)
     info = lis_score_rows(ordered, cancel)
     for row in ordered:
         if not row.get("in_window"):
             row["state"] = "outside"
             row["state_group"] = "outside"
-            row["lis_model_state"] = "统计窗外"
+            # 状态值可解析；中文诊断留在 lis_reason。
+            row["lis_model_state"] = "outside"
             row["lis_reason"] = "统计窗外"
             row["lis_rescue_raw"] = False
             row["lis_rescue"] = False
         elif not row.get("feature_ready"):
             row["state"] = "unknown"
             row["state_group"] = "unknown"
-            row["lis_model_state"] = "无连续合格配对"
+            row["lis_model_state"] = "unknown"
             row["lis_reason"] = "无连续合格配对"
             row["lis_rescue_raw"] = False
             row["lis_rescue"] = False

@@ -364,15 +364,18 @@ def test_lis_diagnostics_kept_for_unpaired_and_outside_rows(tmp_path):
     tst.derive_lis_features(rows, options())
 
     assert rows[12]["state"] == "unknown"
-    assert rows[12]["lis_model_state"] == "无连续合格配对"
+    assert rows[12]["lis_model_state"] == "unknown"
     assert rows[12]["lis_reason"] == "无连续合格配对"
     assert rows[13]["state"] == "outside"
-    assert rows[13]["lis_model_state"] == "统计窗外"
+    assert rows[13]["lis_model_state"] == "outside"
     assert rows[13]["lis_reason"] == "统计窗外"
     assert rows[12]["lis_rescue_raw"] is False
     assert rows[13]["lis_rescue"] is False
     for row in rows[:12]:
         assert row["lis_model_state"] in ("immobile", "struggling")
+    # 诊断列必须是可解析的状态值，中文说明只留在 lis_reason。
+    assert {row["lis_model_state"] for row in rows} <= {
+        "struggling", "immobile", "unknown", "outside"}
 
     # JSON 与 CSV 都保留诊断，不只显示最终状态。
     dumps_strict(rows)
@@ -461,6 +464,34 @@ def test_analyze_checks_cancel_after_capture():
     assert error.value.field == "job"
     # 捕获结束后仍有取消检查，并且真的停下。
     assert state["after"] >= 1
+
+
+def test_lis_rolling_checks_cancel_inside_long_group():
+    rows = [lis_row(index) for index in range(1025)]
+    for row in rows:
+        row["lis_f"] = None
+    calls = {"count": 0}
+
+    def cancel() -> bool:
+        calls["count"] += 1
+        return calls["count"] > 1
+
+    with pytest.raises(ValidationError) as error:
+        tst._lis_rolling(rows, cancel)
+    assert error.value.message == "分析已取消"
+    # 首行之后取消：在固定步长处停下，不把 1025 行整组算完。
+    assert calls["count"] == 2
+    assert rows[511]["lis_f"] is not None
+    assert rows[512]["lis_f"] is None
+
+    # 不取消时结果与旧路径一致。
+    fresh = [lis_row(index) for index in range(1025)]
+    quiet = [lis_row(index) for index in range(1025)]
+    tst._lis_rolling(fresh)
+    tst._lis_rolling(quiet, lambda: False)
+    for key in ("lis_h", "lis_f", "lis_s", "lis_g", "lis_b"):
+        assert [row[key] for row in fresh] == [row[key] for row in quiet]
+    assert all(row["lis_f"] is not None for row in fresh)
 
 
 def test_derive_lis_features_honours_cancel():
