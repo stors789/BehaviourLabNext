@@ -8,11 +8,12 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, Response, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException
 
 from .. import assets as asset_service
 from .. import experiments
+from .. import media as media_service
 from ..assets import BackgroundError
 from ..config import APP_NAME, APP_VERSION, SCHEMA_VERSION, DataPaths
 from ..detection import common_detection_defaults
@@ -264,6 +265,63 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         if not path.is_file():
             raise ApiError("源文件不可读取", 404)
         return send_file(path, conditional=True)
+
+    @app.get("/api/assets/<asset_id>/frame")
+    def asset_frame(asset_id: str):
+        asset = store.get_asset(asset_id)
+        if asset is None:
+            raise ApiError("素材不存在", 404)
+
+        raw_index = request.args.get("index")
+        if raw_index is None:
+            raise ApiError("缺少帧索引", 400,
+                           [{"field": "index", "message": "必须提供帧索引"}])
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            raise ApiError("帧索引必须是整数", 400,
+                           [{"field": "index", "message": "必须是整数"}])
+
+        raw_orientation = request.args.get("orientation", "0")
+        try:
+            orientation = int(raw_orientation)
+        except (TypeError, ValueError):
+            raise ApiError("方向必须是 0/90/180/270", 400,
+                           [{"field": "orientation", "message": "必须是整数"}])
+
+        raw_fps = request.args.get("fps_override")
+        fps_override = None
+        if raw_fps not in (None, ""):
+            try:
+                fps_override = float(raw_fps)
+            except (TypeError, ValueError):
+                raise ApiError("解释帧率必须是有限正数", 400,
+                               [{"field": "fps_override", "message": "必须是数值"}])
+
+        try:
+            info = media_service.read_frame_info(
+                asset["path"], index, orientation, fps_override
+            )
+        except ValidationError as error:
+            raise ApiError(error.message, 400, [error.as_issue()])
+        except media_service.MediaError as error:
+            raise ApiError(str(error), 422, [{"field": "index",
+                                              "message": str(error)}])
+
+        import cv2
+
+        ok, encoded = cv2.imencode(
+            ".jpg", info.image, [cv2.IMWRITE_JPEG_QUALITY, 90]
+        )
+        if not ok:
+            raise ApiError("无法编码源帧", 422,
+                           [{"field": "index", "message": "JPEG 编码失败"}])
+        response = Response(encoded.tobytes(), mimetype="image/jpeg")
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Source-Time"] = str(float(info.time_s))
+        response.headers["X-Source-Frame"] = str(info.index)
+        response.headers["X-Clock-Source"] = info.clock_source
+        return response
 
     @app.post("/api/backgrounds/upload")
     def upload_background():

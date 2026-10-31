@@ -29,7 +29,7 @@ python -m venv .venv
 - `behaviourlab/config.py`：数据根与运行常量
 - `behaviourlab/store.py`：SQLite 持久化与原子 JSON 写入
 - `behaviourlab/assets.py`：路径导入、上传副本、背景图
-- `behaviourlab/media.py`：视频探测与支持后缀
+- `behaviourlab/media.py`：视频探测、源帧读取、解释时钟与采样
 - `behaviourlab/experiments/`：十项实验注册与描述
 - `behaviourlab/engine.py`：配置合并、冻结与校验
 - `behaviourlab/service.py`：本地服务所有权、就绪检查与清理
