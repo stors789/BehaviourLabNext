@@ -782,7 +782,9 @@
       state.image = null;
       state.canvasMessage = "源帧不可读";
       draw();
-      status(error.message, "error");
+      const asset = assetById(video.asset_id);
+      status("源帧不可读：" + (asset ? asset.name : "视频"), "error");
+      el.statusbar.title = error.message;
     }
   }
 

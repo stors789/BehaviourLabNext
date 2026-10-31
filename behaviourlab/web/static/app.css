@@ -1700,3 +1700,8 @@ summary:focus-visible {
   align-items: center;
   gap: 10px;
 }
+
+.statusbar {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
