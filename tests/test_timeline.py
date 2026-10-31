@@ -158,3 +158,28 @@ def test_window_resolution_and_unresolved_cases():
     assert (nothing.start_s, nothing.end_s) == (2.0, 2.0)
     unit_global = timeline.resolve_unit_window(None, capped)
     assert (unit_global.start_s, unit_global.end_s) == (0.0, 6.5)
+
+
+def test_motion_never_links_different_units():
+    rows = [
+        timeline.base_row({"id": "unit-a", "name": "A", "animal_id": None},
+                          frame(0, 0.0, 0.0, 1.0),
+                          Detection(center=[0.0, 0.0])),
+        timeline.base_row({"id": "unit-b", "name": "B", "animal_id": None},
+                          frame(1, 1.0, 1.0, 2.0),
+                          Detection(center=[100.0, 0.0])),
+    ]
+    window = timeline.Window(0.0, 2.0)
+    clipped = timeline.clip_rows(rows, window)
+    segments = timeline.motion_segments(clipped, window)
+    assert segments == []
+    timeline.attach_motion(clipped, segments)
+    assert [row["step"] for row in clipped] == [None, None]
+    assert [row["speed"] for row in clipped] == [None, None]
+
+
+def test_video_window_caps_declared_end_by_metadata():
+    window = timeline.resolve_video_window(
+        {"start_s": 0.0, "end_s": 20.0}, [], metadata_duration=10.0)
+    assert (window.start_s, window.end_s) == (0.0, 10.0)
+    assert window.duration_s == pytest.approx(10.0, abs=TOL)

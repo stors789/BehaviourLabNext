@@ -61,11 +61,17 @@ def resolve_video_window(window: Mapping[str, Any] | None,
         raise ValidationError("窗口起点必须是非负有限数", "window.start_s")
 
     actual_end: float | None = None
+    has_rows = False
     for row in rows:
+        has_rows = True
         value = row.get("source_interval_end_s")
         if is_number(value) and math.isfinite(float(value)):
             actual_end = (float(value) if actual_end is None
                           else max(actual_end, float(value)))
+    if not has_rows and is_number(metadata_duration) \
+            and math.isfinite(float(metadata_duration)):
+        # 没有观测时元数据时长就是实际可用末端，显式终点同样不能超过它。
+        actual_end = float(metadata_duration)
 
     declared = config.get("end_s")
     if declared is not None:
@@ -74,8 +80,6 @@ def resolve_video_window(window: Mapping[str, Any] | None,
             end = min(end, actual_end)
     elif actual_end is not None:
         end = actual_end
-    elif is_number(metadata_duration) and math.isfinite(float(metadata_duration)):
-        end = float(metadata_duration)
     else:
         end = start
     return Window(start, max(start, end))
@@ -257,7 +261,12 @@ def motion_segments(rows: Iterable[Mapping[str, Any]], window: Window, *,
         return []
     segments: list[dict] = []
     previous: tuple[float, tuple[float, float], Mapping[str, Any]] | None = None
+    previous_unit: Any = None
     for row in sort_rows(rows):
+        if row["unit_id"] != previous_unit:
+            # 换动物即断开：不让上一只鼠的末点连到这一只的首点。
+            previous = None
+            previous_unit = row["unit_id"]
         point = _valid_point(row, x_key, y_key)
         if point is None:
             previous = None

@@ -219,6 +219,29 @@ def _number(value: Any) -> bool:
     return is_number(value)
 
 
+def _merged_option(draft: Mapping[str, Any], video: Mapping[str, Any],
+                   unit: Mapping[str, Any], key: str) -> Any:
+    """draft → video → unit 的同一字段；用于按模式而不是按已有记录校验。"""
+
+    value = None
+    for layer in (draft.get("options"), video.get("options"), unit.get("options")):
+        if isinstance(layer, Mapping) and key in layer:
+            value = layer[key]
+    return value
+
+
+def _exact_misses_video(window: Mapping[str, Any], video_start: float | None,
+                        video_end: float | None) -> bool:
+    """显式窗口与已声明的视频范围不重叠；视频终点未知时留给运行期。"""
+
+    if video_start is None or video_end is None:
+        return False
+    start, end = window.get("start_s"), window.get("end_s")
+    if not _number(start) or not _number(end):
+        return False
+    return min(float(end), video_end) <= max(float(start), video_start)
+
+
 def _window_issues(window: Any, field: str, *, video_window: bool) -> list[dict]:
     if window is None:
         return []
@@ -296,6 +319,15 @@ def validate_draft(draft: Mapping[str, Any]) -> list[dict]:
             issues.append({"field": f"{prefix}.asset_id", "message": "缺少有效素材 ID"})
         issues.extend(_window_issues(video.get("window"), f"{prefix}.window",
                                      video_window=True))
+        video_window = video.get("window")
+        video_bounds: tuple[float | None, float | None] = (0.0, None)
+        if isinstance(video_window, Mapping):
+            declared_start = video_window.get("start_s", 0.0)
+            declared_end = video_window.get("end_s")
+            video_bounds = (
+                float(declared_start) if _number(declared_start) else None,
+                float(declared_end) if _number(declared_end) else None,
+            )
         orientation = video.get("orientation", 0)
         if orientation not in ORIENTATIONS:
             issues.append({"field": f"{prefix}.orientation", "message": "旋转角度必须是 0/90/180/270"})
@@ -340,6 +372,21 @@ def validate_draft(draft: Mapping[str, Any]) -> list[dict]:
                 issues.append({"field": f"{unit_prefix}.animal_id", "message": "动物 ID 无效"})
             issues.extend(_window_issues(unit.get("window"), f"{unit_prefix}.window",
                                          video_window=False))
+            unit_window = unit.get("window")
+            if isinstance(unit_window, Mapping):
+                if unit_window.get("mode") == "exact" and _exact_misses_video(
+                        unit_window, video_bounds[0], video_bounds[1]):
+                    issues.append(
+                        {"field": f"{unit_prefix}.window.end_s",
+                         "message": "窗口与视频范围没有重叠"}
+                    )
+                if (assay == "ymaze"
+                        and _merged_option(draft, video, unit, "mode") == "manual"
+                        and unit_window.get("mode") == "relative"):
+                    issues.append(
+                        {"field": f"{unit_prefix}.window.mode",
+                         "message": "人工 Y 只支持 global 或 exact 窗口"}
+                    )
             for field in ("geometry", "options", "detection"):
                 if not isinstance(unit.get(field, {}), Mapping):
                     issues.append({"field": f"{unit_prefix}.{field}", "message": "必须是对象"})
@@ -349,13 +396,6 @@ def validate_draft(draft: Mapping[str, Any]) -> list[dict]:
             manual = unit.get("manual")
             if manual is not None and not isinstance(manual, Mapping):
                 issues.append({"field": f"{unit_prefix}.manual", "message": "必须是对象或 null"})
-            if assay == "ymaze" and isinstance(manual, Mapping) and manual:
-                window = unit.get("window")
-                if isinstance(window, Mapping) and window.get("mode") == "relative":
-                    issues.append(
-                        {"field": f"{unit_prefix}.window.mode",
-                         "message": "人工 Y 只支持 global 或 exact 窗口"}
-                    )
             for issue in issues[unit_start:]:
                 if unit_key:
                     issue.setdefault("unit_id", unit_key)
