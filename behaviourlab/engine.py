@@ -399,9 +399,11 @@ def validate_draft(draft: Mapping[str, Any]) -> list[dict]:
                         {"field": f"{unit_prefix}.window.end_s",
                          "message": "窗口与视频范围没有重叠"}
                     )
-                if (is_manual_path(assay,
-                                   _merged_option(draft, video, unit, "mode"),
-                                   unit.get("manual"))
+                # 只有人工 Y 受窗口模式限制；Barnes 的人工路径仍可用 relative。
+                if (assay == "ymaze"
+                        and is_manual_path(assay,
+                                           _merged_option(draft, video, unit, "mode"),
+                                           unit.get("manual"))
                         and unit_window.get("mode") == "relative"):
                     issues.append(
                         {"field": f"{unit_prefix}.window.mode",

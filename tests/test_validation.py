@@ -240,3 +240,39 @@ def test_automatic_y_keeps_relative_window(client):
     assert response.status_code == 201, response.get_json()
     draft = response.get_json()["data"]["draft"]
     assert draft["videos"][0]["units"][0]["window"]["mode"] == "relative"
+
+
+def test_barnes_manual_path_keeps_relative_window(client):
+    response = client.post("/api/drafts", json={
+        "assay": "barnes",
+        "videos": [{
+            "asset_id": new_id(),
+            "units": [{
+                "name": "小鼠 1",
+                "window": {"mode": "relative", "offset_s": 0,
+                           "duration_s": 60},
+                "manual": {"hole_sequence": [3, 7], "entry": 7},
+            }],
+        }],
+    })
+    assert response.status_code == 201, response.get_json()
+    draft = response.get_json()["data"]["draft"]
+    assert draft["videos"][0]["units"][0]["window"]["mode"] == "relative"
+
+
+def test_barnes_manual_path_keeps_relative_window(client):
+    response = client.post("/api/drafts", json={
+        "assay": "barnes",
+        "videos": [{
+            "asset_id": new_id(),
+            "units": [{
+                "name": "小鼠 1",
+                "window": {"mode": "relative", "offset_s": 0,
+                           "duration_s": 60},
+                "manual": {"hole_sequence": [3, 7], "entry": 7},
+            }],
+        }],
+    })
+    assert response.status_code == 201, response.get_json()
+    draft = response.get_json()["data"]["draft"]
+    assert draft["videos"][0]["units"][0]["window"]["mode"] == "relative"
