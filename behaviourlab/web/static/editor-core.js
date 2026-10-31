@@ -463,6 +463,8 @@
   const MISSING_LABELS = {
     foreground_saturated: "前景饱和",
     no_candidate: "无候选",
+    inconsistent_candidate_size: "候选尺寸与已接受体型不一致",
+    no_nearby_candidate: "附近没有符合位置门限的候选",
   };
 
   function previewNoteFor(data) {

@@ -133,6 +133,16 @@ function notes() {
   });
   assert.strictEqual(found.tone, "ok");
   assert.ok(found.text.includes("候选 2 个"), found.text);
+
+  const sized = previewNoteFor({
+    summary: {
+      detection_available: true,
+      detection: { candidates: 1, missing_reason: "inconsistent_candidate_size" },
+    },
+    warnings: [],
+  });
+  assert.strictEqual(sized.tone, "warn");
+  assert.ok(sized.text.includes("体型不一致"), sized.text);
 }
 
 (async () => {

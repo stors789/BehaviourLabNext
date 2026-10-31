@@ -427,3 +427,111 @@ def test_local_otsu_draft_is_created_from_saved_settings(client):
     assert created.status_code == 201, created.get_json()
     draft = created.get_json()["data"]["draft"]
     assert draft["detection"]["bg_method"] == "local_otsu"
+
+
+def test_nor_preview_reports_head_evidence(client, store, tmp_path, monkeypatch):
+    asset, draft = seed(store, tmp_path, assay="nor", geometry={
+        "arena": {"type": "quad",
+                  "points": [[0, 0], [159, 0], [159, 119], [0, 119]]},
+    })
+    image = np.full((120, 160, 3), 255, dtype=np.uint8)
+    cv2.ellipse(image, (75, 60), (24, 12), 0, 0, 360, (0, 0, 0), -1)
+    cv2.line(image, (50, 60), (20, 60), (0, 0, 0), 2)
+    frame = FrameInfo(image=image, index=0, time_s=0.0, pts=0,
+                      time_base=None, clock_source="pts")
+    monkeypatch.setattr(preview.media, "read_frame_info",
+                        lambda *args, **kwargs: frame)
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "a" * 32,
+              "frame_index": 0, "kind": "detection"},
+    )
+    assert response.status_code == 201, response.get_json()
+    found = response.get_json()["data"]["summary"]["detection"]
+    assert found["candidates"] == 1
+    assert found["head_quality"] > 0.5
+    assert found["nose"][0] > found["tail_base"][0]
+    assert found["head_angle"] is not None
+
+
+def test_nor_preview_reports_head_evidence(client, store, tmp_path, monkeypatch):
+    asset, draft = seed(store, tmp_path, assay="nor", geometry={
+        "arena": {"type": "quad",
+                  "points": [[0, 0], [159, 0], [159, 119], [0, 119]]},
+    })
+    image = np.full((120, 160, 3), 255, dtype=np.uint8)
+    cv2.ellipse(image, (75, 60), (24, 12), 0, 0, 360, (0, 0, 0), -1)
+    cv2.line(image, (50, 60), (20, 60), (0, 0, 0), 2)
+    frame = FrameInfo(image=image, index=0, time_s=0.0, pts=0,
+                      time_base=None, clock_source="pts")
+    monkeypatch.setattr(preview.media, "read_frame_info",
+                        lambda *args, **kwargs: frame)
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "a" * 32,
+              "frame_index": 0, "kind": "detection"},
+    )
+    assert response.status_code == 201, response.get_json()
+    found = response.get_json()["data"]["summary"]["detection"]
+    assert found["candidates"] == 1
+    assert found["head_quality"] > 0.5
+    assert found["nose"][0] > found["tail_base"][0]
+    assert found["head_angle"] is not None
+
+
+def test_nor_preview_states_unknown_head(client, store, tmp_path, monkeypatch):
+    asset, draft = seed(store, tmp_path, assay="nor", geometry={
+        "arena": {"type": "quad",
+                  "points": [[0, 0], [159, 0], [159, 119], [0, 119]]},
+    })
+    image = np.full((120, 160, 3), 255, dtype=np.uint8)
+    cv2.ellipse(image, (75, 60), (24, 12), 0, 0, 360, (0, 0, 0), -1)
+    frame = FrameInfo(image=image, index=0, time_s=0.0, pts=0,
+                      time_base=None, clock_source="pts")
+    monkeypatch.setattr(preview.media, "read_frame_info",
+                        lambda *args, **kwargs: frame)
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "a" * 32,
+              "frame_index": 0, "kind": "detection"},
+    )
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    found = data["summary"]["detection"]
+    assert found["candidates"] == 1
+    assert found["nose"] is None
+    assert found["tail_base"] is None
+    assert found["head_angle"] is None
+    assert found["head_quality"] == 0
+    assert any("头向未判定" in text for text in data["warnings"])
+
+
+def test_nor_preview_states_unknown_head(client, store, tmp_path, monkeypatch):
+    asset, draft = seed(store, tmp_path, assay="nor", geometry={
+        "arena": {"type": "quad",
+                  "points": [[0, 0], [159, 0], [159, 119], [0, 119]]},
+    })
+    image = np.full((120, 160, 3), 255, dtype=np.uint8)
+    cv2.ellipse(image, (75, 60), (24, 12), 0, 0, 360, (0, 0, 0), -1)
+    frame = FrameInfo(image=image, index=0, time_s=0.0, pts=0,
+                      time_base=None, clock_source="pts")
+    monkeypatch.setattr(preview.media, "read_frame_info",
+                        lambda *args, **kwargs: frame)
+
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "a" * 32,
+              "frame_index": 0, "kind": "detection"},
+    )
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    found = data["summary"]["detection"]
+    assert found["candidates"] == 1
+    assert found["nose"] is None
+    assert found["tail_base"] is None
+    assert found["head_angle"] is None
+    assert found["head_quality"] == 0
+    assert any("头向未判定" in text for text in data["warnings"])

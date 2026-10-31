@@ -9,7 +9,7 @@ import math
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import detection, experiments, geometry as geo, media
+from . import detection, experiments, geometry as geo, media, observation
 from .config import DataPaths
 from .engine import resolve_detection
 from .schema import ValidationError, is_number, new_id
@@ -49,6 +49,15 @@ def _draw_candidates(canvas, result, thickness: int) -> None:
             (int(round(result.center[0])), int(round(result.center[1]))),
             _bgr("#ff6e46"), cv2.MARKER_CROSS, 12, 1, cv2.LINE_AA,
         )
+    if result.nose and result.tail_base:
+        # 只在有细尾证据时画鼻尾；未知时不补方向。
+        nose = (int(round(result.nose[0])), int(round(result.nose[1])))
+        tail = (int(round(result.tail_base[0])),
+                int(round(result.tail_base[1])))
+        cv2.line(canvas, tail, nose, _bgr("#1c5f9e"),
+                 max(1, thickness - 1), cv2.LINE_AA)
+        cv2.circle(canvas, nose, max(3, thickness + 1), _bgr("#1c5f9e"), -1,
+                   cv2.LINE_AA)
 
 
 def _interpreted_duration(metadata: Mapping[str, Any],
@@ -369,11 +378,19 @@ def create_preview(
             background = _background_for(settings, asset, video, orientation,
                                          width, height)
             window_key = repr(video.get("window"))
+            video_key = (asset.get("id"), orientation, window_key)
             detector = detection.shared_detector(
-                (asset.get("id"), orientation, window_key), settings,
-                background=background,
+                video_key, settings, background=background,
             )
-            result = detector.detect(info.image, region)
+            result = observation.track(
+                video_key, unit.get("id") or id(unit),
+                image=info.image, region=region, settings=settings,
+                signature=observation.signature_of(
+                    geometry, settings, bool(options.get("dark_box_visible"))),
+                assay=draft["assay"], frame_index=info.index,
+                time_s=float(info.time_s),
+                foreground=detector.foreground(info.image),
+            )
         except detection.DetectionError as error:
             raise ValidationError(str(error), "detection") from error
 
@@ -423,6 +440,14 @@ def create_preview(
         warnings.append("前景覆盖过高，已拒绝整片掩膜。")
     elif result.missing_reason == "no_candidate":
         warnings.append("没有符合面积与质量要求的候选。")
+    elif result.missing_reason == "inconsistent_candidate_size":
+        warnings.append("候选尺寸与已接受体型不一致。")
+    elif result.missing_reason == "no_nearby_candidate":
+        warnings.append("附近没有符合位置门限的候选。")
+    if (result is not None and result.detected
+            and draft.get("assay") in observation.HEAD_ASSAYS
+            and result.head_angle is None):
+        warnings.append("头向未判定：缺少细尾证据。")
     if missing:
         warnings.append("尚未绘制：" + "、".join(missing))
 
@@ -443,6 +468,11 @@ def create_preview(
                 "region": region_source,
                 "center": list(result.center) if result.center else None,
                 "quality": float(result.quality),
+                "nose": list(result.nose) if result.nose else None,
+                "tail_base": (list(result.tail_base)
+                              if result.tail_base else None),
+                "head_angle": result.head_angle,
+                "head_quality": float(result.head_quality),
             },
             "manual_preserved": _is_manual_scope(draft.get("assay", ""),
                                                   options, unit),
