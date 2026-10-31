@@ -9,6 +9,9 @@ from .base import ExperimentNotImplemented, geometry_field
 DEFAULTS: dict = {}
 DETECTION_DEFAULTS: dict = {}
 
+# 首次检测必须落在场地内，才允许锚定相对窗口。
+FIRST_SEEN = "arena"
+
 SPEC = {
     "key": "fst",
     "label": "强迫游泳",

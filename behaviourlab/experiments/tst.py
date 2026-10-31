@@ -10,6 +10,9 @@ DEFAULTS = {"mode": "classic"}
 
 DETECTION_DEFAULTS: dict = {}
 
+# 首次检测必须落在场地内，才允许锚定相对窗口。
+FIRST_SEEN = "arena"
+
 SPEC = {
     "key": "tst",
     "label": "悬尾实验",
