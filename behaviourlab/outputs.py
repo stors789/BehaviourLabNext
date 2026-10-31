@@ -6,11 +6,32 @@
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from . import figures
 from .schema import sanitize_json
 from .store import atomic_write_json
+
+SAFE_STEM = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def figure_stem(unit: Mapping[str, Any], used: set[str]) -> str:
+    """安全、唯一、可读的每动物文件 stem；重名时追加序号。"""
+
+    raw = SAFE_STEM.sub("-", str(unit.get("unit_name") or "")).strip("-_")
+    raw = raw[:32] or "unit"
+    identity = str(unit.get("unit_id") or "")
+    suffix = identity[:6] if re.fullmatch(r"[A-Za-z0-9_-]+", identity) else ""
+    base = f"{raw}-{suffix}" if suffix else raw
+    stem = base
+    index = 2
+    while stem in used:
+        stem = f"{base}-{index}"
+        index += 1
+    used.add(stem)
+    return stem
 
 
 def write_json_export(path: str | Path, payload: Any) -> Path:
@@ -71,6 +92,17 @@ def _report_markdown(job: Mapping[str, Any], result: Any,
     if result.warnings:
         lines.extend(["", "## 警告", ""])
         lines.extend(f"- {text}" for text in result.warnings)
+    lines.extend(["", "中心、外围、场外三类互斥；壁区包含在外围内。"])
+    lines.extend(["", "## 图形", ""])
+    for unit in manifest.get("units", []):
+        info = unit.get("figures") or {}
+        label = unit.get("unit_name") or unit.get("unit_id")
+        names = [name for name in (info.get("trajectory"), info.get("heatmap"))
+                 if name]
+        if names:
+            lines.append(f"- {label}：" + "、".join(names))
+        else:
+            lines.append(f"- {label}：" + str(info.get("note") or "未生成图形"))
     lines.extend(["", "## 文件", ""])
     lines.extend(f"- {name}" for name in manifest.get("files", []))
     return "\n".join(lines) + "\n"
@@ -84,11 +116,55 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
+def _unit_figures(target: Path, summary: Mapping[str, Any],
+                  rows: Sequence[Mapping[str, Any]], stem: str,
+                  style: Mapping[str, Any] | None) -> dict:
+    """每动物轨迹与热图；没有事实支撑就省图并说明原因。"""
+
+    figures_info: dict[str, Any] = {"stem": stem, "trajectory": None,
+                                    "heatmap": None}
+    width = summary.get("arena_width_cm")
+    height = summary.get("arena_height_cm")
+    if not isinstance(width, (int, float)) or not isinstance(height, (int, float)) \
+            or width <= 0 or height <= 0:
+        figures_info["note"] = "没有可用的场地尺寸，未生成图形"
+        return figures_info
+    center = figures.center_rect_for(summary)
+    name = str(summary.get("unit_name") or summary.get("unit_id") or "")
+    notes: list[str] = []
+    trajectory = f"{stem}_trajectory.png"
+    heatmap = f"{stem}_heatmap.png"
+    try:
+        if figures.trajectory_png(target / trajectory, rows, float(width),
+                                  float(height), center_rect=center,
+                                  title=name, style=style):
+            figures_info["trajectory"] = trajectory
+        else:
+            notes.append("没有完成的连续运动段，未生成轨迹图")
+        if figures.heatmap_png(target / heatmap, rows, float(width),
+                               float(height), center_rect=center, title=name,
+                               style=style):
+            figures_info["heatmap"] = heatmap
+        else:
+            notes.append("没有有效位置，未生成热图")
+    except (OSError, ValueError) as error:
+        # 图形失败要如实登记，不把没有落盘的文件写进清单。
+        notes.append(f"图形生成失败：{error}")
+        for key, filename in (("trajectory", trajectory),
+                              ("heatmap", heatmap)):
+            if not (target / filename).is_file():
+                figures_info[key] = None
+    if notes:
+        figures_info["note"] = "；".join(notes)
+    return figures_info
+
+
 def export_result(directory: str | Path, job: Mapping[str, Any],
                   result: Any) -> dict:
     """把一份 AnalysisResult 写成清单里的文件，返回 manifest。
 
-    没有有效位置时省掉图形；CSV 的 null 写成空单元格。
+    每动物另出轨迹/热图 PNG 并登记映射；没有有效位置时省图并说明。
+    CSV 的 null 写成空单元格。
     """
 
     target = Path(directory)
@@ -109,13 +185,26 @@ def export_result(directory: str | Path, job: Mapping[str, Any],
     write_json_export(target / "results.json", payload)
     files.append("results.json")
 
+    style = job.get("style") if isinstance(job.get("style"), Mapping) else None
+    units: list[dict] = []
+    used: set[str] = set()
+    for row in result.summary:
+        unit_id = row.get("unit_id")
+        rows = [item for item in result.observations
+                if item.get("unit_id") == unit_id]
+        stem = figure_stem(row, used)
+        info = _unit_figures(target, row, rows, stem, style)
+        for key in ("trajectory", "heatmap"):
+            if info.get(key):
+                files.append(info[key])
+        units.append({"unit_id": unit_id, "unit_name": row.get("unit_name"),
+                      "summary": row, "figures": info})
+
     manifest = {
         "run_id": job.get("run_id"),
         "job_id": job.get("job_id"),
         "assay": job.get("assay"),
-        "units": [{"unit_id": row.get("unit_id"),
-                   "unit_name": row.get("unit_name"),
-                   "summary": row} for row in result.summary],
+        "units": units,
         "files": files + ["result_manifest.json", "report.md"],
         "warnings": list(result.warnings),
         "metadata": result.metadata,

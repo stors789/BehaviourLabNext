@@ -1,6 +1,19 @@
 {% extends "base.html" %}
 {% block title %}结果 · {{ app_name }}{% endblock %}
 
+{% macro num(value, digits=2) -%}
+{%- if value is none -%}—
+{%- elif value is number -%}{{ ("%." ~ digits ~ "f")|format(value) }}
+{%- else -%}{{ value }}{%- endif -%}
+{%- endmacro %}
+
+{% macro metric(label, value, unit="") -%}
+<div class="metric">
+  <span class="metric-label">{{ label }}</span>
+  <span class="metric-value">{{ value }}{% if unit and value != "—" %} <span class="metric-unit">{{ unit }}</span>{% endif %}</span>
+</div>
+{%- endmacro %}
+
 {% block content %}
 <div class="section-head page-head">
   <div>
@@ -19,45 +32,95 @@
 
 {% for entry in results %}
 <section class="panel">
-  <h2>{{ entry.result.summary[0].unit_name if entry.result and entry.result.summary else entry.job_id }}</h2>
   {% if entry.error %}
   <p class="status" data-tone="error">{{ entry.error }}</p>
-  {% else %}
-  {% set units = entry.result.summary or [] %}
-  {% if units %}
-  <table class="simple-table">
-    <thead>
-      <tr>
-        <th>动物</th>
-        <th>中心占比 %</th>
-        <th>外围占比 %</th>
-        <th>壁区占比 %</th>
-        <th>场地内路程 cm</th>
-        <th>平均速度 cm/s</th>
-        <th>中心进入</th>
-        <th>窗口 s</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for unit in units %}
-      <tr>
-        <td>{{ unit.unit_name }}</td>
-        <td>{{ "%.1f"|format(unit.center_percent) if unit.center_percent is not none else "" }}</td>
-        <td>{{ "%.1f"|format(unit.outer_percent) if unit.outer_percent is not none else "" }}</td>
-        <td>{{ "%.1f"|format(unit.wall_percent) if unit.wall_percent is not none else "" }}</td>
-        <td>{{ "%.2f"|format(unit.total_distance_cm) if unit.total_distance_cm is not none else "" }}</td>
-        <td>{{ "%.2f"|format(unit.mean_speed_cm_s) if unit.mean_speed_cm_s is not none else "" }}</td>
-        <td>{{ unit.center_entries }}</td>
-        <td>
-          {% if unit.analysis_window_start_s is not none %}
-          {{ "%.2f"|format(unit.analysis_window_start_s) }}–{{ "%.2f"|format(unit.analysis_window_end_s) }}
-          {% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
   {% endif %}
+  {% if entry.result %}
+  <div class="section-head">
+    <div>
+      <h2>{{ (entry.result.metadata.assay or entry.job.assay or "结果")|upper }}</h2>
+      <p class="muted">
+        {% if entry.job %}
+        来源 {{ entry.job.asset.name or entry.job.asset.id }}
+        {% if entry.result.summary and entry.result.summary[0].analysis_window_start_s is not none %}
+        · 窗口 {{ num(entry.result.summary[0].analysis_window_start_s) }}–{{ num(entry.result.summary[0].analysis_window_end_s) }} s
+        {% endif %}
+        {% endif %}
+      </p>
+    </div>
+    <code class="code">{{ entry.job_id }}</code>
+  </div>
+
+  {% for unit in entry.units %}
+  {% set s = unit.summary %}
+  <article class="unit-block">
+    <h3>{{ s.unit_name or s.unit_id }}</h3>
+
+    <div class="metric-grid">
+      {{ metric("总曝光", num(s.total_time_s), "s") }}
+      {{ metric("观察占用", num(s.observed_time_s), "s") }}
+      {{ metric("缺失", num(s.missing_time_s), "s") }}
+      {{ metric("中心占比", num(s.center_percent, 1), "%") }}
+      {{ metric("外围占比", num(s.outer_percent, 1), "%") }}
+      {{ metric("壁区占比", num(s.wall_percent, 1), "%") }}
+      {{ metric("场地内路程", num(s.total_distance_cm), "cm") }}
+      {{ metric("平均速度", num(s.mean_speed_cm_s), "cm/s") }}
+      {{ metric("中心进入", s.center_entries if s.center_entries is not none else "—", "次") }}
+      {{ metric("检测率", num(s.detected_rate_percent, 1), "%") }}
+    </div>
+
+    <details class="fold">
+      <summary>完整指标</summary>
+      <div class="fold-body">
+        <table class="simple-table">
+          <tbody>
+            <tr><th>时间</th><td>总 {{ num(s.total_time_s) }} / 观察 {{ num(s.observed_time_s) }} / 缺失 {{ num(s.missing_time_s) }} s</td></tr>
+            <tr><th>区域占用</th><td>中心 {{ num(s.center_time_s) }} / 外围 {{ num(s.outer_time_s) }}（含壁区 {{ num(s.wall_time_s) }}）/ 场外 {{ num(s.outside_time_s) }} s</td></tr>
+            <tr><th>区域占比</th><td>中心 {{ num(s.center_percent, 1) }} / 外围 {{ num(s.outer_percent, 1) }} / 壁区 {{ num(s.wall_percent, 1) }} / 场外 {{ num(s.outside_percent, 1) }} %</td></tr>
+            <tr><th>运动时间</th><td>可测 {{ num(s.measurable_motion_time_s) }} / 移动 {{ num(s.moving_time_s) }} / 静止 {{ num(s.immobility_time_s) }} s</td></tr>
+            <tr><th>路程</th><td>场地内 {{ num(s.total_distance_cm) }} / 全部检测 {{ num(s.observed_total_distance_cm) }} / 中心 {{ num(s.center_distance_cm) }} / 外围 {{ num(s.outer_distance_cm) }} / 场外 {{ num(s.outside_distance_cm) }} cm</td></tr>
+            <tr><th>速度</th><td>平均 {{ num(s.mean_speed_cm_s) }} / 最大 {{ num(s.max_speed_cm_s) }} cm/s</td></tr>
+            <tr><th>检测</th><td>{{ s.detected_frames }} / {{ s.window_frames }} 行（{{ num(s.detected_rate_percent, 1) }} %）</td></tr>
+            <tr><th>中心进入</th><td>{{ s.center_entries }} 次，潜伏期 {{ num(s.center_latency_s) }} s</td></tr>
+            <tr><th>窗口</th><td>
+              {% if s.analysis_window_start_s is not none %}
+              {{ num(s.analysis_window_start_s) }}–{{ num(s.analysis_window_end_s) }} s
+              {% else %}未确定{% endif %}
+            </td></tr>
+            <tr><th>参数</th><td>
+              场地 {{ num(s.arena_width_cm) }}×{{ num(s.arena_height_cm) }} cm ·
+              中心比例 {{ num(s.center_ratio_x, 2) }}×{{ num(s.center_ratio_y, 2) }} ·
+              壁宽 {{ num(s.wall_margin_cm) }} cm ·
+              移动阈值 {{ num(s.movement_threshold_cm_s) }} cm/s ·
+              箱宽 {{ num(s.bin_seconds) }} s
+            </td></tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+
+    {% if unit.figures.trajectory or unit.figures.heatmap %}
+    <div class="figure-row">
+      {% if unit.figures.trajectory %}
+      <figure>
+        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.trajectory }}" alt="轨迹">
+        <figcaption>轨迹（cm，仅连接完成的连续运动段）</figcaption>
+      </figure>
+      {% endif %}
+      {% if unit.figures.heatmap %}
+      <figure>
+        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.heatmap }}" alt="热图">
+        <figcaption>热图（40×40 箱，秒/箱，按有效曝光加权）</figcaption>
+      </figure>
+      {% endif %}
+    </div>
+    {% elif unit.figures.note %}
+    <p class="muted">{{ unit.figures.note }}</p>
+    {% endif %}
+  </article>
+  {% endfor %}
+
+  <p class="muted">中心、外围、场外三类互斥；壁区包含在外围内。</p>
 
   {% if entry.result.warnings %}
   <ul class="warn-list">
@@ -69,7 +132,12 @@
   <p class="muted">文件</p>
   <ul class="file-list">
     {% for name in entry.files %}
-    <li><a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}">{{ name }}</a></li>
+    <li>
+      <a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}">{{ name }}</a>
+      {% if name.endswith(".png") %}
+      <a class="file-download" href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}?download=1">下载</a>
+      {% endif %}
+    </li>
     {% endfor %}
   </ul>
   {% endif %}

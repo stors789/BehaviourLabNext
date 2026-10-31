@@ -148,8 +148,33 @@ def first_seen_time(assay: str, detection: Any, time_s: Any,
     return moment
 
 
+def first_seen_in_window(assay: str, rows: Iterable[Mapping[str, Any]],
+                         window: Window,
+                         geometry: Mapping[str, Any] | None = None) -> float | None:
+    """视频统计半开窗 [start,end) 内的首个真实检测；尾上下文不算锚点。"""
+
+    if not window.known:
+        return None
+    start = float(window.start_s)
+    end = float(window.end_s)
+    for row in sort_rows(rows):
+        moment = float(row["time_s"])
+        if moment < start:
+            continue
+        if moment >= end:
+            break
+        if not row.get("detected"):
+            continue
+        if _first_seen_rule(assay) == "arena":
+            arena = (geometry or {}).get("arena")
+            if not geo.shape_contains(arena, (row.get("x_px"), row.get("y_px"))):
+                continue
+        return moment
+    return None
+
+
 def base_row(unit: Mapping[str, Any], frame: Any,
-             detection: Any = None) -> dict:
+             detection: Any = None, *, extra: Mapping[str, Any] | None = None) -> dict:
     """源观测行：源区间取 Frame 显式值，缺失时才回退 time_s/time_s+dt_s。"""
 
     start = frame.interval_start_s
@@ -175,6 +200,7 @@ def base_row(unit: Mapping[str, Any], frame: Any,
         interval_end_s=end,
         detection=detection,
         in_window=end > start,
+        extra=extra,
     )
 
 

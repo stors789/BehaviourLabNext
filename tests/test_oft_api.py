@@ -105,3 +105,37 @@ def test_analyze_endpoint_rejects_crossed_arena(client, store, tmp_path,
     assert response.status_code == 400
     messages = [issue["message"] for issue in response.get_json()["error"]["fields"]]
     assert "场地四角必须凸且不交叉" in messages
+
+
+def test_analyze_requires_arena_before_creating_job(client, store, tmp_path,
+                                                   monkeypatch):
+    asset, draft = seed(store, tmp_path)
+    videos = draft["videos"]
+    videos[0]["units"][0]["geometry"] = {}
+    # 未画完的草稿仍允许保存；只是不能开始任务。
+    store.update_draft(draft["id"], {"videos": videos})
+    assert client.put(f"/api/drafts/{draft['id']}",
+                      json={"videos": videos}).status_code == 200
+    monkeypatch.setattr(
+        "behaviourlab.engine.media.probe_video",
+        lambda path: {"width": 200, "height": 200, "duration_s": 1.0,
+                      "fps": 5.0, "frame_count": 5})
+    response = client.post(f"/api/drafts/{draft['id']}/analyze")
+    assert response.status_code == 400, response.get_json()
+    issues = response.get_json()["error"]["fields"]
+    assert any(issue["field"] == "videos[0].units[0].geometry.arena"
+               for issue in issues)
+    assert any(issue["message"] == "缺少场地四角" for issue in issues)
+    assert store.list_jobs() == []
+
+    checked = client.get(f"/api/drafts/{draft['id']}/validate").get_json()["data"]
+    assert any(issue["field"] == "videos[0].units[0].geometry.arena"
+               for issue in checked["issues"])
+
+    # 草稿仍在，补上四角即可继续。
+    kept = client.get(f"/api/drafts/{draft['id']}").get_json()["data"]["draft"]
+    assert kept["videos"][0]["units"][0]["geometry"] == {}
+    fixed = client.get(f"/api/drafts/{draft['id']}").get_json()["data"]["draft"]
+    fixed["videos"][0]["units"][0]["geometry"] = {"arena": ARENA}
+    assert client.put(f"/api/drafts/{draft['id']}",
+                      json={"videos": fixed["videos"]}).status_code == 200

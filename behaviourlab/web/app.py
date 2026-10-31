@@ -40,6 +40,13 @@ PREVIEW_NAME = re.compile(r"[0-9a-f]{32}\.(?:png|jpg|jpeg)")
 RUN_FILES = ("observations.csv", "summary.csv", "events.csv", "bins.csv",
              "frozen_job.json", "results.json", "result_manifest.json",
              "report.md")
+RUN_FIGURE = re.compile(r"[A-Za-z0-9_-]+_(?:trajectory|heatmap)\.png")
+
+
+def _is_run_file(name: str) -> bool:
+    """运行产物白名单：固定文件加上每动物图形。"""
+
+    return name in RUN_FILES or bool(RUN_FIGURE.fullmatch(name))
 
 
 class ApiError(Exception):
@@ -157,7 +164,29 @@ def _run_payloads(directory: Path) -> list[dict]:
             continue
         entry["files"] = sorted(
             path.name for path in job_dir.iterdir()
-            if path.is_file() and path.name in RUN_FILES)
+            if path.is_file() and _is_run_file(path.name))
+        try:
+            manifest_file = job_dir / "result_manifest.json"
+            if manifest_file.is_file():
+                entry["manifest"] = json.loads(
+                    manifest_file.read_text(encoding="utf-8"))
+            frozen = job_dir / "frozen_job.json"
+            if frozen.is_file():
+                entry["job"] = json.loads(frozen.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            entry["error"] = f"清单文件不可读取：{error}"
+        units = []
+        for unit in (entry.get("manifest") or {}).get("units") or []:
+            units.append({"unit_id": unit.get("unit_id"),
+                          "unit_name": unit.get("unit_name"),
+                          "summary": unit.get("summary") or {},
+                          "figures": unit.get("figures") or {}})
+        if not units:
+            for row in entry["result"].get("summary") or []:
+                units.append({"unit_id": row.get("unit_id"),
+                              "unit_name": row.get("unit_name"),
+                              "summary": row, "figures": {}})
+        entry["units"] = units
         payloads.append(entry)
     return payloads
 
@@ -393,11 +422,17 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
     def get_run_file(run_id: str, job_id: str, filename: str):
         if not (is_valid_id(run_id) and is_valid_id(job_id)):
             raise ApiError("结果不存在", 404)
-        if filename not in RUN_FILES:
+        if not _is_run_file(filename):
             raise ApiError("结果文件不存在", 404)
         path = Path(paths.runs) / run_id / job_id / filename
         if not path.is_file():
             raise ApiError("结果文件不存在", 404)
+        if RUN_FIGURE.fullmatch(filename):
+            # 图形默认在结果页内联显示，带 download=1 时按附件下载。
+            if request.args.get("download"):
+                return send_file(path, as_attachment=True,
+                                 download_name=filename)
+            return send_file(path, mimetype="image/png", conditional=True)
         return send_file(path, as_attachment=True, download_name=filename)
 
     @app.get("/api/previews/<filename>")
@@ -600,17 +635,18 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
     @app.get("/api/drafts/<draft_id>/validate")
     def validate_draft_get(draft_id: str):
         draft = _require_draft(draft_id)
-        return success({"issues": validate_draft(draft)})
+        # 最终校验：允许未画完的草稿保存，但不允许带着缺四角开始任务。
+        return success({"issues": validate_draft(draft, complete=True)})
 
     @app.post("/api/drafts/<draft_id>/validate")
     def validate_draft_post(draft_id: str):
         draft = _require_draft(draft_id)
-        return success({"issues": validate_draft(draft)})
+        return success({"issues": validate_draft(draft, complete=True)})
 
     @app.post("/api/drafts/<draft_id>/analyze")
     def analyze_draft(draft_id: str):
         draft = _require_draft(draft_id)
-        issues = validate_draft(draft)
+        issues = validate_draft(draft, complete=True)
         if issues:
             raise ApiError("草稿未通过校验", 400, issues)
         assets = {}

@@ -77,8 +77,12 @@ def _finite(value: Any) -> float | None:
 
 def validate_unit(options: Mapping[str, Any] | None,
                   geometry: Mapping[str, Any] | None,
-                  provided: Iterable[str] | None = None) -> list[dict]:
-    """只校验显式给出的值与已绘制的四角；未完成草稿仍可保存。"""
+                  provided: Iterable[str] | None = None, *,
+                  complete: bool = False) -> list[dict]:
+    """只校验显式给出的值与已绘制的四角；未完成草稿仍可保存。
+
+    complete=True 用于最终校验/开始任务：此时必须已有完整合法的场地四角。
+    """
 
     values = options if isinstance(options, Mapping) else {}
     provided = set(OPTION_KEYS if provided is None else provided)
@@ -129,7 +133,7 @@ def validate_unit(options: Mapping[str, Any] | None,
             issues.append({"field": "options.bin_seconds",
                            "message": "时间箱长度必须 > 0"})
 
-    issues.extend(validate_arena(geometry))
+    issues.extend(validate_arena(geometry, require=complete))
     return issues
 
 
@@ -147,11 +151,15 @@ def _points(shape: Mapping[str, Any] | None) -> list[tuple[float, float]]:
     return result
 
 
-def validate_arena(geometry: Mapping[str, Any] | None) -> list[dict]:
+def validate_arena(geometry: Mapping[str, Any] | None,
+                   *, require: bool = False) -> list[dict]:
     """四角必须是四个有限点、严格凸、非退化且不交叉；不修成外接矩形。"""
 
     shape = (geometry or {}).get("arena")
     if shape is None:
+        # 草稿保存允许还没画；最终校验/开始任务必须已有四角。
+        if require:
+            return [{"field": "geometry.arena", "message": "缺少场地四角"}]
         return []
     if not isinstance(shape, Mapping) or shape.get("type") not in ("quad", "polygon"):
         return [{"field": "geometry.arena", "message": "场地必须是四角四边形"}]
@@ -255,6 +263,18 @@ def _unit_dict(unit: Mapping[str, Any]) -> dict:
             "animal_id": unit.get("animal_id")}
 
 
+def observation_row(unit: Mapping[str, Any], frame: Any,
+                    detection: Any) -> dict:
+    """源观测行：记录实际背景方法与头向来源，缺失时显式 null。"""
+
+    has_head = detection.nose is not None and detection.tail_base is not None
+    return timeline.base_row(
+        _unit_dict(unit), frame, detection,
+        extra={"detection_method": (unit.get("detection") or {}).get("bg_method"),
+               "head_method": "classical_geometry" if has_head else None},
+    )
+
+
 def _region_for(unit: Mapping[str, Any], options: Mapping[str, Any],
                 width: int, height: int) -> np.ndarray:
     geometry = unit.get("geometry") or {}
@@ -305,10 +325,16 @@ def _events_for(rows: Sequence[Mapping[str, Any]], unit_id: str,
     """中心进入状态机：缺失只标缺口，不覆盖上一个已知真假。"""
 
     events: list[dict] = []
+    if not window.known:
+        # 未知窗口没有统计区间，不产生任何事件，也不拿 None 当时间。
+        return events, 0, None
     known: bool | None = None
     gap = False
     sequence = 0
     for row in sorted(rows, key=lambda item: (item["time_s"], item["frame"])):
+        if not row.get("in_window"):
+            # 窗外边界上下文只供运动段使用，不参与中心进入状态机。
+            continue
         if not row.get("detected"):
             if known is not None:
                 gap = True
@@ -600,7 +626,15 @@ def process_unit(unit: Mapping[str, Any], captured: Sequence[Mapping[str, Any]],
     window = timeline.resolve_unit_window(
         unit.get("window"), video_window, first_seen)
     rows = timeline.clip_rows(captured, window)
+    method = (unit.get("detection") or {}).get("bg_method")
     for row in rows:
+        # 捕获阶段已写入实际方法；替身行在这里补默认，避免导出缺列。
+        row.setdefault("detection_method", method)
+        row.setdefault(
+            "head_method",
+            "classical_geometry"
+            if row.get("nose_x_px") is not None and row.get("tail_x_px") is not None
+            else None)
         _annotate(row, matrix, width_cm, height_cm, options)
     segments = timeline.motion_segments(rows, window,
                                         x_key="x_cm", y_key="y_cm")
@@ -637,14 +671,13 @@ def analyze(context: Any) -> AnalysisResult:
         raise ValidationError("草稿还没有小鼠", "units")
 
     for unit in units:
-        issues = validate_unit(unit.get("options") or {}, unit.get("geometry") or {})
+        issues = validate_unit(unit.get("options") or {},
+                               unit.get("geometry") or {}, complete=True)
         if issues:
             raise ValidationError(issues[0]["message"], issues[0]["field"])
 
     asset = job.get("asset") or {}
     metadata = asset.get("metadata") or {}
-    video_window = timeline.resolve_video_window(
-        job.get("window"), (), metadata.get("duration_s"))
     source = context.source
     if source is None:
         window = job.get("window") or {}
@@ -663,9 +696,9 @@ def analyze(context: Any) -> AnalysisResult:
     regions: dict[Any, np.ndarray] = {}
     backgrounds: dict[tuple, Any] = {}
     captured: dict[Any, list[dict]] = {unit["id"]: [] for unit in units}
-    first_seen: dict[Any, float | None] = {unit["id"]: None for unit in units}
     unit_ids = [unit["id"] for unit in units]
     run_key = (job.get("run_id"), job.get("job_id"), KEY)
+    progress_span = float(metadata.get("duration_s") or 0.0)
 
     for frame in source.iter_frames():
         if context.cancelled():
@@ -699,14 +732,20 @@ def analyze(context: Any) -> AnalysisResult:
                 foreground=detector.foreground(image),
                 retain_units=unit_ids,
             )
-            row = timeline.base_row(_unit_dict(unit), frame, result)
+            row = observation_row(unit, frame, result)
             captured[unit_id].append(row)
-            if first_seen[unit_id] is None and result.detected:
-                if frame.time_s >= float(video_window.start_s or 0.0):
-                    first_seen[unit_id] = timeline.first_seen_time(
-                        KEY, result, frame.time_s, unit.get("geometry") or {})
-        context.progress(min(0.9, 0.1 + 0.8 * (frame.time_s + 1e-9) /
-                             max(1e-9, video_window.duration_s or 1.0)))
+        context.progress(min(0.9, 0.1 + 0.8 * max(0.0, float(frame.time_s)) /
+                             max(1e-9, progress_span or 1.0)))
+
+    # 视频统计窗按捕获到的真实源区间确定；元数据时长只在没有采样行时回退。
+    all_rows = [row for rows in captured.values() for row in rows]
+    video_window = timeline.resolve_video_window(
+        job.get("window"), all_rows, metadata.get("duration_s"))
+    first_seen = {
+        unit["id"]: timeline.first_seen_in_window(
+            KEY, captured[unit["id"]], video_window, unit.get("geometry") or {})
+        for unit in units
+    }
 
     rows_all: list[dict] = []
     events_all: list[dict] = []
@@ -747,7 +786,8 @@ def validate(job: Any) -> list[dict]:
     for unit in job.get("units") or []:
         prefix = f"units[{unit.get('id')}]"
         for issue in validate_unit(unit.get("options") or {},
-                                   unit.get("geometry") or {}):
+                                   unit.get("geometry") or {},
+                                   complete=True):
             entry = dict(issue)
             entry["field"] = f"{prefix}.{issue['field']}"
             issues.append(entry)

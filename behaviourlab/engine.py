@@ -305,8 +305,13 @@ def _window_issues(window: Any, field: str, *, video_window: bool) -> list[dict]
     return issues
 
 
-def validate_draft(draft: Mapping[str, Any]) -> list[dict]:
-    """草稿结构校验；实验专属参数由各实验模块校验。"""
+def validate_draft(draft: Mapping[str, Any], *,
+                   complete: bool = False) -> list[dict]:
+    """草稿结构校验；实验专属参数由各实验模块校验。
+
+    complete=False 允许未画完的草稿保存；complete=True 用于最终校验与开始
+    任务，实验要求的必需几何（如 OFT 四角）缺失即报错。
+    """
 
     if not isinstance(draft, Mapping):
         return [{"field": "", "message": "草稿必须是对象"}]
@@ -422,7 +427,8 @@ def validate_draft(draft: Mapping[str, Any]) -> list[dict]:
                             for key in layer}
                 merged = resolve_options(assay, draft=draft, video=video,
                                          unit=unit)
-                for issue in checker(merged, unit.get("geometry") or {}, provided):
+                for issue in checker(merged, unit.get("geometry") or {}, provided,
+                                     complete=complete):
                     entry = dict(issue)
                     field = issue.get("field")
                     entry["field"] = (f"{unit_prefix}.{field}" if field

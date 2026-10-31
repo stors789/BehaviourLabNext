@@ -47,3 +47,18 @@ def test_secondary_preview_passes_stage_kind():
     assert 'el.secondary.addEventListener("click", runPreview)' not in source
     assert ('runPreview(state.step === "review" ? "behavior" : "detection")'
             in source)
+
+
+def test_parameter_sections_render_as_folds():
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    # 描述符里的 section 必须被消费：分组后折叠，不再平铺成一个大表单。
+    assert "param.section" in source
+    assert "summary.textContent = group.title;" in source
+    from behaviourlab import experiments
+
+    entry = [item for item in experiments.catalog()
+             if item["key"] == "oft"][0]
+    assert entry["parameters"]
+    assert all(param.get("section") == "统计"
+               for param in entry["parameters"])

@@ -1736,3 +1736,81 @@ summary:focus-visible {
 .preview-note[data-tone="muted"] {
   border-left-color: var(--control);
 }
+
+.unit-block {
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+}
+
+.unit-block:first-of-type {
+  border-top: 0;
+  padding-top: 4px;
+}
+
+.unit-block h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 10px 16px;
+  margin-bottom: 12px;
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.metric-label {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.metric-value {
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-unit {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.figure-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.figure-row figure {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.figure-row img {
+  display: block;
+  width: 280px;
+  max-width: 100%;
+  height: auto;
+}
+
+.figure-row figcaption {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.file-download {
+  margin-left: 8px;
+  color: var(--muted);
+  font-size: 12.5px;
+}

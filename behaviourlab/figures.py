@@ -1,0 +1,181 @@
+"""结果图形：只用保存的完成运动段与有效位置，不重新检测也不补线。
+
+轨迹逐段绘制，缺失处自然断开；热图按有效曝光 dt_s 加权，单位是秒/箱。
+厘米坐标、等比例轴、y 向下（左上是物理原点）。
+"""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+
+import matplotlib
+
+matplotlib.use("Agg")
+
+from matplotlib import colormaps  # noqa: E402
+from matplotlib import patches  # noqa: E402
+from matplotlib.backends.backend_agg import FigureCanvasAgg  # noqa: E402
+from matplotlib.figure import Figure  # noqa: E402
+
+HEATMAP_BINS = 40
+
+matplotlib.rcParams["font.sans-serif"] = [
+    "Microsoft YaHei", "SimHei", "DejaVu Sans"]
+matplotlib.rcParams["axes.unicode_minus"] = False
+
+
+def _finite(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def valid_positions(rows: Iterable[Mapping[str, Any]],
+                    width_cm: float, height_cm: float) -> list[tuple[float, float, float]]:
+    """窗内有效位置的 (x, y, dt)；jump / position_valid=false 不算有效点。"""
+
+    points: list[tuple[float, float, float]] = []
+    for row in rows:
+        if not row.get("in_window") or not row.get("detected"):
+            continue
+        if row.get("position_valid") is False or row.get("jump") is True:
+            continue
+        span = _finite(row.get("dt_s"))
+        x = _finite(row.get("x_cm"))
+        y = _finite(row.get("y_cm"))
+        if span is None or span <= 0 or x is None or y is None:
+            continue
+        if not (0.0 <= x <= width_cm and 0.0 <= y <= height_cm):
+            # 场地外的真实位置不进入场地热图，也不夹到边缘。
+            continue
+        points.append((x, y, span))
+    return points
+
+
+def motion_segments(rows: Iterable[Mapping[str, Any]]) -> list[tuple[float, float, float, float]]:
+    """保存的完成运动段端点；没有段的行不产生任何线。"""
+
+    segments: list[tuple[float, float, float, float]] = []
+    for row in rows:
+        x0 = _finite(row.get("motion_x0"))
+        y0 = _finite(row.get("motion_y0"))
+        x1 = _finite(row.get("motion_x1"))
+        y1 = _finite(row.get("motion_y1"))
+        if None in (x0, y0, x1, y1):
+            continue
+        segments.append((x0, y0, x1, y1))
+    return segments
+
+
+def _style(style: Mapping[str, Any] | None) -> tuple[str, str, float, int]:
+    values = style or {}
+    color = str(values.get("color") or "#B86245")
+    colormap = str(values.get("colormap") or "viridis")
+    try:
+        colormaps[colormap]
+    except KeyError:
+        colormap = "viridis"
+    width = _finite(values.get("line_width")) or 2.0
+    dpi = int(_finite(values.get("dpi")) or 150)
+    return color, colormap, max(0.5, width), max(50, min(dpi, 600))
+
+
+def _base_figure(width_cm: float, height_cm: float) -> tuple[Figure, Any]:
+    ratio = height_cm / width_cm if width_cm > 0 else 1.0
+    height = 4.2
+    figure = Figure(figsize=(4.2, max(2.6, min(6.0, height * ratio))))
+    FigureCanvasAgg(figure)
+    axes = figure.add_subplot(111)
+    axes.set_xlim(0.0, width_cm)
+    axes.set_ylim(height_cm, 0.0)
+    axes.set_aspect("equal", adjustable="box")
+    axes.set_xlabel("x (cm)")
+    axes.set_ylabel("y (cm)")
+    return figure, axes
+
+
+def _draw_arena(axes: Any, width_cm: float, height_cm: float,
+                center_rect: tuple[float, float, float, float] | None) -> None:
+    axes.add_patch(patches.Rectangle(
+        (0.0, 0.0), width_cm, height_cm, fill=False,
+        edgecolor="#8a8a8a", linewidth=0.8))
+    if center_rect:
+        x0, y0, x1, y1 = center_rect
+        axes.add_patch(patches.Rectangle(
+            (x0, y0), x1 - x0, y1 - y0, fill=False,
+            edgecolor="#b0b0b0", linewidth=0.8, linestyle="--"))
+
+
+def trajectory_png(path: str | Path, rows: Iterable[Mapping[str, Any]],
+                   width_cm: float, height_cm: float, *,
+                   center_rect: tuple[float, float, float, float] | None = None,
+                   title: str = "", style: Mapping[str, Any] | None = None) -> bool:
+    """逐段画已完成运动段；没有段就不出图。"""
+
+    segments = motion_segments(rows)
+    if not segments:
+        return False
+    color, _, line_width, dpi = _style(style)
+    figure, axes = _base_figure(width_cm, height_cm)
+    _draw_arena(axes, width_cm, height_cm, center_rect)
+    for x0, y0, x1, y1 in segments:
+        axes.plot([x0, x1], [y0, y1], color=color, linewidth=line_width,
+                  solid_capstyle="round")
+    if title:
+        axes.set_title(title, fontsize=9, color="#333333")
+    figure.tight_layout()
+    figure.savefig(path, format="png", dpi=dpi)
+    return True
+
+
+def heat_grid(rows: Iterable[Mapping[str, Any]], width_cm: float,
+              height_cm: float, bins: int = HEATMAP_BINS
+              ) -> tuple[list[list[float]], int]:
+    """40×40 空间箱的秒数网格与有效点数；在场外或无效的点不进入。"""
+
+    points = valid_positions(rows, width_cm, height_cm)
+    grid = [[0.0] * bins for _ in range(bins)]
+    for x, y, span in points:
+        column = min(bins - 1, int(x / width_cm * bins))
+        row = min(bins - 1, int(y / height_cm * bins))
+        grid[row][column] += span
+    return grid, len(points)
+
+
+def heatmap_png(path: str | Path, rows: Iterable[Mapping[str, Any]],
+                width_cm: float, height_cm: float, *,
+                center_rect: tuple[float, float, float, float] | None = None,
+                bins: int = HEATMAP_BINS, title: str = "",
+                style: Mapping[str, Any] | None = None) -> bool:
+    """40×40 空间箱按 dt_s 加权；量纲秒/箱，没有有效位置不出图。"""
+
+    grid, count = heat_grid(rows, width_cm, height_cm, bins)
+    if not count:
+        return False
+    _, colormap, _, dpi = _style(style)
+    figure, axes = _base_figure(width_cm, height_cm)
+    _draw_arena(axes, width_cm, height_cm, center_rect)
+    image = axes.imshow(grid, cmap=colormap, origin="upper", aspect="equal",
+                        extent=(0.0, width_cm, height_cm, 0.0),
+                        interpolation="nearest")
+    figure.colorbar(image, ax=axes, fraction=0.046, pad=0.03,
+                    label="s")
+    if title:
+        axes.set_title(title, fontsize=9, color="#333333")
+    figure.tight_layout()
+    figure.savefig(path, format="png", dpi=dpi)
+    return True
+
+
+def center_rect_for(summary: Mapping[str, Any]) -> tuple[float, float, float, float] | None:
+    width = _finite(summary.get("arena_width_cm"))
+    height = _finite(summary.get("arena_height_cm"))
+    rx = _finite(summary.get("center_ratio_x"))
+    ry = _finite(summary.get("center_ratio_y"))
+    if None in (width, height, rx, ry):
+        return None
+    return (width * (1.0 - rx) / 2.0, height * (1.0 - ry) / 2.0,
+            width * (1.0 + rx) / 2.0, height * (1.0 + ry) / 2.0)

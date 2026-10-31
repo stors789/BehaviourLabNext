@@ -1443,74 +1443,108 @@
       wrap.append(empty);
       return wrap;
     }
+    const groups = [];
+    const bySection = new Map();
     params.forEach((param) => {
-      const label = document.createElement("label");
-      label.className = "field";
-      const caption = document.createElement("span");
-      caption.textContent = param.label + (param.unit ? "（" + param.unit + "）" : "");
-      let input;
-      if (param.type === "select") {
-        input = document.createElement("select");
-        (param.choices || []).forEach((choice) => {
-          const option = document.createElement("option");
-          option.value = choice.value;
-          option.textContent = choice.label;
-          input.append(option);
-        });
-      } else if (param.type === "checkbox") {
-        input = document.createElement("input");
-        input.type = "checkbox";
-      } else {
-        input = document.createElement("input");
-        input.type = "number";
-        if (param.min != null) input.min = String(param.min);
-        if (param.max != null) input.max = String(param.max);
-        if (param.step != null) input.step = String(param.step);
+      if (!param.section) {
+        groups.push({ title: null, params: [param] });
+        return;
       }
-      const value = effectiveOption(unit, param.key, param.default);
-      if (input.type === "checkbox") input.checked = Boolean(value);
-      else input.value = value == null ? "" : String(value);
-      input.addEventListener("change", () => {
-        // 始终写入当前草稿的 unit：保存回写后旧闭包引用可能已过期。
-        const target = currentUnit();
-        if (!target) return;
-        if (!target.options) target.options = {};
-        let changed = null;
-        if (input.type === "checkbox") {
-          target.options[param.key] = input.checked;
-          changed = input.checked;
-        } else if (input.type === "number") {
-          const number = Number(input.value);
-          if (!Number.isFinite(number)) {
-            input.value = String(effectiveOption(target, param.key, param.default));
-            return;
-          }
-          if (param.step === 1 && !Number.isInteger(number)) {
-            status(param.label + " 必须是整数", "error");
-            input.value = String(effectiveOption(target, param.key, param.default));
-            return;
-          }
-          target.options[param.key] = number;
-          changed = number;
-        } else {
-          target.options[param.key] = input.value;
-          changed = input.value;
-        }
-        invalidatePreview();
-        markDirty();
-        if (param.key === "mode") {
-          state.recordMode = changed === "manual";
-          if (state.recordMode) state.view = "geometry";
-          renderTasknav();
-        }
-        refreshEditorSpec();
-        renderInspector();
-        draw();
-      });
-      label.append(caption, input);
-      wrap.append(label);
+      let group = bySection.get(param.section);
+      if (!group) {
+        group = { title: param.section, params: [] };
+        bySection.set(param.section, group);
+        groups.push(group);
+      }
+      group.params.push(param);
+    });
+    groups.forEach((group) => {
+      const fields = group.params.map((param) => parameterField(unit, param));
+      if (!group.title) {
+        fields.forEach((field) => wrap.append(field));
+        return;
+      }
+      // 按描述符的 section 折叠：默认收起，不挤占当前任务内容。
+      const section = document.createElement("details");
+      section.className = "fold";
+      const summary = document.createElement("summary");
+      summary.textContent = group.title;
+      const inner = document.createElement("div");
+      inner.className = "fold-body";
+      fields.forEach((field) => inner.append(field));
+      section.append(summary, inner);
+      wrap.append(section);
     });
     return wrap;
+  }
+
+  function parameterField(unit, param) {
+
+    const label = document.createElement("label");
+    label.className = "field";
+    const caption = document.createElement("span");
+    caption.textContent = param.label + (param.unit ? "（" + param.unit + "）" : "");
+    let input;
+    if (param.type === "select") {
+      input = document.createElement("select");
+      (param.choices || []).forEach((choice) => {
+        const option = document.createElement("option");
+        option.value = choice.value;
+        option.textContent = choice.label;
+        input.append(option);
+      });
+    } else if (param.type === "checkbox") {
+      input = document.createElement("input");
+      input.type = "checkbox";
+    } else {
+      input = document.createElement("input");
+      input.type = "number";
+      if (param.min != null) input.min = String(param.min);
+      if (param.max != null) input.max = String(param.max);
+      if (param.step != null) input.step = String(param.step);
+    }
+    const value = effectiveOption(unit, param.key, param.default);
+    if (input.type === "checkbox") input.checked = Boolean(value);
+    else input.value = value == null ? "" : String(value);
+    input.addEventListener("change", () => {
+      // 始终写入当前草稿的 unit：保存回写后旧闭包引用可能已过期。
+      const target = currentUnit();
+      if (!target) return;
+      if (!target.options) target.options = {};
+      let changed = null;
+      if (input.type === "checkbox") {
+        target.options[param.key] = input.checked;
+        changed = input.checked;
+      } else if (input.type === "number") {
+        const number = Number(input.value);
+        if (!Number.isFinite(number)) {
+          input.value = String(effectiveOption(target, param.key, param.default));
+          return;
+        }
+        if (param.step === 1 && !Number.isInteger(number)) {
+          status(param.label + " 必须是整数", "error");
+          input.value = String(effectiveOption(target, param.key, param.default));
+          return;
+        }
+        target.options[param.key] = number;
+        changed = number;
+      } else {
+        target.options[param.key] = input.value;
+        changed = input.value;
+      }
+      invalidatePreview();
+      markDirty();
+      if (param.key === "mode") {
+        state.recordMode = changed === "manual";
+        if (state.recordMode) state.view = "geometry";
+        renderTasknav();
+      }
+      refreshEditorSpec();
+      renderInspector();
+      draw();
+    });
+    label.append(caption, input);
+    return label;
   }
 
   function effectiveOption(unit, key, fallback) {
@@ -1745,7 +1779,11 @@
       status("分析完成", "ok");
       window.location.href = "/results/" + data.run_id;
     } catch (error) {
-      status(error.message, "error");
+      // 校验失败时给出可定位原因，而不是只显示“草稿未通过校验”。
+      const issues = Array.isArray(error.fields) ? error.fields : [];
+      status(issues.length
+        ? issues.map((issue) => issue.message || issue.field).join("；")
+        : error.message, "error");
     } finally {
       el.primary.disabled = false;
     }
