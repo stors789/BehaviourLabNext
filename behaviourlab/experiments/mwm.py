@@ -35,8 +35,8 @@ DEFAULTS = {
 OPTION_KEYS = tuple(DEFAULTS)
 POSITIVE_KEYS = ("pool_diameter_cm", "platform_radius_cm", "platform_dwell_s",
                  "corridor_width_cm", "bin_seconds")
-NONNEGATIVE_KEYS = ("coordinate_rotation_deg", "thigmotaxis_band_cm",
-                    "movement_threshold_cm_s")
+NONNEGATIVE_KEYS = ("thigmotaxis_band_cm", "movement_threshold_cm_s")
+ROTATION_RANGE = (-360.0, 360.0)
 TRIAL_TYPES = ("hidden", "visible", "probe")
 TARGET_QUADRANTS = ("auto", "NE", "NW", "SW", "SE")
 START_POSITIONS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
@@ -45,6 +45,9 @@ START_ANGLES = {"E": 0.0, "NE": 45.0, "N": 90.0, "NW": 135.0,
 QUADRANTS = ("NE", "NW", "SW", "SE")
 QUADRANT_ROMAN = {"NE": "I", "NW": "II", "SW": "III", "SE": "IV"}
 TIME_EPS = 1e-9
+# 轴上点的旋转残差（如 90° 旋转后的 −1.8e−15）相对量级可忽略：按此比例归零，
+# 真实负坐标不受影响。
+ZERO_EPS = 1e-12
 
 DETECTION_DEFAULTS: dict = {}
 
@@ -218,8 +221,12 @@ def validate_unit(options: Mapping[str, Any] | None,
             issues.append({"field": f"options.{key}", "message": "必须是 ≥ 0 的数值"})
 
     if "coordinate_rotation_deg" in provided:
+        # 旋转角是有符号量：只要求有限非布尔并在 [-360, 360] 内。
         rotation = _finite(values.get("coordinate_rotation_deg"))
-        if rotation is not None and not -360.0 <= rotation <= 360.0:
+        if rotation is None:
+            issues.append({"field": "options.coordinate_rotation_deg",
+                           "message": "必须是有限数值"})
+        elif not ROTATION_RANGE[0] <= rotation <= ROTATION_RANGE[1]:
             issues.append({"field": "options.coordinate_rotation_deg",
                            "message": "坐标轴旋转必须在 -360 到 360 之间"})
 
@@ -327,17 +334,29 @@ def _linear_matrix(pool: tuple[list[float], list[float], float],
     return rotate @ flip @ local @ scale @ local.T
 
 
+def _snap_axis(value: float, scale: float) -> float:
+    """把相对量级可忽略的数值零残差归零；真实正负坐标保持原符号。"""
+
+    limit = ZERO_EPS * max(abs(float(scale)), 1.0)
+    return 0.0 if abs(float(value)) <= limit else float(value)
+
+
 def _transform(matrix: np.ndarray, center: Sequence[float],
                point: Sequence[float]) -> tuple[float, float]:
     vector = np.array([float(point[0]) - float(center[0]),
                        float(point[1]) - float(center[1])], dtype=np.float64)
     result = matrix @ vector
-    return float(result[0]), float(result[1])
+    x, y = float(result[0]), float(result[1])
+    scale = max(abs(x), abs(y))
+    return _snap_axis(x, scale), _snap_axis(y, scale)
 
 
 def quadrant_of(x: float, y: float) -> str:
-    """x≥0 东、y≥0 北；原点归东北。"""
+    """x≥0 东、y≥0 北；原点归东北。轴上残差与物理坐标同一归零规则。"""
 
+    scale = max(abs(float(x)), abs(float(y)))
+    x = _snap_axis(x, scale)
+    y = _snap_axis(y, scale)
     if x >= 0.0:
         return "NE" if y >= 0.0 else "SE"
     return "NW" if y >= 0.0 else "SW"
@@ -505,9 +524,7 @@ def _annotate(row: dict, matrix: np.ndarray, center: Sequence[float],
 
 def _continuous(previous: Mapping[str, Any] | None,
                 row: Mapping[str, Any]) -> bool:
-    return (previous is not None
-            and abs(float(previous["interval_end_s"])
-                    - float(row["interval_start_s"])) < 1e-7)
+    return timeline.exposures_continuous(previous, row)
 
 
 def _platform_events(rows: Sequence[Mapping[str, Any]],
@@ -686,7 +703,8 @@ def process_unit(unit: Mapping[str, Any],
         _annotate(row, matrix, pool[0], radius, platform, platform_radius,
                   band, corridor_half, start, platform_center_distance)
     segments = timeline.motion_segments(rows, window,
-                                        x_key="x_cm", y_key="y_cm")
+                                        x_key="x_cm", y_key="y_cm",
+                                        require_continuity=True)
     timeline.attach_motion(rows, segments)
     facts = _platform_events(
         rows, window, float(options["platform_dwell_s"]),

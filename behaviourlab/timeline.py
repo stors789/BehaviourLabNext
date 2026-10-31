@@ -15,6 +15,7 @@ from . import geometry as geo
 from .schema import ValidationError, is_number, make_observation
 
 TIME_EPS = 1e-9
+EXPOSURE_EPS = 1e-6
 SPLIT_EPS = 1e-9
 EXACT_MODES = ("exact", "absolute")
 UNRESOLVED_WARNINGS = ("oft", "nor")
@@ -279,9 +280,35 @@ def _lerp(start: Sequence[float], end: Sequence[float],
             float(start[1]) + (float(end[1]) - float(start[1])) * ratio]
 
 
+def exposures_continuous(previous: Mapping[str, Any] | None,
+                         row: Mapping[str, Any]) -> bool:
+    """前条真实曝光末端与本条起点相接；缺口或缺键都不算连续。
+
+    优先比较源曝光（窗口裁切前的真实区间），这样窗口端点仍能借用相邻
+    上下文插值；没有源区间时退回裁切后的区间。
+    """
+
+    if previous is None:
+        return False
+    for start_key, end_key in (
+            ("source_interval_start_s", "source_interval_end_s"),
+            ("interval_start_s", "interval_end_s")):
+        if not is_number(previous.get(end_key)) \
+                or not is_number(row.get(start_key)):
+            continue
+        return abs(float(previous[end_key])
+                   - float(row[start_key])) <= EXPOSURE_EPS
+    return False
+
+
 def motion_segments(rows: Iterable[Mapping[str, Any]], window: Window, *,
-                    x_key: str = "x_px", y_key: str = "y_px") -> list[dict]:
-    """只用连续真实点构造已完成段；缺失或无效行立即清空前点。"""
+                    x_key: str = "x_px", y_key: str = "y_px",
+                    require_continuity: bool = False) -> list[dict]:
+    """只用连续真实点构造已完成段；缺失或无效行立即清空前点。
+
+    ``require_continuity`` 为真时还要求前条曝光末端与本条起点相接，
+    中间没有真实曝光的两个点不连成段；窗口端点仍按时间插值裁剪。
+    """
 
     if not window.known:
         return []
@@ -301,8 +328,12 @@ def motion_segments(rows: Iterable[Mapping[str, Any]], window: Window, *,
         if previous is None:
             previous = (moment, point, row)
             continue
-        last_time, last_point, _ = previous
+        last_time, last_point, last_row = previous
         if moment <= last_time:
+            previous = (moment, point, row)
+            continue
+        if require_continuity and not exposures_continuous(last_row, row):
+            # 曝光被缺口或零曝光打断：只把当前点当新起点，不跨越缺口。
             previous = (moment, point, row)
             continue
         low = max(last_time, float(window.start_s))

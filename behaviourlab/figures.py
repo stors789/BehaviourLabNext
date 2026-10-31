@@ -221,9 +221,9 @@ def mwm_trajectory_png(path: str | Path,
         return False
     color, _, line_width, dpi = _style(style)
     figure, axes = _mwm_figure(float(radius_cm))
-    if platform is not None:
-        axes.add_patch(patches.Circle(platform,
-                                      max(0.5, float(platform_radius)),
+    if platform is not None and float(platform_radius) > 0.0:
+        # 平台圈就是评分区：按配置的实际厘米半径画，不放大物理边界。
+        axes.add_patch(patches.Circle(platform, float(platform_radius),
                                       fill=False, edgecolor="#b45f45",
                                       linewidth=1.2))
     if start is not None:
@@ -265,9 +265,9 @@ def mwm_heatmap_png(path: str | Path,
     figure.colorbar(image, ax=axes, fraction=0.046, pad=0.03, label="s")
     axes.add_patch(patches.Circle((0.0, 0.0), radius, fill=False,
                                   edgecolor="#8a8a8a", linewidth=0.8))
-    if platform is not None:
-        axes.add_patch(patches.Circle(platform,
-                                      max(0.5, float(platform_radius)),
+    if platform is not None and float(platform_radius) > 0.0:
+        # 平台圈就是评分区：按配置的实际厘米半径画，不放大物理边界。
+        axes.add_patch(patches.Circle(platform, float(platform_radius),
                                       fill=False, edgecolor="#b45f45",
                                       linewidth=1.2))
     if title:
