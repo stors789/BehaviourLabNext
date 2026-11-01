@@ -398,6 +398,11 @@
           type: "holes",
           holes: (shape.holes || []).map((hole) => ({ id: hole.id, center: point(hole.center) })),
         };
+      } else if (Array.isArray(shape)) {
+        // Barnes 的洞位数组：逐洞旋转中心，保留洞号与顺序。
+        next[key] = shape.map((item) => (item && Array.isArray(item.center)
+          ? Object.assign({}, item, { center: point(item.center) })
+          : item));
       } else if (shape.points) {
         next[key] = { type: shape.type, points: shape.points.map(point) };
       } else {
@@ -586,6 +591,21 @@
           + " · 转换 " + count(behavior.total_transitions) + " 次");
         if (behavior.dark_box_visible === false) {
           lines.push("不可见暗室：明室失检按推断暗室计");
+        }
+      } else if (behavior.mode === "barnes") {
+        const count = (number) => (typeof number === "number" && isFinite(number)
+          ? String(number) : "—");
+        const percent = (number) => (typeof number === "number" && isFinite(number)
+          ? number.toFixed(1) + "%" : "—");
+        const primary = behavior.primary_censored
+          ? "未到达目标" : value(behavior.primary_latency_s) + " s";
+        lines.push("行为 " + value(behavior.total_time_s) + " s：访问 "
+          + count(behavior.visits) + " 次 · 首次目标 " + primary
+          + " · 错误 " + count(behavior.primary_errors)
+          + " · 鼻尖覆盖 " + percent(behavior.nose_coverage_percent)
+          + "（片段估计，非完整行为结果）");
+        if (behavior.visit_source === "manual") {
+          lines.push("访问序列来自人工记录，未使用自动鼻尖证据");
         }
       } else if (behavior.mode === "ymaze") {
         const count = (number) => (typeof number === "number" && isFinite(number)
@@ -819,9 +839,45 @@
     ldb: ["light", "dark", "doorway"],
   };
 
+  // Barnes 的洞位落盘为 geometry.holes 数组（恰好 hole_count 项），步骤键只
+  // 用于画布；读写都在这里转换，避免另存一份带 type 的平行形状。
+  function barnesShape(geometry, key) {
+    if (key !== "holes") return norKeyShape(geometry, key);
+    const list = geometry && Array.isArray(geometry.holes) ? geometry.holes : null;
+    if (!list || !list.length) return null;
+    const holes = [];
+    list.forEach((hole) => {
+      const center = hole && Array.isArray(hole.center) ? hole.center : null;
+      if (!center || center.length < 2) return;
+      const x = Number(center[0]);
+      const y = Number(center[1]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      holes.push({ id: String(hole.id), center: [x, y] });
+    });
+    return holes.length ? { type: "holes", holes } : null;
+  }
+
+  function barnesApply(geometry, key, shape) {
+    if (key !== "holes") {
+      if (shape) geometry[key] = clone(shape);
+      else delete geometry[key];
+      return;
+    }
+    const holes = shape && Array.isArray(shape.holes) ? shape.holes : null;
+    if (!holes || !holes.length) {
+      delete geometry.holes;
+      return;
+    }
+    geometry.holes = holes.map((hole, index) => ({
+      id: String(hole && hole.id != null && hole.id !== "" ? hole.id : index + 1),
+      center: [Number(hole.center[0]), Number(hole.center[1])],
+    }));
+  }
+
   function stepShape(assay, geometry, key) {
     if (!geometry) return null;
     if (assay === "nor") return norShape(geometry, key);
+    if (assay === "barnes") return barnesShape(geometry, key);
     const nested = NESTED_ZONE_STEPS[assay];
     if (nested && nested.includes(key)) {
       const zones = geometry.zones;
@@ -835,6 +891,10 @@
     if (!geometry) return;
     if (assay === "nor") {
       norApply(geometry, key, shape);
+      return;
+    }
+    if (assay === "barnes") {
+      barnesApply(geometry, key, shape);
       return;
     }
     const nested = NESTED_ZONE_STEPS[assay];

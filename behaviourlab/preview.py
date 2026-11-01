@@ -428,6 +428,11 @@ def create_preview(
                 if isinstance(zone, Mapping):
                     _draw_shape(canvas, zone, _bgr("#ffd26f"), thickness)
             continue
+        if key == "holes" and isinstance(shape, list):
+            # Barnes 的洞位落盘为数组；画布上按序编号，与工作台一致。
+            _draw_shape(canvas, {"type": "holes", "holes": shape},
+                        _bgr("#ffd26f"), thickness)
+            continue
         if not isinstance(shape, Mapping):
             continue
         _draw_shape(canvas, shape, _bgr("#ffd26f"), thickness)

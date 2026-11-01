@@ -98,6 +98,8 @@ ASSAY_NOTES = {
            "（含缺失曝光），开放臂时间占臂区时长以开放臂时间+封闭臂时间为分母。",
     "ldb": "明室、暗室、门区与未知互斥，比例分母为窗口总时长；不可见暗室下"
            "失检曝光按推断暗室计入暗室时间，同时计入缺失，二者不相加。",
+    "barnes": "洞访问来自鼻尖进入洞半径的证据，覆盖率分母为完整动物窗曝光；"
+              "逃避候选只是目标附近身体消失的未确认记录，不产生总逃避潜伏期。",
 }
 
 
@@ -311,8 +313,8 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
 
     if missing_size_note and not any(
             figures_info.get(key) for key in ("zones", "objects", "sequence")):
-        # Y 迷宫 / LDB 不用场地宽高描述图形空态，是否出图由各自逻辑说明。
-        if str(summary.get("mode")) not in ("ymaze", "ldb"):
+        # Y 迷宫 / LDB / Barnes 不用场地宽高描述图形空态，是否出图由各自逻辑说明。
+        if str(summary.get("mode")) not in ("ymaze", "ldb", "barnes"):
             notes.append("没有可用的场地尺寸，未生成图形")
 
     if isinstance(summary.get("objects"), list) and summary["objects"]:

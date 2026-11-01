@@ -237,10 +237,12 @@ def is_manual_path(assay: str, unit: Mapping[str, Any]) -> bool:
     if assay == "ymaze":
         return is_manual_unit(unit)
     if assay == "barnes":
+        # 只有真正给出人工记录（含空数组）才算人工路径；缺省/null 是自动访问。
         manual = unit.get("manual")
-        return isinstance(manual, Mapping) and any(
-            manual.get(key) for key in
-            ("events", "hole_sequence", "entry", "sequence"))
+        if not isinstance(manual, Mapping):
+            return False
+        return manual.get("hole_visits") is not None \
+            or manual.get("escape_time_s") is not None
     return False
 
 

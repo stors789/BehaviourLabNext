@@ -294,6 +294,18 @@ def geometry_region(geometry: Mapping[str, Any] | None, assay: str,
     geometry = geometry or {}
     options = options or {}
 
+    if assay == "barnes":
+        # 统计圆盘由椭圆定义；可选遮罩只从检测区域里裁掉遮挡，不改统计范围。
+        arena = geometry.get("arena")
+        if not isinstance(arena, Mapping):
+            raise DetectionError("缺少圆盘边界")
+        region = rasterize_shape(arena, width, height)
+        mask = geometry.get("mask")
+        points = _shape_points(mask) if isinstance(mask, Mapping) else []
+        if len(points) >= 3:
+            cv2.fillPoly(region, [np.array(points, dtype=np.int32)], 0)
+        return region, "arena"
+
     explicit = geometry.get("mask")
     if isinstance(explicit, Mapping) and explicit.get("type"):
         return rasterize_shape(explicit, width, height), "mask"

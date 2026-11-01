@@ -941,6 +941,160 @@
     <p class="muted">两室不是有效四角：位置仅保留像素，不输出 cm 距离。</p>
     {% endif %}
 
+    {% elif assay == "barnes" %}
+    {% set unit_holes = ((entry.result.tables or {}).get("holes") or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
+    {% set unit_visits = (entry.result.events or []) | selectattr("unit_id", "equalto", s.unit_id) | selectattr("kind", "equalto", "hole_visit") | list %}
+    <div class="metric-grid">
+      {{ metric("洞访问", s.visits, "次") }}
+      {{ metric("首次目标潜伏期", num(s.primary_latency_s, 3), "s") }}
+      {{ metric("首次目标前错误", s.primary_errors, "次") }}
+      {{ metric("首次目标路径", num(s.primary_path_cm, 1), "cm") }}
+      {{ metric("平均速度", num(s.mean_speed_cm_s, 3), "cm/s") }}
+      {{ metric("鼻尖覆盖", num(s.nose_coverage_percent, 1), "%") }}
+    </div>
+
+    <details class="fold">
+      <summary>全部指标</summary>
+      <div class="fold-body">
+        <table class="simple-table">
+          <tbody>
+            <tr><th>试次</th><td>
+              {% if s.trial_type == "training" %}训练{% elif s.trial_type == "reversal" %}反转{% elif s.trial_type == "probe" %}探测{% else %}{{ s.trial_type }}{% endif %} ·
+              目标洞 {{ s.target_hole }} ·
+              访问来源 {{ "人工记录" if s.visit_source == "manual" else "自动鼻尖" }}
+            </td></tr>
+            <tr><th>首次目标</th><td>
+              {% if s.primary_latency_s is not none %}
+              潜伏期 {{ num(s.primary_latency_s, 3) }} s · 路径 {{ num(s.primary_path_cm, 3) }} cm · 错误 {{ s.primary_errors }} 次
+              {% else %}
+              未到达目标（删失）· 已评分错误 {{ s.primary_errors }} 次
+              {% endif %}
+            </td></tr>
+            <tr><th>入箱</th><td>
+              {% if s.trial_type == "probe" %}
+              探测试次不计入箱潜伏期与路径
+              {% elif s.total_latency_s is none %}
+              没有确认入箱（{{ "删失" if s.total_censored else "不适用" }}）
+              {% else %}
+              潜伏期 {{ num(s.total_latency_s, 3) }} s · 路径 {{ num(s.total_path_cm, 3) }} cm · 错误 {{ s.total_errors }} 次
+              {% endif %}
+              · 逃避候选 {{ s.escape_candidates }} 次（未确认）
+            </td></tr>
+            <tr><th>曝光</th><td>
+              窗口 {{ num(s.total_time_s, 3) }} s · 检测 {{ num(s.observed_time_s, 3) }} s ·
+              缺失 {{ num(s.missing_time_s, 3) }} s ·
+              身体覆盖 {{ num(s.body_coverage_percent, 1) }}%（{{ num(s.body_time_s, 3) }} s，圆外 {{ num(s.outside_time_s, 3) }} s）·
+              鼻尖覆盖 {{ num(s.nose_coverage_percent, 1) }}%（{{ num(s.nose_time_s, 3) }} s）·
+              目标扇区 {{ num(s.target_sector_time_s, 3) }} s
+            </td></tr>
+            <tr><th>运动</th><td>
+              总距离 {{ num(s.total_distance_cm, 3) }} cm ·
+              平均速度 {{ num(s.mean_speed_cm_s, 3) }} / 最大 {{ num(s.max_speed_cm_s, 3) }} cm/s ·
+              可测 {{ num(s.measurable_motion_time_s, 3) }} s
+            </td></tr>
+            <tr><th>参数</th><td>
+              圆盘直径 {{ num(s.disc_diameter_cm, 1) }} cm ·
+              洞数 {{ s.hole_count }} · 洞半径 {{ num(s.hole_radius_cm, 2) }} cm ·
+              访问确认 {{ num(s.visit_confirm_s, 2) }} s · 洞外重置 {{ num(s.visit_reset_s, 2) }} s ·
+              统计质量 {{ num(s.quality_threshold, 2) }} · 箱宽 {{ num(s.bin_seconds, 2) }} s
+            </td></tr>
+            <tr><th>窗口</th><td>
+              {% if s.analysis_window_start_s is not none %}
+              {{ num(s.analysis_window_start_s, 3) }}–{{ num(s.analysis_window_end_s, 3) }} s
+              {% else %}未确定{% endif %}
+            </td></tr>
+          </tbody>
+        </table>
+
+        {% if unit_visits %}
+        <table class="simple-table">
+          <thead>
+            <tr><th>#</th><th>进入</th><th>确认</th><th>洞</th><th>评分</th></tr>
+          </thead>
+          <tbody>
+            {% for v in unit_visits %}
+            <tr>
+              <td>{{ loop.index }}</td>
+              <td>{{ num(v.time_s, 3) }}</td>
+              <td>{{ num(v.confirmed_s, 3) }}</td>
+              <td>{{ v.hole_id }}{% if v.hole_id == s.target_hole %}（目标）{% endif %}</td>
+              <td>{{ "计入" if v.scored else "未计入" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="muted">本次窗口没有确认的洞访问。</p>
+        {% endif %}
+
+        {% if unit_holes %}
+        <table class="simple-table">
+          <thead>
+            <tr><th>洞</th><th>x（cm）</th><th>y（cm）</th><th>鼻尖时间</th><th>访问</th><th>自动访问</th></tr>
+          </thead>
+          <tbody>
+            {% for hole in unit_holes %}
+            <tr>
+              <td>{{ hole.hole_id }}{% if hole.target %}（目标）{% endif %}</td>
+              <td>{{ num(hole.x_cm, 2) }}</td>
+              <td>{{ num(hole.y_cm, 2) }}</td>
+              <td>{{ num(hole.nose_time_s, 2) }}</td>
+              <td>{{ hole.visits }}</td>
+              <td>{{ hole.automatic_visits }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+
+        {% set unit_bins = (entry.result.bins or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
+        {% if unit_bins %}
+        <table class="simple-table">
+          <thead>
+            <tr><th>箱</th><th>时间（s）</th><th>检测</th><th>缺失</th><th>身体</th><th>鼻尖</th><th>目标扇区</th><th>距离</th><th>均速</th></tr>
+          </thead>
+          <tbody>
+            {% for b in unit_bins %}
+            <tr>
+              <td>{{ b.bin_index }}</td>
+              <td>{{ num(b.start_s, 2) }}–{{ num(b.end_s, 2) }}</td>
+              <td>{{ num(b.observed_time_s, 2) }}</td>
+              <td>{{ num(b.missing_time_s, 2) }}</td>
+              <td>{{ num(b.body_time_s, 2) }}</td>
+              <td>{{ num(b.nose_time_s, 2) }}</td>
+              <td>{{ num(b.target_sector_time_s, 2) }}</td>
+              <td>{{ num(b.distance_cm, 2) }} cm</td>
+              <td>{{ num(b.mean_speed_cm_s, 2) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+    </details>
+    {% set barnes_figures = [unit.figures.trajectory, unit.figures.heatmap,
+                             unit.figures.activity, unit.figures.objects]
+                            | select("string") | list %}
+    {% if barnes_figures %}
+    <div class="figure-row">
+      {% if unit.figures.trajectory %}
+      <figure>
+        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.trajectory }}" alt="轨迹">
+        <figcaption>轨迹</figcaption>
+      </figure>
+      {% endif %}
+      {% if unit.figures.heatmap %}
+      <figure>
+        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.heatmap }}" alt="热图">
+        <figcaption>热图</figcaption>
+      </figure>
+      {% endif %}
+    </div>
+    {% else %}
+    <p class="muted" data-empty="figures">暂无图表（本次运行未生成本单位的图形，见下方文件列表）。</p>
+    {% endif %}
+    <p class="muted">洞访问来自鼻尖进入洞半径的证据；质量分数是证据指标，不是准确概率。未确认入箱不产生总逃避潜伏期。</p>
+
     {% else %}
     <div class="metric-grid">
       {% for item in entry.metrics[:6] %}

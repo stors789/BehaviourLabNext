@@ -227,12 +227,19 @@ def test_manual_y_keeps_configured_window(client, store, tmp_path, monkeypatch):
 
 
 def test_manual_barnes_keeps_configured_window(client, store, tmp_path, monkeypatch):
+    disk = {"type": "ellipse", "center": [320.0, 240.0],
+            "radii": [200.0, 150.0], "angle": 0.0}
+    holes = [{"id": "1", "center": [520.0, 240.0]},
+             {"id": "2", "center": [320.0, 390.0]},
+             {"id": "3", "center": [120.0, 240.0]}]
     asset, draft = seed(
         store, tmp_path, assay="barnes", duration=60.0,
+        geometry={"arena": disk, "holes": holes},
         window={"start_s": 1.0, "end_s": 20.0},
-        unit_options={"hole_count": 20},
-        manual={"hole_sequence": [3, 7, 11], "entry": 7},
+        unit_options={"hole_count": 3, "target_hole": "1"},
+        manual={"hole_visits": []},
     )
+    monkeypatch.setattr(preview.media, "VideoSource", ClockSource)
     monkeypatch.setattr(preview.media, "read_frame_at_time",
                         lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
 
@@ -325,12 +332,19 @@ def test_manual_y_keeps_configured_window(client, store, tmp_path, monkeypatch):
 
 
 def test_manual_barnes_keeps_configured_window(client, store, tmp_path, monkeypatch):
+    disk = {"type": "ellipse", "center": [320.0, 240.0],
+            "radii": [200.0, 150.0], "angle": 0.0}
+    holes = [{"id": "1", "center": [520.0, 240.0]},
+             {"id": "2", "center": [320.0, 390.0]},
+             {"id": "3", "center": [120.0, 240.0]}]
     asset, draft = seed(
         store, tmp_path, assay="barnes", duration=60.0,
+        geometry={"arena": disk, "holes": holes},
         window={"start_s": 1.0, "end_s": 20.0},
-        unit_options={"hole_count": 20},
-        manual={"hole_sequence": [3, 7, 11], "entry": 7},
+        unit_options={"hole_count": 3, "target_hole": "1"},
+        manual={"hole_visits": []},
     )
+    monkeypatch.setattr(preview.media, "VideoSource", ClockSource)
     monkeypatch.setattr(preview.media, "read_frame_at_time",
                         lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
 

@@ -1202,10 +1202,34 @@
     if (state.assay === "nor") {
       norObjectShapes(unit).forEach((shape) => drawShape(shape, "#8ed7c7", 1.4, false));
     }
+    if (state.assay === "barnes") {
+      // 场地阶段同时看到圆盘外缘与按序编号的洞位，目标洞单独圈出。
+      ["arena", "holes"].forEach((key) => {
+        const context = stepShape(unit, key);
+        if (context) drawShape(context, "#8ed7c7", 1.4, false);
+      });
+      drawBarnesTarget(unit);
+    }
     const shape = stepShape(unit, state.stepKey);
     if (shape) drawShape(shape, "#ffd26f", 2.8, true);
     if (state.assay === "mwm") drawMwmGuides(unit);
     drawEditor();
+  }
+
+  function drawBarnesTarget(unit) {
+    const holes = stepShape(unit, "holes");
+    if (!holes) return;
+    const target = String(effectiveOption(unit, "target_hole", "1"));
+    const hole = (holes.holes || []).find((item) => String(item.id) === target);
+    if (!hole) return;
+    const point = toCss(hole.center);
+    ctx.save();
+    ctx.strokeStyle = "#ff6e46";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(point[0], point[1], 7, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
   }
 
   function drawMwmGuides(unit) {
@@ -1903,6 +1927,21 @@
     draw();
   }
 
+  // 目标洞只取 1…洞数 的洞号；洞数是参数，选择项随它变化。
+  function targetHoleChoices(unit, param) {
+    const raw = Number(effectiveOption(unit, "hole_count", 20));
+    const count = Number.isInteger(raw) && raw >= 2 && raw <= 100 ? raw : 20;
+    const choices = [];
+    for (let index = 1; index <= count; index += 1) {
+      choices.push({ value: String(index), label: "洞 " + index });
+    }
+    const current = String(effectiveOption(unit, param.key, param.default) ?? "");
+    if (current && !choices.some((choice) => choice.value === current)) {
+      choices.unshift({ value: current, label: "洞 " + current });
+    }
+    return choices;
+  }
+
   function parameterFields(unit) {
     const wrap = document.createElement("div");
     const params = (assaySpec() || {}).parameters || [];
@@ -1957,7 +1996,9 @@
     let input;
     if (param.type === "select") {
       input = document.createElement("select");
-      (param.choices || []).forEach((choice) => {
+      const choices = (state.assay === "barnes" && param.key === "target_hole")
+        ? targetHoleChoices(unit, param) : (param.choices || []);
+      choices.forEach((choice) => {
         const option = document.createElement("option");
         option.value = choice.value;
         option.textContent = choice.label;
