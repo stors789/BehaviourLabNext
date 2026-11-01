@@ -413,6 +413,12 @@ def create_preview(
             continue
         _draw_shape(canvas, shape, _bgr("#ffd26f"), thickness)
         drawn.append(key)
+    step_checker = getattr(module, "step_drawn", None)
+    if step_checker is not None:
+        # 步骤键可能不是顶层几何键（NOR 的物体存在 objects 数组里），
+        # 已绘制列表按同一步骤判定重算，顺序与画布一致。
+        drawn = [step["key"] for step in module.SPEC.get("geometry", [])
+                 if step_checker(geometry, step["key"])]
     _draw_guides(canvas, draft.get("assay", ""), unit.get("options") or {},
                  geometry, thickness)
 
@@ -438,9 +444,13 @@ def create_preview(
         raise ValidationError("无法保存预览图", "preview")
 
     steps = experiments.get(draft["assay"]).SPEC.get("geometry", [])
+    # 已绘制判定与画布、最终校验同源：NOR 的物体步骤落在 geometry.objects 里。
+    checker = getattr(module, "step_drawn", None)
     missing = [
         step["label"] for step in steps
-        if step.get("required") and step.get("key") not in geometry
+        if step.get("required") and not (
+            checker(geometry, step["key"]) if checker
+            else step.get("key") in geometry)
     ]
     warnings: list[str] = []
     if result is None:

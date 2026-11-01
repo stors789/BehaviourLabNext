@@ -2106,9 +2106,9 @@
         window.BLCore.norClear(unit.geometry, state.stepKey);
         markDirty();
         state.previewGate.invalidate();
-      } else if (result === "points") {
-        renderInspector();
       }
+      // 撤销点或撤销整段几何都要立刻同步侧栏的已绘制/缺失状态。
+      if (result) renderInspector();
       draw();
     });
     el.toolRedraw.addEventListener("click", () => {

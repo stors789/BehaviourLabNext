@@ -441,6 +441,29 @@ def validate_objects(geometry: Mapping[str, Any] | None, *,
     return issues
 
 
+def step_drawn(geometry: Mapping[str, Any] | None, key: str) -> bool:
+    """画布、预览与最终校验共用的“该步骤是否已绘制”判定。
+
+    物体步骤的落盘结构是 geometry.objects 数组，不是顶层 object1/object2，
+    因此必须按数组里对应的 center/zone 判断，不能只看顶层键是否存在。
+    """
+
+    geometry = geometry or {}
+    index = {"object1": 0, "object2": 1,
+             "explore1": 0, "explore2": 1}.get(key)
+    if index is not None:
+        entries = object_entries(geometry.get("objects")) or []
+        if len(entries) <= index:
+            return False
+        item = entries[index]
+        if not isinstance(item, Mapping):
+            return False
+        if key in ("object1", "object2"):
+            return _point(item.get("center")) is not None
+        return _zone_points(item.get("zone")) is not None
+    return geometry.get(key) is not None
+
+
 def objects_of(geometry: Mapping[str, Any]) -> list[dict]:
     """规范化后的两个物体（像素坐标）；缺字段按默认补全。"""
 

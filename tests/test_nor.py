@@ -572,7 +572,10 @@ def test_editor_output_saves_previews_and_analyzes(client, store, tmp_path,
         json={"asset_id": asset["id"], "unit_id": "e" * 32,
               "time_s": 1.5, "kind": "behavior"})
     assert behavior.status_code == 201, behavior.get_json()
-    assert behavior.get_json()["data"]["summary"]["behavior"]["mode"] == "nor"
+    behavior_data = behavior.get_json()["data"]
+    assert behavior_data["summary"]["behavior"]["mode"] == "nor"
+    assert behavior_data["summary"]["missing_steps"] == []
+    assert not any("尚未绘制" in text for text in behavior_data["warnings"])
 
     started = client.post(f"/api/drafts/{draft['id']}/analyze")
     assert started.status_code == 201, started.get_json()
@@ -628,3 +631,173 @@ def test_two_objects_near_still_explore_only_one():
     assert second["object_2_exploring"] is False
     assert facts["summary"]["total_object_exploration_s"] == pytest.approx(
         1.0, abs=TOL)
+
+
+def test_preview_missing_steps_follow_objects_array(client, store, tmp_path,
+                                                    monkeypatch):
+    """预览的缺失步骤必须按 objects 数组判断，不能查顶层 object1/object2。"""
+
+    from behaviourlab import preview
+    from behaviourlab.media import FrameInfo
+
+    arena = {"type": "quad",
+             "points": [[10.0, 10.0], [230.0, 10.0], [230.0, 230.0],
+                        [10.0, 230.0]]}
+    full = {"arena": arena, "objects": [
+        {"id": "object_1", "name": "物体 1", "role": "familiar",
+         "center": [120.0, 120.0], "zone": None},
+        {"id": "object_2", "name": "物体 2", "role": "novel",
+         "center": [200.0, 120.0], "zone": None}]}
+    source = tmp_path / "nor-preview.mp4"
+    source.write_bytes(b"placeholder")
+    asset = store.create_asset(
+        name="nor-preview.mp4", path=str(source), project_id=None,
+        metadata={"width": 240, "height": 240, "duration_s": 4.0,
+                  "fps": 10.0, "frame_count": 40})
+
+    def make(unit_geometry):
+        return store.create_draft("nor", videos=[{
+            "asset_id": asset["id"],
+            "window": {"start_s": 0.0, "end_s": 4.0},
+            "orientation": 0, "fps_override": None, "sample_fps": 10,
+            "units": [{"id": "p" * 32, "name": "NOR 鼠", "window": None,
+                       "geometry": dict(unit_geometry), "options": {},
+                       "detection": {}, "manual": None}],
+        }])
+
+    monkeypatch.setattr(
+        preview.media, "read_frame_at_time",
+        lambda *args, **kwargs: FrameInfo(
+            image=np.full((240, 240, 3), 255, dtype=np.uint8), index=15,
+            time_s=1.5, pts=None, time_base=None, clock_source="pts"))
+
+    draft = make(full)
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "p" * 32,
+              "time_s": 1.5, "kind": "detection"})
+    assert response.status_code == 201, response.get_json()
+    summary = response.get_json()["data"]["summary"]
+    assert summary["drawn_steps"] == ["arena", "object1", "object2"]
+    assert summary["missing_steps"] == []
+    assert not any("尚未绘制" in text
+                   for text in response.get_json()["data"]["warnings"])
+
+    # 只缺物体 2 中心时只报这一项，不牵连物体 1。
+    partial = {"arena": arena, "objects": [
+        dict(full["objects"][0]),
+        dict(full["objects"][1], center=None)]}
+    half = make(partial)
+    response = client.post(
+        f"/api/drafts/{half['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "p" * 32,
+              "time_s": 1.5, "kind": "detection"})
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    assert data["summary"]["drawn_steps"] == ["arena", "object1"]
+    assert data["summary"]["missing_steps"] == ["物体 2 中心"]
+    assert any("尚未绘制：物体 2 中心" == text for text in data["warnings"])
+
+    # 真正缺场地仍然要报，不因这次修复放宽。
+    assert [item["field"] for item in nor.validate_unit(
+        dict(nor.DEFAULTS), {"objects": full["objects"]},
+        complete=True)] == ["geometry.arena"]
+
+
+def test_preview_missing_steps_follow_objects_array(client, store, tmp_path,
+                                                    monkeypatch):
+    """预览的缺失步骤必须按 objects 数组判断，不能查顶层 object1/object2。"""
+
+    from behaviourlab import preview
+    from behaviourlab.media import FrameInfo
+
+    arena = {"type": "quad",
+             "points": [[10.0, 10.0], [230.0, 10.0], [230.0, 230.0],
+                        [10.0, 230.0]]}
+    full = {"arena": arena, "objects": [
+        {"id": "object_1", "name": "物体 1", "role": "familiar",
+         "center": [120.0, 120.0], "zone": None},
+        {"id": "object_2", "name": "物体 2", "role": "novel",
+         "center": [200.0, 120.0], "zone": None}]}
+    source = tmp_path / "nor-preview.mp4"
+    source.write_bytes(b"placeholder")
+    asset = store.create_asset(
+        name="nor-preview.mp4", path=str(source), project_id=None,
+        metadata={"width": 240, "height": 240, "duration_s": 4.0,
+                  "fps": 10.0, "frame_count": 40})
+
+    def make(unit_geometry):
+        return store.create_draft("nor", videos=[{
+            "asset_id": asset["id"],
+            "window": {"start_s": 0.0, "end_s": 4.0},
+            "orientation": 0, "fps_override": None, "sample_fps": 10,
+            "units": [{"id": "p" * 32, "name": "NOR 鼠", "window": None,
+                       "geometry": dict(unit_geometry), "options": {},
+                       "detection": {}, "manual": None}],
+        }])
+
+    monkeypatch.setattr(
+        preview.media, "read_frame_at_time",
+        lambda *args, **kwargs: FrameInfo(
+            image=np.full((240, 240, 3), 255, dtype=np.uint8), index=15,
+            time_s=1.5, pts=None, time_base=None, clock_source="pts"))
+
+    draft = make(full)
+    response = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "p" * 32,
+              "time_s": 1.5, "kind": "detection"})
+    assert response.status_code == 201, response.get_json()
+    summary = response.get_json()["data"]["summary"]
+    assert summary["drawn_steps"] == ["arena", "object1", "object2"]
+    assert summary["missing_steps"] == []
+    assert not any("尚未绘制" in text
+                   for text in response.get_json()["data"]["warnings"])
+
+    # 只缺物体 2 中心时只报这一项，不牵连物体 1。
+    partial = {"arena": arena, "objects": [
+        dict(full["objects"][0]),
+        dict(full["objects"][1], center=None)]}
+    half = make(partial)
+    response = client.post(
+        f"/api/drafts/{half['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "p" * 32,
+              "time_s": 1.5, "kind": "detection"})
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    assert data["summary"]["drawn_steps"] == ["arena", "object1"]
+    assert data["summary"]["missing_steps"] == ["物体 2 中心"]
+    assert any("尚未绘制：物体 2 中心" == text for text in data["warnings"])
+
+    # 真正缺场地仍然要报，不因这次修复放宽。
+    assert [item["field"] for item in nor.validate_unit(
+        dict(nor.DEFAULTS), {"objects": full["objects"]},
+        complete=True)] == ["geometry.arena"]
+
+
+def test_undo_refreshes_inspector_without_reload():
+    source = (Path(__file__).parent.parent
+              / "behaviourlab/web/static/workspace.js").read_text(
+                  encoding="utf-8")
+    block = source.split(
+        'el.toolUndo.addEventListener("click", () => {', 1)[1].split(
+            "\n    });", 1)[0]
+    # 撤销几何仍沿用"清除该步骤"的语义，并即时刷新侧栏与预览确认。
+    assert "window.BLCore.norClear(unit.geometry, state.stepKey)" in block
+    assert "state.previewGate.invalidate()" in block
+    assert "renderInspector()" in block
+    assert '} else if (result === "points") {' not in block
+
+
+def test_undo_refreshes_inspector_without_reload():
+    source = (Path(__file__).parent.parent
+              / "behaviourlab/web/static/workspace.js").read_text(
+                  encoding="utf-8")
+    block = source.split(
+        'el.toolUndo.addEventListener("click", () => {', 1)[1].split(
+            "\n    });", 1)[0]
+    # 撤销几何仍沿用"清除该步骤"的语义，并即时刷新侧栏与预览确认。
+    assert "window.BLCore.norClear(unit.geometry, state.stepKey)" in block
+    assert "state.previewGate.invalidate()" in block
+    assert "renderInspector()" in block
+    assert '} else if (result === "points") {' not in block

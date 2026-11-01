@@ -140,9 +140,38 @@ function unitsStaySeparate() {
     [null, null]);
 }
 
+function undoKeepsOtherFields() {
+  const geometry = {};
+  draw(geometry, "arena", [[20, 20], [220, 20], [220, 220], [20, 220]]);
+  draw(geometry, "object1", [[120, 120]]);
+  draw(geometry, "object2", [[200, 120]]);
+  draw(geometry, "explore1", [[100, 100], [140, 100], [140, 140], [100, 140]]);
+  norSetRole(geometry, 0, "novel", "recognition");
+
+  // 撤销物体 1 中心：只清该中心，角色/另一对象/探索范围都保留。
+  norClear(geometry, "object1");
+  assert.strictEqual(norShape(geometry, "object1"), null);
+  let objects = norObjects(geometry);
+  assert.strictEqual(objects[0].center, null);
+  assert.strictEqual(objects[0].role, "novel");
+  assert.ok(objects[0].zone);
+  assert.deepStrictEqual(objects[1].center, [200, 120]);
+  assert.ok(objects[1].zone === null);
+
+  // 重新单击中心即可恢复，其他字段不变。
+  draw(geometry, "object1", [[118, 116]]);
+  objects = norObjects(geometry);
+  assert.deepStrictEqual(objects[0].center, [118, 116]);
+  assert.strictEqual(objects[0].role, "novel");
+  assert.strictEqual(objects[0].zone.points.length, 4);
+  assert.deepStrictEqual(objects[1].center, [200, 120]);
+  assert.deepStrictEqual(Object.keys(geometry).sort(), ["arena", "objects"]);
+}
+
 const sample = objectFlow();
 roleSwitching();
 unitsStaySeparate();
+undoKeepsOtherFields();
 // 供 Python 侧核对：编辑产出的配置必须能被后端完整校验。
 console.log("nor-geometry " + JSON.stringify(sample));
 console.log("nor-editor OK");

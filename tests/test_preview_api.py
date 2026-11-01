@@ -151,8 +151,12 @@ def test_nor_object_point_preview_returns_png(client, store, tmp_path, monkeypat
     asset, draft = seed(store, tmp_path, assay="nor", geometry={
         "arena": {"type": "quad",
                   "points": [[20, 20], [300, 20], [300, 260], [20, 260]]},
-        "object1": {"type": "point", "points": [[100, 120]]},
-        "object2": {"type": "point", "points": [[300, 220]]},
+        "objects": [
+            {"id": "object_1", "name": "物体 1", "role": "familiar",
+             "center": [100, 120], "zone": None},
+            {"id": "object_2", "name": "物体 2", "role": "novel",
+             "center": [300, 220], "zone": None},
+        ],
     })
     monkeypatch.setattr(preview.media, "read_frame_info",
                         lambda *args, **kwargs: make_frame(index=12, time_s=0.48))
@@ -242,8 +246,12 @@ def test_nor_object_point_preview_returns_png(client, store, tmp_path, monkeypat
     asset, draft = seed(store, tmp_path, assay="nor", geometry={
         "arena": {"type": "quad",
                   "points": [[20, 20], [300, 20], [300, 260], [20, 260]]},
-        "object1": {"type": "point", "points": [[100, 120]]},
-        "object2": {"type": "point", "points": [[300, 220]]},
+        "objects": [
+            {"id": "object_1", "name": "物体 1", "role": "familiar",
+             "center": [100, 120], "zone": None},
+            {"id": "object_2", "name": "物体 2", "role": "novel",
+             "center": [300, 220], "zone": None},
+        ],
     })
     monkeypatch.setattr(preview.media, "read_frame_info",
                         lambda *args, **kwargs: make_frame(index=12, time_s=0.48))
