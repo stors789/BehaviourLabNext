@@ -1,8 +1,8 @@
-"""人工 Y 的源图标注视频：原始画面 + 实际源时间与人工入臂事件。
+"""叠画视频：源像素画面 + 每动物几何/位置/状态与已确认事件。
 
-只叠加可解释的文本（源秒、帧号、已记录事件），不做位置估计，不画固定鼠点、
-轨迹或热图。输出为浏览器可播的 H.264/MP4，按裁切后的真实曝光逐帧给时长
-（VFR），不把首尾短曝光补成完整帧。编码失败抛 OSError，由导出层如实报错。
+只重新解码原视频用于叠画，不重新检测或评分。每帧的显示时刻取事件
+``confirmed_s``（有限时），否则用 ``time_s`` 并标 Unconfirmed。时间轴按量化
+绝对相对端点写 PTS/duration，避免逐帧舍入累积。
 """
 
 from __future__ import annotations
@@ -11,17 +11,16 @@ import math
 import os
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import av
 
 from . import media
 
-ARM_KEYS = ("A", "B", "C")
-
-# 帧时间基：微秒。标注视频的时长与每帧持续时间都按这个单位取整。
 TIMEBASE = Fraction(1, 1_000_000)
 TIMEBASE_LABEL = "1/1000000"
+DECODE_TOLERANCE_S = 0.002
+QUANTIZE_TOLERANCE_S = 1e-6
 
 
 def _finite(value: Any) -> float | None:
@@ -49,43 +48,7 @@ def _ascii_label(text: Any) -> str:
     return value if value and value.isascii() else "unit"
 
 
-def _ordered_events(events: Sequence[Mapping[str, Any]]) -> list[dict]:
-    kept = []
-    for item in events or ():
-        if not isinstance(item, Mapping):
-            continue
-        if item.get("target") not in ARM_KEYS:
-            continue
-        moment = _finite(item.get("time_s"))
-        if moment is None:
-            continue
-        kept.append({"time_s": moment, "target": item["target"],
-                     "entry_index": item.get("entry_index")})
-    kept.sort(key=lambda entry: entry["time_s"])
-    return kept
-
-
-def _clipped_exposure(frame: Any, start: float, end: float) -> float | None:
-    """帧在分析窗内的真实正曝光时长；没有曝光信息时退回名义步长。"""
-
-    exposure_start = _finite(getattr(frame, "interval_start_s", None))
-    exposure_end = _finite(getattr(frame, "interval_end_s", None))
-    if exposure_start is None or exposure_end is None:
-        moment = _finite(getattr(frame, "time_s", None))
-        step = _finite(getattr(frame, "dt_s", None))
-        if moment is None or step is None or step <= 0:
-            return None
-        return step if start <= moment < end else None
-    low = max(exposure_start, start)
-    high = min(exposure_end, end)
-    if high - low <= 1e-12:
-        return None
-    return high - low
-
-
-def _even_size(canvas: Any) -> Any:
-    """H.264 的 yuv420p 需要偶数宽高；奇数边缘补 1 像素。"""
-
+def _even_canvas(canvas: Any) -> Any:
     import cv2
 
     height, width = canvas.shape[:2]
@@ -94,34 +57,6 @@ def _even_size(canvas: Any) -> Any:
     if not pad_h and not pad_w:
         return canvas
     return cv2.copyMakeBorder(canvas, 0, pad_h, 0, pad_w, cv2.BORDER_REPLICATE)
-
-
-def _open_writer(target: Path, width: int, height: int):
-    """打开 H.264/MP4 输出：浏览器与桌面 WebView 都能直接播放。"""
-
-    container = av.open(
-        str(target), "w", format="mp4",
-        options={"movflags": "+faststart"},
-    )
-    stream = container.add_stream("libx264", rate=None)
-    stream.width = width
-    stream.height = height
-    stream.pix_fmt = "yuv420p"
-    stream.time_base = TIMEBASE
-    stream.codec_context.time_base = TIMEBASE
-    stream.codec_context.options = {
-        "crf": "20", "preset": "veryfast", "bf": "0",
-        "profile": "main", "level": "4.0",
-    }
-    return container, stream
-
-
-def _mux(container: Any, packet: Any, queued: list[int]) -> None:
-    """按帧顺序补上每帧持续时间，保证容器总时长等于曝光之和。"""
-
-    if queued:
-        packet.duration = queued.pop(0)
-    container.mux(packet)
 
 
 def _to_bgr(image: Any):
@@ -136,132 +71,497 @@ def _to_bgr(image: Any):
     return image
 
 
-def _draw_label(canvas: Any, lines: Sequence[str]) -> Any:
-    """在画面左上叠一条半透明底栏，保持原画面内容不变。
+# -- 几何叠画 -------------------------------------------------------------
 
-    字号按画面宽度收缩，底栏高度按实际行高计算，保证文字完整可读不溢出。
-    """
+
+def _points(shape: Mapping[str, Any]) -> list[tuple[int, int]]:
+    raw = shape.get("points") or []
+    output = []
+    for item in raw:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            x, y = _finite(item[0]), _finite(item[1])
+            if x is not None and y is not None:
+                output.append((int(round(x)), int(round(y))))
+    return output
+
+
+def _draw_shape(canvas: Any, shape: Any, color: tuple[int, int, int],
+                thickness: int = 1) -> None:
+    import cv2
+
+    if not isinstance(shape, Mapping):
+        return
+    kind = shape.get("type")
+    if kind == "ellipse":
+        center = shape.get("center") or []
+        radii = shape.get("radii") or []
+        if len(center) < 2 or len(radii) < 2:
+            return
+        cx, cy = _finite(center[0]), _finite(center[1])
+        rx, ry = _finite(radii[0]), _finite(radii[1])
+        if None in (cx, cy, rx, ry) or rx <= 0 or ry <= 0:
+            return
+        cv2.ellipse(canvas, (int(round(cx)), int(round(cy))),
+                    (int(round(rx)), int(round(ry))),
+                    float(shape.get("angle") or 0.0), 0, 360, color,
+                    thickness, cv2.LINE_AA)
+        return
+    if kind == "circle":
+        center = shape.get("center") or []
+        radius = _finite(shape.get("radius"))
+        if len(center) < 2 or radius is None or radius <= 0:
+            return
+        cx, cy = _finite(center[0]), _finite(center[1])
+        if cx is None or cy is None:
+            return
+        cv2.circle(canvas, (int(round(cx)), int(round(cy))),
+                   int(round(radius)), color, thickness, cv2.LINE_AA)
+        return
+    points = _points(shape)
+    if kind == "point" and points:
+        x, y = points[0]
+        cv2.drawMarker(canvas, (x, y), color, cv2.MARKER_CROSS, 10,
+                       thickness, cv2.LINE_AA)
+        return
+    if len(points) >= 2:
+        array = __import__("numpy").array(points, dtype="int32")
+        closed = kind != "line"
+        cv2.polylines(canvas, [array], closed, color, thickness, cv2.LINE_AA)
+
+
+GEOMETRY_KEYS = ("arena", "body_line", "diameter_line", "waterline",
+                 "platform", "open_boundary")
+GEOMETRY_COLORS = {
+    "arena": (111, 210, 255),
+    "body_line": (246, 170, 82),
+    "diameter_line": (246, 170, 82),
+    "waterline": (200, 190, 120),
+    "platform": (180, 160, 240),
+    "open_boundary": (255, 210, 111),
+}
+
+
+def _draw_geometry(canvas: Any, geometry: Mapping[str, Any],
+                   thickness: int) -> None:
+    for key in GEOMETRY_KEYS:
+        _draw_shape(canvas, geometry.get(key), GEOMETRY_COLORS[key], thickness)
+    zones = geometry.get("zones")
+    if isinstance(zones, Mapping):
+        for value in zones.values():
+            _draw_shape(canvas, value, (196, 168, 96), thickness)
+    elif isinstance(zones, list):
+        for value in zones:
+            _draw_shape(canvas, value, (196, 168, 96), thickness)
+    objects = geometry.get("objects")
+    if isinstance(objects, list):
+        for item in objects:
+            if not isinstance(item, Mapping):
+                continue
+            _draw_shape(canvas, item.get("zone"), (196, 168, 96), thickness)
+            center = item.get("center")
+            if isinstance(center, (list, tuple)) and len(center) >= 2:
+                x, y = _finite(center[0]), _finite(center[1])
+                if x is not None and y is not None:
+                    import cv2
+
+                    cv2.circle(canvas, (int(round(x)), int(round(y))), 4,
+                               (196, 168, 96), thickness, cv2.LINE_AA)
+    holes = geometry.get("holes")
+    if isinstance(holes, list):
+        for item in holes:
+            if isinstance(item, Mapping):
+                _draw_shape(canvas, item, (196, 168, 96), thickness)
+
+
+def _draw_label(canvas: Any, lines: Sequence[str]) -> Any:
+    """左上角半透明底栏：源时间、帧号、动物状态与事件。"""
 
     import cv2
 
+    lines = [line for line in lines if line]
+    if not lines:
+        return canvas
     height, width = canvas.shape[:2]
     font = cv2.FONT_HERSHEY_SIMPLEX
-    thickness = 1
-    scale = max(0.3, min(0.6, width / 700.0))
-    sizes = [cv2.getTextSize(text, font, scale, thickness)[0] for text in lines]
-    widest = max(size[0] for size in sizes) if sizes else 0
+    scale = max(0.3, min(0.55, width / 720.0))
+    sizes = [cv2.getTextSize(text, font, scale, 1)[0] for text in lines]
+    widest = max(size[0] for size in sizes)
     limit = max(20, width - 20)
     if widest > limit:
         scale *= limit / widest
-        sizes = [cv2.getTextSize(text, font, scale, thickness)[0]
-                 for text in lines]
-    line_height = max((size[1] for size in sizes), default=10) + 6
+        sizes = [cv2.getTextSize(text, font, scale, 1)[0] for text in lines]
+    line_height = max(size[1] for size in sizes) + 6
     band = min(height, 8 + line_height * len(lines))
     overlay = canvas.copy()
     cv2.rectangle(overlay, (0, 0), (width, band), (25, 25, 25), -1)
-    cv2.addWeighted(overlay, 0.65, canvas, 0.35, 0.0, canvas)
+    cv2.addWeighted(overlay, 0.62, canvas, 0.38, 0.0, canvas)
     y = 5
     for text in lines:
         y += line_height
-        cv2.putText(canvas, text, (10, y - 4), font, scale,
-                    (246, 246, 246), thickness, cv2.LINE_AA)
+        cv2.putText(canvas, text, (10, y - 4), font, scale, (246, 246, 246),
+                    1, cv2.LINE_AA)
     return canvas
 
 
-def write_manual_y_video(path: str | Path, *, job: Mapping[str, Any],
-                         summary: Mapping[str, Any],
-                         events: Sequence[Mapping[str, Any]]
-                         ) -> tuple[int, float]:
-    """按单位分析窗写标注视频；返回 (帧数, 总时长秒)。"""
+# -- 时间轴 ---------------------------------------------------------------
+
+
+def _unit_windows(units: Sequence[Mapping[str, Any]]) -> list[dict]:
+    prepared = []
+    for unit in units:
+        start = _finite(unit.get("window_start_s"))
+        end = _finite(unit.get("window_end_s"))
+        if start is None:
+            continue
+        prepared.append({
+            "unit_id": unit.get("unit_id"),
+            "unit_name": unit.get("unit_name"),
+            "start": float(start),
+            "end": float(end) if end is not None else math.inf,
+            "geometry": unit.get("geometry") or {},
+            "manual": bool(unit.get("manual")),
+            "observations": list(unit.get("observations") or []),
+            "suppress_positions": bool(unit.get("suppress_positions")),
+        })
+    return prepared
+
+
+def _display_time(event: Mapping[str, Any]) -> tuple[float | None, bool]:
+    """事件显示时刻：confirmed_s 优先，否则 time_s 且未确认。"""
+
+    confirmed = _finite(event.get("confirmed_s"))
+    if confirmed is not None:
+        return confirmed, True
+    moment = _finite(event.get("time_s"))
+    return moment, False
+
+
+def _segment_bounds(frames: Sequence[Mapping[str, Any]],
+                    units: Sequence[Mapping[str, Any]],
+                    events: Sequence[Mapping[str, Any]]) -> list[float]:
+    points: set[float] = set()
+    for frame in frames:
+        points.add(float(frame["start"]))
+        points.add(float(frame["end"]))
+    for unit in units:
+        points.add(float(unit["start"]))
+        points.add(float(unit["end"]))
+    for event in events:
+        moment = event.get("display_s")
+        if moment is not None:
+            points.add(float(moment))
+    return sorted(points)
+
+
+def _split(start: float, end: float, points: Sequence[float]) -> list[tuple]:
+    cuts = [start]
+    for point in points:
+        if start + 1e-9 < point < end - 1e-9:
+            cuts.append(point)
+    cuts.append(end)
+    return [(cuts[index], cuts[index + 1])
+            for index in range(len(cuts) - 1)
+            if cuts[index + 1] - cuts[index] > 1e-12]
+
+
+def _active_units(units: Sequence[Mapping[str, Any]], start: float,
+                  end: float) -> list[Mapping[str, Any]]:
+    middle = (start + end) / 2.0
+    return [unit for unit in units
+            if unit["start"] - 1e-9 <= middle < unit["end"] - 1e-9]
+
+
+def _trajectory(unit: Mapping[str, Any], upto: float) -> list[tuple[int, int]]:
+    """按完成段逐步延长：只连相邻有效位置，不跨缺失。"""
+
+    if unit.get("suppress_positions") or unit.get("manual"):
+        return []
+    points: list[tuple[int, int]] = []
+    previous_ok = False
+    for row in unit.get("observations") or []:
+        moment = _finite(row.get("time_s"))
+        if moment is None or moment > upto + 1e-9:
+            break
+        if row.get("position_valid") is False or row.get("jump"):
+            previous_ok = False
+            continue
+        x, y = _finite(row.get("x_px")), _finite(row.get("y_px"))
+        if x is None or y is None:
+            previous_ok = False
+            continue
+        if not previous_ok:
+            # 段起点：先放一个孤点，下一帧才连线，避免补出不存在的路径。
+            points.append((int(round(x)), int(round(y))))
+            previous_ok = True
+            continue
+        points.append((int(round(x)), int(round(y))))
+    return points
+
+
+def _body_point(unit: Mapping[str, Any], upto: float) -> tuple[int, int] | None:
+    best = None
+    for row in unit.get("observations") or []:
+        moment = _finite(row.get("time_s"))
+        if moment is None or moment > upto + 1e-9:
+            break
+        best = row
+    if best is None:
+        return None
+    x, y = _finite(best.get("x_px")), _finite(best.get("y_px"))
+    if x is None or y is None:
+        return None
+    return int(round(x)), int(round(y))
+
+
+def _row_state(row: Mapping[str, Any] | None) -> str:
+    if not row:
+        return "missing"
+    for key in ("state", "zone"):
+        value = row.get(key)
+        if isinstance(value, str) and value:
+            return value
+    if row.get("detected") is False:
+        return "missing"
+    return "detected"
+
+
+# -- 编码 ---------------------------------------------------------------
+
+
+def _open_writer(target: Path, width: int, height: int, fps: float | None):
+    container = av.open(str(target), "w", format="mp4",
+                        options={"movflags": "+faststart"})
+    rate = Fraction(str(fps)).limit_denominator(1001) if fps else None
+    stream = container.add_stream("libx264", rate=rate)
+    stream.width = width
+    stream.height = height
+    stream.pix_fmt = "yuv420p"
+    stream.time_base = TIMEBASE
+    stream.codec_context.time_base = TIMEBASE
+    stream.codec_context.options = {
+        "crf": "20", "preset": "veryfast", "bf": "0",
+        "profile": "main", "level": "4.0",
+    }
+    return container, stream
+
+
+def _mux(container: Any, packet: Any, queued: list[int]) -> None:
+    """按帧顺序补上该帧的持续时间（无 B 帧时包序与帧序一致）。"""
+
+    if queued:
+        packet.duration = queued.pop(0)
+    container.mux(packet)
+
+
+def _ticks(seconds: float) -> int:
+    return int(round(seconds * TIMEBASE.denominator))
+
+
+def verify_video(path: str | Path, expected: Sequence[tuple[int, int]]
+                 ) -> list[str]:
+    """重新解码逐帧核对数量、PTS 与 duration（容差 0.002 秒）。"""
+
+    issues: list[str] = []
+    try:
+        with av.open(str(path)) as container:
+            stream = container.streams.video[0]
+            time_base = stream.time_base or TIMEBASE
+            decoded = list(container.decode(stream))
+            scale = float(time_base) / float(TIMEBASE)
+    except Exception as error:  # 解码失败同样是验证失败
+        return [f"无法解码输出视频：{error}"]
+    if len(decoded) != len(expected):
+        issues.append(f"帧数不一致：期望 {len(expected)}，实际 {len(decoded)}")
+    for index, frame in enumerate(decoded):
+        if index >= len(expected):
+            break
+        want_pts, want_duration = expected[index]
+        if frame.pts is None:
+            issues.append(f"帧 {index} 缺少 PTS")
+            continue
+        pts_s = float(frame.pts) * scale / TIMEBASE.denominator
+        want_s = want_pts / TIMEBASE.denominator
+        if abs(pts_s - want_s) > DECODE_TOLERANCE_S:
+            issues.append(f"帧 {index} PTS 偏差 {pts_s - want_s:+.4f}s")
+        if frame.duration:
+            duration_s = float(frame.duration) * scale / TIMEBASE.denominator
+            want_duration_s = want_duration / TIMEBASE.denominator
+            if abs(duration_s - want_duration_s) > DECODE_TOLERANCE_S:
+                issues.append(
+                    f"帧 {index} 时长偏差 {duration_s - want_duration_s:+.4f}s")
+        else:
+            issues.append(f"帧 {index} 缺少时长")
+    return issues
+
+
+def write_run_video(path: str | Path, *, job: Mapping[str, Any],
+                    units: Sequence[Mapping[str, Any]],
+                    events: Sequence[Mapping[str, Any]] = (),
+                    cancel: Callable[[], bool] | None = None
+                    ) -> tuple[int, float]:
+    """按 run 的源窗口写叠画视频；返回 (帧数, 总时长秒)。"""
 
     asset = job.get("asset") or {}
     source_path = asset.get("path")
     if not isinstance(source_path, str) or not source_path:
-        raise OSError("标注视频缺少源文件路径")
+        raise OSError("叠画视频缺少源文件路径")
     metadata = asset.get("metadata") or {}
-    video_window = job.get("window") or {}
-    start = _finite(summary.get("analysis_window_start_s"))
-    if start is None:
-        start = _finite(video_window.get("start_s")) or 0.0
-    end = _finite(summary.get("analysis_window_end_s"))
-    if end is None:
-        end = _finite(video_window.get("end_s"))
-
-    source = media.VideoSource(
-        source_path,
-        start_s=float(start),
-        end_s=float(end) if end is not None else None,
-        orientation=int(job.get("orientation", 0) or 0),
-        fps_override=job.get("fps_override"),
-        sample_fps=None,
-        source_fps=metadata.get("fps"),
-        decode_images=True,
-    )
-
-    label = _ascii_label(summary.get("unit_name"))
-    ordered = _ordered_events(events)
+    window = job.get("window") or {}
+    start = _finite(window.get("start_s")) or 0.0
+    end = _finite(window.get("end_s"))
+    orientation = int(job.get("orientation", 0) or 0)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+
+    prepared_units = _unit_windows(units)
+    prepared_events = []
+    for event in events or ():
+        if not isinstance(event, Mapping):
+            continue
+        moment, confirmed = _display_time(event)
+        if moment is None:
+            continue
+        prepared_events.append({
+            "display_s": float(moment),
+            "confirmed": confirmed,
+            "target": event.get("target"),
+            "kind": event.get("kind"),
+            "unit_id": event.get("unit_id"),
+        })
+    prepared_events.sort(key=lambda item: item["display_s"])
+
+    def build_source(decode: bool) -> media.VideoSource:
+        return media.VideoSource(
+            source_path,
+            start_s=float(start),
+            end_s=float(end) if end is not None else None,
+            orientation=orientation,
+            fps_override=job.get("fps_override"),
+            sample_fps=None,
+            source_fps=metadata.get("fps"),
+            decode_images=decode,
+        )
+
     window_start = float(start)
     window_end = float(end) if end is not None else math.inf
 
+    def clipped(frame: Any) -> tuple[float, float] | None:
+        """只保留与该视频窗有正交叠的曝光；两端各自裁剪。"""
+
+        low = _finite(frame.interval_start_s)
+        high = _finite(frame.interval_end_s)
+        if low is None or high is None:
+            return None
+        low = max(float(low), window_start)
+        high = min(float(high), window_end)
+        if high - low <= 1e-12:
+            return None
+        return low, high
+
+    # 第一遍只取时间事实（不解码像素），得到每帧的正曝光区间。
+    timing: list[dict] = []
+    timing_source = build_source(False)
+    try:
+        for frame in timing_source.iter_frames():
+            bounds_pair = clipped(frame)
+            if bounds_pair is None:
+                continue
+            timing.append({"index": int(frame.index),
+                           "start": bounds_pair[0], "end": bounds_pair[1],
+                           "time_s": float(frame.time_s)})
+    finally:
+        timing_source.coverage = {"start_s": None, "end_s": None,
+                                  "duration_s": 0.0, "frame_count": 0}
+    if not timing:
+        raise OSError("分析范围内没有可写入的源帧，未生成标注视频")
+    first_start = timing[0]["start"]
+    bounds = _segment_bounds(timing, prepared_units, prepared_events)
+
     container = None
     stream = None
-    queued: list[int] = []
-    cursor = 0
-    sequence: list[str] = []
-    current: dict | None = None
     written = 0
-    # 累计真实曝光（秒）与已量化端点：每帧 duration 用相邻端点之差，
-    # 不把逐帧取整后的 ticks 相加，避免误差累积。
-    elapsed = 0.0
-    start_ticks = 0
-    end_ticks = 0
-    last_ticks = 0
+    durations: dict[int, int] = {}
+    queued: list[int] = []
+    expected: list[tuple[int, int]] = []
     try:
-        for frame in source.iter_frames():
-            canvas = _to_bgr(frame.image)
-            if canvas is None:
-                continue
-            moment = _finite(frame.time_s)
-            if moment is None:
-                continue
-            # 只收分析窗内的真实正曝光；窗口两端的零曝光上下文帧不进入视频。
-            duration = _clipped_exposure(frame, window_start, window_end)
-            if duration is None:
-                continue
-            while cursor < len(ordered) and ordered[cursor]["time_s"] <= moment + 1e-9:
-                current = ordered[cursor]
-                sequence.append(str(current["target"]))
-                cursor += 1
-            lines = [f"{label}  manual  t={clock_text(moment)}  frame={frame.index}"]
-            lines.append(f"entries={len(sequence)}  sequence="
-                         + ("-".join(sequence[-8:]) if sequence else "-"))
-            lines.append(
-                f"entry #{current['entry_index']} {current['target']} at "
-                f"{clock_text(current['time_s'])}"
-                if current else "entry -")
-            canvas = _even_size(_draw_label(canvas, lines))
-            if container is None:
-                container, stream = _open_writer(target, canvas.shape[1],
-                                                 canvas.shape[0])
-            video_frame = av.VideoFrame.from_ndarray(canvas, format="bgr24")
-            elapsed += duration
-            end_ticks = int(round(elapsed * TIMEBASE.denominator))
-            ticks = max(1, end_ticks - start_ticks)
-            video_frame.pts = start_ticks
-            video_frame.time_base = TIMEBASE
-            queued.append(ticks)
-            for packet in stream.encode(video_frame):
-                _mux(container, packet, queued)
-            start_ticks = end_ticks
-            last_ticks = ticks
-            written += 1
+        decode_source = build_source(True)
+        try:
+            for frame in decode_source.iter_frames():
+                if cancel is not None and cancel():
+                    raise OSError("叠画视频已取消")
+                canvas_base = _to_bgr(frame.image)
+                if canvas_base is None:
+                    continue
+                bounds_pair = clipped(frame)
+                if bounds_pair is None:
+                    continue
+                low, high = bounds_pair
+                for clip_start, clip_end in _split(low, high, bounds):
+                    canvas = canvas_base.copy()
+                    thickness = max(1, int(round(min(canvas.shape[:2]) / 320)))
+                    lines = [f"t={clock_text(clip_start)}  frame={frame.index}"]
+                    for unit in _active_units(prepared_units, clip_start, clip_end):
+                        _draw_geometry(canvas, unit["geometry"], thickness)
+                        path_points = _trajectory(unit, clip_end)
+                        if len(path_points) >= 2:
+                            import cv2
+                            import numpy as np
+
+                            cv2.polylines(canvas, [np.array(path_points, "int32")],
+                                          False, (95, 98, 184), thickness,
+                                          cv2.LINE_AA)
+                        point = _body_point(unit, clip_end)
+                        row = None
+                        for item in unit.get("observations") or []:
+                            moment = _finite(item.get("time_s"))
+                            if moment is None or moment > clip_end + 1e-9:
+                                break
+                            row = item
+                        if point is not None:
+                            import cv2
+
+                            cv2.circle(canvas, point, 4 + thickness,
+                                       (78, 104, 22), -1, cv2.LINE_AA)
+                        lines.append(
+                            f"{_ascii_label(unit.get('unit_name'))} "
+                            f"{_row_state(row)}")
+                    for event in prepared_events:
+                        if event["display_s"] > clip_start + 1e-9:
+                            continue
+                        label = "Confirmed" if event["confirmed"] else "Unconfirmed"
+                        lines.append(f"{label} {event.get('kind') or 'event'} "
+                                     f"{event.get('target') or ''}".strip())
+                    canvas = _draw_label(canvas, lines)
+                    canvas = _even_canvas(canvas)
+                    if container is None:
+                        fps = _finite(metadata.get("fps")) or 25.0
+                        container, stream = _open_writer(target,
+                                                         canvas.shape[1],
+                                                         canvas.shape[0], fps)
+                    video_frame = av.VideoFrame.from_ndarray(canvas,
+                                                             format="bgr24")
+                    pts = _ticks(clip_start - first_start)
+                    end_ticks = _ticks(clip_end - first_start)
+                    if end_ticks <= pts:
+                        end_ticks = pts + 1
+                    video_frame.pts = pts
+                    video_frame.time_base = TIMEBASE
+                    duration_ticks = end_ticks - pts
+                    durations[pts] = duration_ticks
+                    expected.append((pts, duration_ticks))
+                    queued.append(duration_ticks)
+                    for packet in stream.encode(video_frame):
+                        _mux(container, packet, queued)
+                    written += 1
+        finally:
+            decode_source.coverage = {"start_s": None, "end_s": None,
+                                      "duration_s": 0.0, "frame_count": 0}
         if container is None:
             raise OSError("分析范围内没有可写入的源帧，未生成标注视频")
+        tail = expected[-1][1] if expected else 0
+        if not queued:
+            queued.append(tail)
         for packet in stream.encode(None):
-            if not queued:
-                queued.append(last_ticks)
             _mux(container, packet, queued)
         container.close()
         container = None
@@ -278,13 +578,32 @@ def write_manual_y_video(path: str | Path, *, job: Mapping[str, Any],
             pass
         if isinstance(error, OSError):
             raise
-        # 编码/写入失败统一变成明确的输出失败，交给导出层标 error。
         raise OSError(f"标注视频编码失败：{error}") from error
 
-    if not written:
+    issues = verify_video(target, expected)
+    if issues:
         try:
             os.unlink(target)
         except OSError:
             pass
-        raise OSError("分析范围内没有可写入的源帧，未生成标注视频")
-    return written, end_ticks / TIMEBASE.denominator
+        raise OSError("叠画视频校验失败：" + "；".join(issues))
+    total = float(_ticks(timing[-1]["end"] - first_start)) / TIMEBASE.denominator
+    return written, total
+
+
+def write_manual_y_video(path: str | Path, *, job: Mapping[str, Any],
+                         summary: Mapping[str, Any],
+                         events: Sequence[Mapping[str, Any]]
+                         ) -> tuple[int, float]:
+    """纯人工 Y 的兼容入口：同一实现，位置层由单位设置抑制。"""
+
+    unit = {
+        "unit_id": summary.get("unit_id"),
+        "unit_name": summary.get("unit_name"),
+        "window_start_s": summary.get("analysis_window_start_s"),
+        "window_end_s": summary.get("analysis_window_end_s"),
+        "geometry": {},
+        "manual": True,
+        "observations": [],
+    }
+    return write_run_video(path, job=job, units=[unit], events=events)

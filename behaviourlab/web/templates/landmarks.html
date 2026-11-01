@@ -1,13 +1,148 @@
 {% extends "base.html" %}
-{% block title %}关键点 · {{ app_name }}{% endblock %}
+{% block title %}经典关键点验证 · {{ app_name }}{% endblock %}
 
 {% block content %}
 <div class="section-head page-head">
-  <h1>关键点</h1>
+  <div>
+    <a class="crumb" href="/settings">设置</a>
+    <h1>经典关键点验证</h1>
+  </div>
+  <span class="meta">只读源视频，不修改任何实验结果</span>
 </div>
 
-<div class="empty-state">
-  <p>经典关键点验证将在后续块接入。</p>
-  <a class="button" href="/">返回首页</a>
-</div>
+<section class="panel" data-landmark-new>
+  <div class="section-head">
+    <h2>新建会话</h2>
+    <span class="form-note" role="status" data-new-note></span>
+  </div>
+  {% if media %}
+  <form class="form" id="landmark-form" autocomplete="off">
+    <div class="field-row">
+      <label class="field grow">
+        <span>视频与动物</span>
+        <select name="unit" id="landmark-unit">
+          {% for item in media %}
+          {% for unit in item.units %}
+          <option value="{{ unit.id }}"
+                  data-asset="{{ item.asset.id }}"
+                  data-assay="{{ unit.assay }}"
+                  data-name="{{ unit.name }}"
+                  data-geometry='{{ unit.geometry | tojson }}'
+                  data-options='{{ unit.options | tojson }}'
+                  data-detection='{{ unit.detection | tojson }}'>
+            {{ item.asset.name }} · {{ unit.name }} · {{ unit.assay | upper }}
+          </option>
+          {% endfor %}
+          {% endfor %}
+        </select>
+      </label>
+      <label class="field">
+        <span>源帧（逗号分隔）</span>
+        <input type="text" id="landmark-frames" value="0" size="16">
+      </label>
+      <label class="field">
+        <span>容差（px）</span>
+        <input type="number" id="landmark-tolerance" value="10" min="0.1" step="0.1">
+      </label>
+    </div>
+    <div class="form-actions">
+      <span class="form-error" role="alert" data-new-error></span>
+      <button class="button primary" type="submit">新建会话</button>
+    </div>
+  </form>
+  {% else %}
+  <div class="empty-state">
+    <p>还没有带场地几何的草稿。</p>
+    <p class="muted">先在分析工作台画好场地，再回来做关键点验证。</p>
+  </div>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <div class="section-head">
+    <h2>已有会话</h2>
+    <span class="meta" data-session-count>{{ sessions | length }}</span>
+  </div>
+  {% if sessions %}
+  <ul class="plain-list" data-session-list>
+    {% for session in sessions %}
+    <li>
+      <span>{{ session.asset_name or session.asset_id }} · {{ session.assay | upper }} ·
+        {{ session.frames | length }} 帧 · 容差 {{ session.tolerance_px }} px</span>
+      <button class="button small" type="button"
+              data-open-session="{{ session.id }}">继续</button>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted" data-empty-sessions>还没有关键点会话；先在上方新建一个。</p>
+  {% endif %}
+</section>
+
+<section class="landmark-workbench" id="landmark-workbench" hidden>
+  <div class="landmark-stage">
+    <div class="tool-head">
+      <label class="field inline">
+        <span>源帧</span>
+        <select id="landmark-frame"></select>
+      </label>
+      <label class="field inline">
+        <span>点</span>
+        <select id="landmark-point">
+          <option value="body">身体中心</option>
+          <option value="nose">鼻尖</option>
+          <option value="tail">尾根</option>
+          <option value="left_ear">左耳</option>
+          <option value="right_ear">右耳</option>
+        </select>
+      </label>
+      <span class="tool-spacer"></span>
+      <span class="meta" id="landmark-frame-note"></span>
+    </div>
+    <div class="canvas-wrap">
+      <canvas id="landmark-canvas" aria-label="关键点标注画布"></canvas>
+      <p class="muted canvas-empty" id="landmark-canvas-empty">选择会话后载入源帧。</p>
+    </div>
+    <div class="legend">
+      <span><i class="legend-dot"></i>人工标注</span>
+      <span><i class="legend-box"></i>当前预测</span>
+      <span class="muted" id="landmark-supported"></span>
+    </div>
+  </div>
+
+  <aside class="landmark-tools panel">
+    <div class="field-stack">
+      <label class="field inline">
+        <span>容差（px）</span>
+        <input type="number" id="tool-tolerance" min="0.1" step="0.1">
+      </label>
+      <div class="form-actions">
+        <button class="button small" type="button" id="tool-visible">标为可见</button>
+        <button class="button small" type="button" id="tool-invisible">标为不可见</button>
+        <button class="button small" type="button" id="tool-clear">清除当前点</button>
+      </div>
+      <div class="form-actions">
+        <button class="button" type="button" id="tool-save">保存标注</button>
+        <button class="button primary" type="button" id="tool-verify">保存并验证</button>
+      </div>
+      <p class="form-error" role="alert" id="tool-error"></p>
+      <p class="muted" id="tool-status"></p>
+      <div class="evaluation" id="evaluation-box" hidden>
+        <table class="simple-table">
+          <thead>
+            <tr><th>点</th><th>可见</th><th>覆盖</th><th>覆盖比例</th>
+              <th>容差内</th><th>中位 px</th><th>P90 px</th></tr>
+          </thead>
+          <tbody id="evaluation-body"></tbody>
+        </table>
+        <p class="muted" id="evaluation-note"></p>
+      </div>
+    </div>
+  </aside>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script id="landmark-media" type="application/json">{{ media | tojson }}</script>
+<script src="{{ url_for('static', filename='landmarks.js') }}" defer></script>
 {% endblock %}

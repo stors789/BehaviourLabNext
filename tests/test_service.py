@@ -234,7 +234,9 @@ def test_service_chooses_free_port(tmp_path):
     assert service.port > 0
 
 
-def test_stop_callback_failure_still_closes_and_releases(tmp_path):
+def test_stop_callback_failure_keeps_owner_until_complete(tmp_path):
+    """关闭回调失败=尚未完成：继续关闭资源，但不提前释放数据根所有权。"""
+
     events: list[str] = []
 
     def broken_callback() -> None:
@@ -247,9 +249,9 @@ def test_stop_callback_failure_still_closes_and_releases(tmp_path):
     service.start()
     service.stop()
 
-    assert events == ["after"]
+    assert events == ["after"], "一个回调失败不能跳过其余收尾"
     assert server.closed is True
-    assert not (paths.logs / "job_owner.json").exists()
+    assert (paths.logs / "job_owner.json").exists(), "未完成关闭不能放锁"
 
 
 def test_startup_log_preserves_original_error(tmp_path):

@@ -21,7 +21,7 @@ def seed(store, tmp_path, *, geometry=None, options=None):
         metadata={"width": 200, "height": 200, "duration_s": 1.0,
                   "fps": 10.0, "frame_count": 10},
     )
-    draft = store.create_draft("tst", videos=[{
+    draft = store.create_draft("tst", output={"annotated_video": False}, videos=[{
         "asset_id": asset["id"],
         "window": {"start_s": 0.0, "end_s": 1.0},
         "orientation": 0, "fps_override": None, "sample_fps": None,

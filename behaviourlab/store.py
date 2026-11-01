@@ -240,9 +240,33 @@ def _storage_log_candidates(paths: DataPaths) -> tuple[Path, Path]:
     return primary, fallback
 
 
-def storage_log_path(paths: DataPaths) -> Path:
-    """存储失败日志的位置；主目录不可创建/打开时给出回退路径。"""
+# 每个数据根最近一次真正写成诊断的位置；health 据此报告，而不是猜候选。
+_LAST_LOG_TARGET: dict[str, Path] = {}
 
+
+def _root_key(paths: DataPaths) -> str:
+    try:
+        return str(Path(paths.root).resolve())
+    except OSError:
+        return str(paths.root)
+
+
+def record_log_target(paths: DataPaths, target: Path) -> None:
+    """登记某数据根最近一次成功写入的诊断文件。"""
+
+    _LAST_LOG_TARGET[_root_key(paths)] = Path(target)
+
+
+def storage_log_path(paths: DataPaths) -> Path:
+    """对外可见的日志路径：优先最近真正写成的文件，否则给可写候选。"""
+
+    recorded = _LAST_LOG_TARGET.get(_root_key(paths))
+    if recorded is not None:
+        try:
+            if recorded.is_file() and recorded.stat().st_size > 0:
+                return recorded
+        except OSError:
+            pass
     primary, fallback = _storage_log_candidates(paths)
     try:
         primary.parent.mkdir(parents=True, exist_ok=True)
@@ -305,6 +329,7 @@ def log_storage_failure(paths: DataPaths, phase: str, error: BaseException,
             failures.append(f"{target}: {write_error}")
             continue
         written = target
+        record_log_target(paths, written)
         break
 
     if written is None:

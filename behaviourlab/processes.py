@@ -291,15 +291,37 @@ class JobObject:
 
 
 class ManagedProcess:
-    """已关联 Job Object 的子进程；停止时先终止进程树。"""
+    """已关联 Job Object 的子进程；调度器用同一套接口轮询与收尾。
+
+    ``poll``/``wait`` 与 ``subprocess.Popen`` 一致；``release`` 在正常运行
+    结束时关闭自己的 Job Object（幂等），``stop`` 先终止进程树再释放。
+    """
 
     def __init__(self, process: subprocess.Popen, job: JobObject) -> None:
         self.process = process
         self.job = job
+        self._released = False
 
     @property
     def pid(self) -> int:
         return self.process.pid
+
+    def poll(self) -> int | None:
+        return self.process.poll()
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.process.wait(timeout=timeout)
+
+    def release(self) -> None:
+        """正常结束：只关闭本对象句柄，重复调用安全。"""
+
+        if self._released:
+            return
+        self._released = True
+        try:
+            self.job.close()
+        except Exception:  # 句柄已关或系统拒绝都不影响收尾
+            pass
 
     def stop(self, timeout_s: float = 3.0) -> None:
         try:
@@ -313,7 +335,7 @@ class ManagedProcess:
                 except subprocess.TimeoutExpired:
                     pass
         finally:
-            self.job.close()
+            self.release()
 
 
 def spawn_managed(command: list[str] | str, **kwargs) -> ManagedProcess:

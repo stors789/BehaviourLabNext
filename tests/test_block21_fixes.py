@@ -508,3 +508,233 @@ def test_settings_async_callbacks_belong_to_their_snapshot():
 
 def test_public_request_wrapper_distinguishes_form_data():
     _run_node("test_app_request.cjs", "app-request OK")
+
+
+# -- 收尾两点：解析形状分工与 health 日志路径 ----------------------------
+
+
+def test_defaults_stay_keyed_by_assay_while_detection_is_flat():
+    """defaults 仍按实验名取一层；detection 直接是当前实验对象。"""
+
+    resolved = resolve_job("oft", settings={
+        "defaults": {"oft": {"arena_width_cm": 33}},
+        "detection": {"gray_threshold": 110},
+    })
+    assert resolved["options"]["arena_width_cm"] == 33
+    assert "oft" not in resolved["options"], "默认值不能把实验名当参数塞进 options"
+    assert resolved["detection"]["gray_threshold"] == 110
+
+    # 另一个实验不会被 oft 的默认值影响。
+    other = resolve_job("tst", settings={
+        "defaults": {"oft": {"arena_width_cm": 33}},
+        "detection": {"gray_threshold": 110},
+    })
+    assert other["options"]["flow_thr_hi"] == 50.0
+
+
+def test_service_snapshot_matches_both_contract_shapes(sandbox):
+    store, client = sandbox
+    client.put("/api/settings/defaults",
+               json={"value": {"oft": {"arena_width_cm": 33}}})
+    client.put("/api/settings/style", json={"value": {"dpi": 125}})
+    client.put("/api/settings/detection",
+               json={"value": {"oft": {"gray_threshold": 110}}})
+    first = client.post("/api/drafts", json={"assay": "oft"}).get_json()["data"][
+        "draft"]
+    assert first["options"]["arena_width_cm"] == 33
+    assert "oft" not in first["options"]
+    assert first["style"]["dpi"] == 125
+    assert first["detection"]["gray_threshold"] == 110
+
+    client.put("/api/settings/defaults",
+               json={"value": {"oft": {"arena_width_cm": 99}}})
+    client.put("/api/settings/style", json={"value": {"dpi": 150}})
+    second = client.post("/api/drafts", json={"assay": "oft"}).get_json()["data"][
+        "draft"]
+    assert second["options"]["arena_width_cm"] == 99
+    assert second["style"]["dpi"] == 150
+    # 已建草稿是快照，不随后面的设置变化漂移。
+    again = client.get(f"/api/drafts/{first['id']}").get_json()["data"]["draft"]
+    assert again["options"]["arena_width_cm"] == 33
+    assert again["style"]["dpi"] == 125
+
+
+def test_submit_keeps_frozen_defaults_after_settings_change(sandbox, tmp_path,
+                                                            monkeypatch):
+    store, client = sandbox
+    from behaviourlab import engine
+
+    from behaviourlab import worker
+    from behaviourlab.schema import AnalysisResult
+
+    monkeypatch.setattr(
+        engine.media, "probe_video",
+        lambda path: {"width": 200, "height": 200, "duration_s": 1.0,
+                      "fps": 5.0, "frame_count": 5})
+    monkeypatch.setattr(worker, "run_frozen_job", lambda job, **kwargs: AnalysisResult(
+        summary=[{"unit_id": "f" * 32, "unit_name": "小鼠 1",
+                  "total_time_s": 1.0}],
+        metadata={"units": {"f" * 32: {"coordinate_unit": "cm"}}}))
+    client.put("/api/settings/defaults",
+               json={"value": {"oft": {"arena_width_cm": 33}}})
+    source = tmp_path / "frozen.mp4"
+    source.write_bytes(b"placeholder")
+    asset = store.create_asset(name="frozen.mp4", path=str(source),
+                               project_id=None, metadata={})
+    # 通过服务创建草稿：快照在创建时写入，才是提交时的冻结来源。
+    created = client.post("/api/drafts", json={
+        "assay": "oft",
+        "output": {"annotated_video": False},
+        "videos": [{
+            "asset_id": asset["id"], "window": {"start_s": 0.0, "end_s": 1.0},
+            "orientation": 0, "fps_override": None, "sample_fps": None,
+            "units": [{"id": "f" * 32, "name": "小鼠 1", "window": None,
+                       "geometry": {"arena": {"type": "quad", "points": [
+                           [10, 10], [110, 10], [110, 110], [10, 110]]}},
+                       "options": {}, "detection": {}, "manual": None}],
+        }],
+    })
+    assert created.status_code == 201, created.get_json()
+    draft = created.get_json()["data"]["draft"]
+    assert draft["options"]["arena_width_cm"] == 33
+    client.put("/api/settings/defaults",
+               json={"value": {"oft": {"arena_width_cm": 99}}})
+    payload = client.post("/api/jobs", json={"draft_id": draft["id"]}).get_json()[
+        "data"]
+    frozen = payload["videos"][0]["job"]["units"][0]["options"]["arena_width_cm"]
+    assert frozen == 33, "提交不重读新默认"
+
+
+def test_health_reports_actually_written_log(sandbox, monkeypatch):
+    store, client = sandbox
+    from behaviourlab import store as store_module
+
+    paths = store.paths
+    primary = paths.logs / "storage.log"
+    fallback = paths.root / "fallback" / "storage.log"
+    monkeypatch.setattr(store_module, "_storage_log_candidates",
+                        lambda paths: (primary, fallback))
+    store_module.record_log_target(paths, fallback)
+    fallback.parent.mkdir(parents=True, exist_ok=True)
+    fallback.write_text("[诊断]\ndatabase=x\n", encoding="utf-8")
+    # 主文件能打开但是空的：health 不能把空主文件当作已保存日志。
+    primary.parent.mkdir(parents=True, exist_ok=True)
+    primary.write_text("", encoding="utf-8")
+
+    data = client.get("/api/health").get_json()["data"]
+    assert Path(data["storage_log"]) == fallback
+
+
+# -- 收尾两点：解析形状分工与 health 日志路径 ----------------------------
+
+
+def test_defaults_stay_keyed_by_assay_while_detection_is_flat():
+    """defaults 仍按实验名取一层；detection 直接是当前实验对象。"""
+
+    resolved = resolve_job("oft", settings={
+        "defaults": {"oft": {"arena_width_cm": 33}},
+        "detection": {"gray_threshold": 110},
+    })
+    assert resolved["options"]["arena_width_cm"] == 33
+    assert "oft" not in resolved["options"], "默认值不能把实验名当参数塞进 options"
+    assert resolved["detection"]["gray_threshold"] == 110
+
+    # 另一个实验不会被 oft 的默认值影响。
+    other = resolve_job("tst", settings={
+        "defaults": {"oft": {"arena_width_cm": 33}},
+        "detection": {"gray_threshold": 110},
+    })
+    assert other["options"]["flow_thr_hi"] == 50.0
+
+
+def test_service_snapshot_matches_both_contract_shapes(sandbox):
+    store, client = sandbox
+    client.put("/api/settings/defaults",
+               json={"value": {"oft": {"arena_width_cm": 33}}})
+    client.put("/api/settings/style", json={"value": {"dpi": 125}})
+    client.put("/api/settings/detection",
+               json={"value": {"oft": {"gray_threshold": 110}}})
+    first = client.post("/api/drafts", json={"assay": "oft"}).get_json()["data"][
+        "draft"]
+    assert first["options"]["arena_width_cm"] == 33
+    assert "oft" not in first["options"]
+    assert first["style"]["dpi"] == 125
+    assert first["detection"]["gray_threshold"] == 110
+
+    client.put("/api/settings/defaults",
+               json={"value": {"oft": {"arena_width_cm": 99}}})
+    client.put("/api/settings/style", json={"value": {"dpi": 150}})
+    second = client.post("/api/drafts", json={"assay": "oft"}).get_json()["data"][
+        "draft"]
+    assert second["options"]["arena_width_cm"] == 99
+    assert second["style"]["dpi"] == 150
+    # 已建草稿是快照，不随后面的设置变化漂移。
+    again = client.get(f"/api/drafts/{first['id']}").get_json()["data"]["draft"]
+    assert again["options"]["arena_width_cm"] == 33
+    assert again["style"]["dpi"] == 125
+
+
+def test_submit_keeps_frozen_defaults_after_settings_change(sandbox, tmp_path,
+                                                            monkeypatch):
+    store, client = sandbox
+    from behaviourlab import engine
+
+    from behaviourlab import worker
+    from behaviourlab.schema import AnalysisResult
+
+    monkeypatch.setattr(
+        engine.media, "probe_video",
+        lambda path: {"width": 200, "height": 200, "duration_s": 1.0,
+                      "fps": 5.0, "frame_count": 5})
+    monkeypatch.setattr(worker, "run_frozen_job", lambda job, **kwargs: AnalysisResult(
+        summary=[{"unit_id": "f" * 32, "unit_name": "小鼠 1",
+                  "total_time_s": 1.0}],
+        metadata={"units": {"f" * 32: {"coordinate_unit": "cm"}}}))
+    client.put("/api/settings/defaults",
+               json={"value": {"oft": {"arena_width_cm": 33}}})
+    source = tmp_path / "frozen.mp4"
+    source.write_bytes(b"placeholder")
+    asset = store.create_asset(name="frozen.mp4", path=str(source),
+                               project_id=None, metadata={})
+    # 通过服务创建草稿：快照在创建时写入，才是提交时的冻结来源。
+    created = client.post("/api/drafts", json={
+        "assay": "oft",
+        "output": {"annotated_video": False},
+        "videos": [{
+            "asset_id": asset["id"], "window": {"start_s": 0.0, "end_s": 1.0},
+            "orientation": 0, "fps_override": None, "sample_fps": None,
+            "units": [{"id": "f" * 32, "name": "小鼠 1", "window": None,
+                       "geometry": {"arena": {"type": "quad", "points": [
+                           [10, 10], [110, 10], [110, 110], [10, 110]]}},
+                       "options": {}, "detection": {}, "manual": None}],
+        }],
+    })
+    assert created.status_code == 201, created.get_json()
+    draft = created.get_json()["data"]["draft"]
+    assert draft["options"]["arena_width_cm"] == 33
+    client.put("/api/settings/defaults",
+               json={"value": {"oft": {"arena_width_cm": 99}}})
+    payload = client.post("/api/jobs", json={"draft_id": draft["id"]}).get_json()[
+        "data"]
+    frozen = payload["videos"][0]["job"]["units"][0]["options"]["arena_width_cm"]
+    assert frozen == 33, "提交不重读新默认"
+
+
+def test_health_reports_actually_written_log(sandbox, monkeypatch):
+    store, client = sandbox
+    from behaviourlab import store as store_module
+
+    paths = store.paths
+    primary = paths.logs / "storage.log"
+    fallback = paths.root / "fallback" / "storage.log"
+    monkeypatch.setattr(store_module, "_storage_log_candidates",
+                        lambda paths: (primary, fallback))
+    store_module.record_log_target(paths, fallback)
+    fallback.parent.mkdir(parents=True, exist_ok=True)
+    fallback.write_text("[诊断]\ndatabase=x\n", encoding="utf-8")
+    # 主文件能打开但是空的：health 不能把空主文件当作已保存日志。
+    primary.parent.mkdir(parents=True, exist_ok=True)
+    primary.write_text("", encoding="utf-8")
+
+    data = client.get("/api/health").get_json()["data"]
+    assert Path(data["storage_log"]) == fallback

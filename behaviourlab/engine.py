@@ -76,11 +76,12 @@ SETTING_SECTIONS = ("defaults", "detection", "output", "style")
 
 def setting_layer(settings: Mapping[str, Any] | None, assay: str,
                   section: str) -> dict | None:
-    """取当前实验的 section 层。
+    """取 section 层，两种形状分别处理。
 
-    Store 里 ``settings.defaults``/``settings.detection`` 按实验键保存，但
-    通用解析拿到的是**服务已经取出的当前实验对象**：这里不再按实验名二次
-    取值，否则合法的检测覆盖会被静默丢弃。
+    - ``defaults``：与 Store 一致，按实验名再取一层 ``[assay]``。
+    - ``detection``：服务已经取出当前实验对象，不能再按实验名取，否则合法
+      的检测覆盖会被静默丢弃。
+    - ``output``/``style``：本来就是单对象。
     """
 
     if not isinstance(settings, Mapping):
@@ -88,6 +89,9 @@ def setting_layer(settings: Mapping[str, Any] | None, assay: str,
     value = settings.get(section)
     if not isinstance(value, Mapping):
         return None
+    if section == "defaults":
+        sub = value.get(assay)
+        return deepcopy(dict(sub)) if isinstance(sub, Mapping) else None
     return deepcopy(dict(value))
 
 
@@ -444,8 +448,11 @@ def validate_draft(draft: Mapping[str, Any], *,
                 float(declared_end) if _number(declared_end) else None,
             )
         orientation = video.get("orientation", 0)
-        if orientation not in ORIENTATIONS:
-            issues.append({"field": f"{prefix}.orientation", "message": "旋转角度必须是 0/90/180/270"})
+        # 与 VideoSource 的类型约束一致：bool 与浮点都不是合法方向。
+        if isinstance(orientation, bool) or not isinstance(orientation, int) \
+                or orientation not in ORIENTATIONS:
+            issues.append({"field": f"{prefix}.orientation",
+                           "message": "旋转角度必须是 0/90/180/270 的整数"})
         fps_override = video.get("fps_override")
         if fps_override is not None and (not _number(fps_override) or float(fps_override) <= 0):
             issues.append({"field": f"{prefix}.fps_override", "message": "帧率必须是正数"})
@@ -737,6 +744,11 @@ def verify_identity(asset: Mapping[str, Any]) -> list[dict]:
     if int(stat.st_size) != identity.get("size"):
         issues.append({"field": "asset.identity", "message": "源视频大小已变化"})
     if int(stat.st_mtime_ns) != identity.get("mtime_ns"):
+        issues.append({"field": "asset.identity", "message": "源视频修改时间已变化"})
+    # 冻结身份里保存了 mtime：只改它也必须是身份变化。
+    stored_mtime = identity.get("mtime")
+    if is_number(stored_mtime) and abs(float(stat.st_mtime)
+                                       - float(stored_mtime)) > 1e-9:
         issues.append({"field": "asset.identity", "message": "源视频修改时间已变化"})
     if str(Path(path).resolve()) != str(Path(asset.get("path", path)).resolve()):
         issues.append({"field": "asset.path", "message": "源视频路径已变化"})

@@ -92,6 +92,8 @@ def _merge_manifest(manifest: Mapping[str, Any], frozen: Mapping[str, Any],
     """清单与冻结任务去重合并：同一文件只登记一次。"""
 
     merged = dict(manifest)
+    # 只有成功导出全部文件后才写这份清单：显式声明完成状态。
+    merged["status"] = "completed"
     merged["run_id"] = frozen.get("run_id")
     merged["job_id"] = frozen.get("job_id")
     merged["assay"] = frozen.get("assay")

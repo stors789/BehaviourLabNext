@@ -138,7 +138,7 @@ def test_annotated_video_is_generated_and_downloadable(client, store, tmp_path,
     assert job["status"] == "completed", job
     unit = job["manifest"]["units"][0]
     name = unit["annotated_video"]
-    assert name and name.endswith("_annotated.mp4")
+    assert name and name.endswith("annotated.mp4")
     assert name in job["manifest"]["files"]
 
     run_dir = store.paths.runs / payload["run_id"]
@@ -149,13 +149,14 @@ def test_annotated_video_is_generated_and_downloadable(client, store, tmp_path,
         stream = container.streams.video[0]
         assert stream.codec_context.name == "h264", "浏览器可播的编码"
         assert float(container.duration) / av.time_base == pytest.approx(
-            0.8, abs=1e-4)
+            1.0, abs=1e-4)
         frames = list(container.decode(video=0))
-    assert len(frames) == 8, "标注视频只覆盖单位分析窗 [0.1, 0.9)"
+    # 视频覆盖运行源窗 [0, 1)；动物窗与事件时刻只会增加切分点。
+    assert len(frames) == 14
     assert frames[0].to_ndarray(format="bgr24").shape[:2] == (96, 128)
-    assert [round(float(item.duration * item.time_base), 6) for item in frames] \
-        == [0.1] * 8
-    assert unit["annotated_video_duration_s"] == pytest.approx(0.8, abs=1e-4)
+    total = sum(float(item.duration * item.time_base) for item in frames)
+    assert total == pytest.approx(1.0, abs=1e-4)
+    assert unit["annotated_video_duration_s"] == pytest.approx(1.0, abs=1e-4)
     assert unit["annotated_video_time_base"] == "1/1000000"
 
     inline = client.get(f"/runs/{payload['run_id']}/{job['job_id']}/{name}")
@@ -255,7 +256,7 @@ def test_encoding_failure_marks_job_error(client, store, tmp_path, monkeypatch):
     def refuse(*args, **kwargs):
         raise OSError("标注视频编码器不可用（mp4v）")
 
-    monkeypatch.setattr(annotated, "write_manual_y_video", refuse)
+    monkeypatch.setattr(annotated, "write_run_video", refuse)
     draft = seed(client, store, tmp_path)
     payload = client.post("/api/jobs", json={"draft_id": draft["id"]}).get_json()["data"]
     job = payload["jobs"][0]
@@ -298,13 +299,14 @@ def test_annotated_video_skips_zero_exposure_boundary_frames(tmp_path,
     target = tmp_path / "boundary.mp4"
     written, seconds = annotated.write_manual_y_video(
         target, job=job, summary=summary, events=events)
-    assert written == 8
+    # 8 个正曝光帧 + 动物窗两端 + 4 个事件时刻的切分点：零曝光帧仍然不进入。
+    assert written == 12
     assert seconds == pytest.approx(0.8, abs=1e-4)
 
     import av
 
     with av.open(str(target)) as container:
-        assert len(list(container.decode(video=0))) == 8
+        assert len(list(container.decode(video=0))) == 12
 
 
 class Frames29:
@@ -330,12 +332,13 @@ def test_vfr_keeps_cropped_exposures(tmp_path, monkeypatch):
     """窗口首尾的半帧曝光不能被补成完整帧，总时长仍等于 .8s。"""
 
     monkeypatch.setattr(media, "VideoSource", Frames29)
+    # 视频覆盖运行源窗；动物窗只限定叠画，不截短输出。
     job = {"asset": {"path": "memory", "metadata": {"fps": 29.0}},
-           "window": {"start_s": 0.0, "end_s": 1.0},
+           "window": {"start_s": 0.1, "end_s": 0.9},
            "orientation": 0, "fps_override": None}
     summary = {"unit_name": "unit", "analysis_window_start_s": 0.1,
                "analysis_window_end_s": 0.9}
-    events = [{"time_s": 0.2, "target": "A", "entry_index": 1}]
+    events = []
     target = tmp_path / "vfr.mp4"
     frames, seconds = annotated.write_manual_y_video(
         target, job=job, summary=summary, events=events)
@@ -452,4 +455,4 @@ def test_write_failure_marks_job_error(client, store, tmp_path, monkeypatch):
     assert "manifest" not in job
     run_dir = store.paths.runs / job["run_id"]
     assert not (run_dir / "result_manifest.json").exists()
-    assert not list(run_dir.glob("*_annotated.mp4"))
+    assert not (run_dir / "annotated.mp4").exists()

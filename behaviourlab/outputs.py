@@ -15,25 +15,36 @@ from .schema import sanitize_json
 from .store import atomic_write_json
 
 SAFE_STEM = re.compile(r"[^A-Za-z0-9_-]+")
-# 只有七类明细是文件契约；其余表仍留在 results.json 里。
-EXPORTED_TABLES = ("zones",)
+TABLE_NAME = re.compile(r"[A-Za-z0-9_-]+")
+
+# 四个基础表的固定表头；其余字段按首次出现顺序追加，不丢未知但合法的事实。
+BASE_COLUMNS = {
+    "observations": ("unit_id", "unit_name", "frame", "time_s", "source_dt_s",
+                     "interval_start_s", "interval_end_s", "dt_s", "detected",
+                     "x_px", "y_px", "quality", "contour"),
+    "summary": ("unit_id", "unit_name"),
+    "events": ("event_id", "unit_id", "kind", "time_s", "confirmed_s",
+               "target", "source"),
+    "bins": ("unit_id", "unit_name", "bin_index", "start_s", "end_s",
+             "duration_s"),
+}
+BASE_TABLES = tuple(BASE_COLUMNS)
 
 
-def figure_stem(unit: Mapping[str, Any], used: set[str]) -> str:
-    """安全、唯一、可读的每动物文件 stem；重名时追加序号。"""
+def unit_stem(index: int) -> str:
+    """每动物文件 stem：unit_01 起，不用动物名称做文件名。"""
 
-    raw = SAFE_STEM.sub("-", str(unit.get("unit_name") or "")).strip("-_")
-    raw = raw[:32] or "unit"
-    identity = str(unit.get("unit_id") or "")
-    suffix = identity[:6] if re.fullmatch(r"[A-Za-z0-9_-]+", identity) else ""
-    base = f"{raw}-{suffix}" if suffix else raw
-    stem = base
-    index = 2
-    while stem in used:
-        stem = f"{base}-{index}"
-        index += 1
-    used.add(stem)
-    return stem
+    return f"unit_{index:02d}"
+
+
+def table_filename(name: str) -> str:
+    """合法附加表名才能成为文件；非法名直接拒绝，不做猜测性改名。"""
+
+    if not isinstance(name, str) or not TABLE_NAME.fullmatch(name):
+        raise ValueError(f"表名不合法：{name!r}")
+    if name in BASE_TABLES:
+        raise ValueError(f"表名与基础表冲突：{name}")
+    return f"{name}.csv"
 
 
 def write_json_export(path: str | Path, payload: Any) -> Path:
@@ -55,9 +66,18 @@ def _columns_from(rows: Sequence[Mapping[str, Any]], columns: Iterable[str] | No
 
 def write_csv(path: str | Path, rows: Sequence[Mapping[str, Any]],
               columns: Iterable[str] | None = None) -> Path:
+    """写 CSV：先固定表头，再按首次出现顺序追加其余字段。
+
+    空表也保留表头，不能因为“没有事件”写出 0 字节文件。
+    """
+
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = _columns_from(rows, columns)
+    ordered = list(columns or ())
+    for key in _columns_from(rows, None):
+        if key not in ordered:
+            ordered.append(key)
+    fieldnames = ordered
     with target.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
@@ -72,7 +92,23 @@ def write_csv(path: str | Path, rows: Sequence[Mapping[str, Any]],
 
 def write_observations(path: str | Path, observations: Sequence[Mapping[str, Any]],
                        columns: Iterable[str] | None = None) -> Path:
-    return write_csv(path, observations, columns)
+    return write_csv(path, observations,
+                     columns if columns is not None
+                     else BASE_COLUMNS["observations"])
+
+
+def _with_unit_names(rows: Sequence[Mapping[str, Any]],
+                     summary: Sequence[Mapping[str, Any]]) -> list[dict]:
+    """按 unit_id 补上显示名；行里已有的值优先。"""
+
+    names = {row.get("unit_id"): row.get("unit_name") for row in summary}
+    prepared = []
+    for row in rows:
+        item = dict(row)
+        if not item.get("unit_name") and item.get("unit_id") in names:
+            item["unit_name"] = names[item["unit_id"]]
+        prepared.append(item)
+    return prepared
 
 
 def _report_metrics(assay: Any) -> list[dict]:
@@ -373,39 +409,68 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
     return figures_info
 
 
-def _annotated_video(target: Path, job: Mapping[str, Any], result: Any,
-                     summary: Mapping[str, Any], stem: str,
-                     events: Sequence[Mapping[str, Any]]
-                     ) -> tuple[str, float] | None:
-    """人工 Y 的源图标注视频：开关关闭或无人工单位时不生成。"""
+def _unit_payloads(job: Mapping[str, Any], result: Any,
+                   summary_rows: Sequence[Mapping[str, Any]],
+                   observations: Sequence[Mapping[str, Any]]
+                   ) -> list[dict]:
+    """叠画视频需要的每动物事实：窗口、几何、来源与位置抑制。"""
+
+    from . import engine
+
+    frozen_units = {unit.get("id"): unit for unit in job.get("units") or []
+                    if isinstance(unit, Mapping)}
+    meta_units = (getattr(result, "metadata", None) or {}).get("units") or {}
+    assay = str(job.get("assay") or "")
+    payloads = []
+    for row in summary_rows:
+        unit_id = row.get("unit_id")
+        frozen = frozen_units.get(unit_id) or {}
+        meta = meta_units.get(unit_id) or {}
+        manual = engine.is_manual_path(assay, frozen) or meta.get("mode") == "manual"
+        reliable = meta.get("tracking_reliable")
+        available = meta.get("position_available")
+        suppress = reliable is False or available is False
+        if assay == "ldb" and meta.get("dark_box_invisible"):
+            # 暗室不可见：不画整装置轨迹，也不假装有位置。
+            suppress = True
+        payloads.append({
+            "unit_id": unit_id,
+            "unit_name": row.get("unit_name"),
+            "window_start_s": row.get("analysis_window_start_s"),
+            "window_end_s": row.get("analysis_window_end_s"),
+            "geometry": frozen.get("geometry") or {},
+            "manual": bool(manual),
+            "suppress_positions": bool(suppress),
+            "observations": [item for item in observations
+                             if item.get("unit_id") == unit_id],
+        })
+    return payloads
+
+
+def _run_video(target: Path, job: Mapping[str, Any],
+               units: Sequence[Mapping[str, Any]],
+               events: Sequence[Mapping[str, Any]]) -> tuple[str, float] | None:
+    """按 run 生成一份叠画视频；关闭开关时既不生成也不声明。"""
 
     output = job.get("output")
-    if not isinstance(output, Mapping) or not output.get("annotated_video"):
+    # 默认值已在冻结解析时给成 true；这里只认显式 true，缺省不生成。
+    if not isinstance(output, Mapping) or output.get("annotated_video") is not True:
         return None
-    units = (getattr(result, "metadata", None) or {}).get("units") or {}
-    meta = units.get(summary.get("unit_id")) or {}
-    if meta.get("mode") != "manual":
-        return None
-
-    name = f"{stem}_annotated.mp4"
-    try:
-        _, seconds = annotated.write_manual_y_video(
-            target / name, job=job, summary=summary, events=events)
-    except OSError:
-        # 编码失败让异常冒到导出层：作业标 error，不留半成品清单。
-        raise
-    except Exception as error:  # pragma: no cover - 防御未知编码错误
-        raise OSError(f"标注视频编码失败：{error}") from error
+    name = "annotated.mp4"
+    _, seconds = annotated.write_run_video(
+        target / name, job=job, units=units, events=events)
     return name, float(seconds)
 
 
-def export_result(directory: str | Path, job: Mapping[str, Any],
+def write_outputs(directory: str | Path, job: Mapping[str, Any],
                   result: Any, *,
-                  progress: Callable[[float, str], None] | None = None) -> dict:
-    """把一份 AnalysisResult 写成清单里的文件，返回 manifest。
+                  progress: Callable[[float, str], None] | None = None
+                  ) -> dict:
+    """把一份 AnalysisResult 写成声明清单；唯一导出实现。
 
-    每动物另出轨迹/热图 PNG 并登记映射；没有有效位置时省图并说明。
-    CSV 的 null 写成空单元格。``progress`` 只报导出阶段（.75…​.99）。
+    返回 ``{files, figures, warnings, status, run_id, job_id, assay, asset,
+    coverage, algorithm_version}``。``figures`` 以 unit_id 为键，即使该动物
+    没有图也保留空数组。CSV 的 None 写成空单元格，非有限计算值转 null。
     """
 
     def report(fraction: float, message: str = "") -> None:
@@ -417,63 +482,92 @@ def export_result(directory: str | Path, job: Mapping[str, Any],
     target.mkdir(parents=True, exist_ok=True)
     files: list[str] = []
 
+    summary_rows = _with_unit_names(result.summary, result.summary)
+    observation_rows = _with_unit_names(result.observations, result.summary)
+    event_rows = _with_unit_names(result.events, result.summary)
+    bin_rows = _with_unit_names(result.bins, result.summary)
+
     write_json_export(target / "frozen_job.json", job)
     files.append("frozen_job.json")
-    write_observations(target / "observations.csv", result.observations)
+    write_observations(target / "observations.csv", observation_rows,
+                       BASE_COLUMNS["observations"])
     files.append("observations.csv")
-    write_csv(target / "summary.csv", result.summary)
+    write_csv(target / "summary.csv", summary_rows, BASE_COLUMNS["summary"])
     files.append("summary.csv")
-    write_csv(target / "events.csv", result.events)
+    write_csv(target / "events.csv", event_rows, BASE_COLUMNS["events"])
     files.append("events.csv")
-    write_csv(target / "bins.csv", result.bins)
+    write_csv(target / "bins.csv", bin_rows, BASE_COLUMNS["bins"])
     files.append("bins.csv")
-    for name in EXPORTED_TABLES:
-        rows = result.tables.get(name) or []
-        if not rows:
-            continue
-        write_csv(target / f"{name}.csv", rows)
-        files.append(f"{name}.csv")
-    payload = result.as_dict()
-    write_json_export(target / "results.json", payload)
+
+    # 每个 tables 合法表都导出；非法表名直接报错，不悄悄丢事实。
+    for name in sorted(result.tables):
+        filename = table_filename(name)
+        write_csv(target / filename, result.tables.get(name) or [],
+                  ("unit_id", "unit_name"))
+        files.append(filename)
+
+    write_json_export(target / "results.json", result.as_dict())
     files.append("results.json")
 
     style = job.get("style") if isinstance(job.get("style"), Mapping) else None
     units: list[dict] = []
-    used: set[str] = set()
-    for row in result.summary:
+    figure_map: dict[str, list[str]] = {}
+    for index, row in enumerate(summary_rows, start=1):
         unit_id = row.get("unit_id")
-        rows = [item for item in result.observations
+        rows = [item for item in observation_rows
                 if item.get("unit_id") == unit_id]
-        events = [item for item in result.events
-                  if item.get("unit_id") == unit_id]
-        stem = figure_stem(row, used)
+        events = [item for item in event_rows if item.get("unit_id") == unit_id]
+        stem = unit_stem(index)
         info = _unit_figures(target, row, rows, stem, style, events=events)
-        for key in ("trajectory", "heatmap", "activity", "objects",
-                    "zones", "sequence"):
-            if info.get(key):
-                files.append(info[key])
-        video = _annotated_video(target, job, result, row, stem, events)
-        entry = {"unit_id": unit_id, "unit_name": row.get("unit_name"),
-                 "summary": row, "figures": info,
-                 "annotated_video": video[0] if video else None}
-        if video:
-            files.append(video[0])
+        names = [info[key] for key in ("trajectory", "heatmap", "activity",
+                                       "objects", "zones", "sequence")
+                 if info.get(key)]
+        files.extend(names)
+        figure_map[str(unit_id)] = names
+        units.append({"unit_id": unit_id, "unit_name": row.get("unit_name"),
+                      "summary": row, "figures": info, "figure_files": names,
+                      "annotated_video": None})
+        report(0.75 + 0.2 * len(units) / max(1, len(summary_rows)),
+               "正在导出结果")
+
+    # 一份 run 视频：所有动物共用一个流，按各自窗口叠各自几何与轨迹层。
+    video = _run_video(
+        target, job,
+        _unit_payloads(job, result, summary_rows, observation_rows),
+        event_rows)
+    if video:
+        files.append(video[0])
+        for entry in units:
+            entry["annotated_video"] = video[0]
             entry["annotated_video_duration_s"] = round(video[1], 6)
             entry["annotated_video_time_base"] = annotated.TIMEBASE_LABEL
-        units.append(entry)
-        total = max(1, len(result.summary))
-        report(0.75 + 0.24 * len(units) / total, "正在导出结果")
 
+    metadata = result.metadata if isinstance(result.metadata, Mapping) else {}
+    coverage = metadata.get("coverage")
+    asset = job.get("asset") if isinstance(job.get("asset"), Mapping) else {}
     manifest = {
+        "status": "completed",
         "run_id": job.get("run_id"),
         "job_id": job.get("job_id"),
         "assay": job.get("assay"),
+        "asset": {"id": asset.get("id"), "name": asset.get("name"),
+                  "path": asset.get("path")},
+        "coverage": dict(coverage) if isinstance(coverage, Mapping) else None,
+        "algorithm_version": job.get("algorithm_version"),
         "units": units,
-        "files": files + ["result_manifest.json", "report.md"],
+        "figures": figure_map,
+        "annotated_video": video[0] if video else None,
+        "files": files + ["report.md", "result_manifest.json"],
         "warnings": list(result.warnings),
-        "metadata": result.metadata,
+        "metadata": metadata,
     }
-    write_json_export(target / "result_manifest.json", manifest)
     (target / "report.md").write_text(
         _report_markdown(job, result, manifest), encoding="utf-8")
+    files.append("report.md")
+    write_json_export(target / "result_manifest.json", manifest)
+    report(0.99, "已写出结果清单")
     return manifest
+
+
+# 旧名保留为同一实现的别名：不并存两套导出。
+export_result = write_outputs

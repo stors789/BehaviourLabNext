@@ -105,8 +105,15 @@ def _batch_progress(videos: Sequence[Mapping[str, Any]], index: int,
     }
 
 
-def _manifest_ok(directory: Path, job_id: str, run_id: str) -> dict | None:
-    """结果清单必须自称同一 job_id/run_id，且声明的文件都在。"""
+def _manifest_ok(directory: Path, job_id: str, run_id: str, *,
+                 require_status: bool = True) -> dict | None:
+    """已发布清单：身份一致、显式成功、声明文件都在本目录内。
+
+    新布局与恢复共用这一判据（``require_status=True``）；只有旧嵌套记录经
+    可信 job 记录核对时才允许缺状态，显式 failed 永远不算成功。
+    """
+
+    from . import runs as run_service
 
     try:
         manifest = read_json_file(directory / "result_manifest.json", default=None)
@@ -114,14 +121,11 @@ def _manifest_ok(directory: Path, job_id: str, run_id: str) -> dict | None:
         return None
     if not isinstance(manifest, Mapping):
         return None
-    if manifest.get("job_id") != job_id or manifest.get("run_id") != run_id:
+    issues = run_service.manifest_issues(
+        directory, manifest, run_id, require_status=require_status,
+        job_id=job_id)
+    if issues:
         return None
-    for name in manifest.get("files") or []:
-        if not isinstance(name, str) or not name:
-            return None
-        candidate = directory / name
-        if candidate.is_symlink() or not candidate.is_file():
-            return None
     return dict(manifest)
 
 
@@ -176,8 +180,16 @@ class JobScheduler:
         """取得数据根所有权后恢复旧运行并启动单一调度线程；失败返回 False。"""
 
         with self._lock:
-            if self._started:
+            if self._started and self.running:
                 return True
+            if self._started and not self.running:
+                # 上一次关闭超时后线程已退出（并可能已释放锁）：先重置状态，
+                # 再真正重新持锁启动，不能空返 True 却没有调度线程。
+                self._started = False
+                self._release_pending = False
+                if not self.owner.held:
+                    self._owns_lock = False
+                LOGGER.warning("调度器状态已重置：上次关闭未完成但线程已退出")
             held_before = self.owner.held
             try:
                 self.owner.acquire(pid=os.getpid())
@@ -197,12 +209,17 @@ class JobScheduler:
         thread.start()
         return True
 
-    def shutdown(self, *, timeout_s: float = 5.0) -> None:
-        """停止调度并把在跑的字幕标为中断；未持锁对象什么都不做。"""
+    def shutdown(self, *, timeout_s: float = 5.0) -> bool:
+        """停止调度并把在跑的视频标为中断。
+
+        返回是否**真正完成**（线程退出、锁已释放）；超时只表示尚在关闭，
+        此时继续持有数据根所有权，绝不能让旧线程在放锁后继续使用数据库。
+        未持锁对象重复调用无影响。
+        """
 
         with self._lock:
             if not self._started and self._thread is None:
-                return
+                return True
             self._stopping.set()
         self._wake.set()
         self._cancel.set()
@@ -217,12 +234,13 @@ class JobScheduler:
                 self._release_pending = True
                 LOGGER.warning("调度线程在 %.1f 秒内未退出，暂不释放数据根所有权",
                                timeout_s)
-                return
+                return False
             self._thread = None
             self._started = False
             self._release_lock()
         self._stopping.clear()
         self._cancel.clear()
+        return True
 
     def _release_lock(self) -> None:
         self._release_pending = False
@@ -289,7 +307,7 @@ class JobScheduler:
         for row in sorted(rows, key=lambda item: str(item.get("created_at"))):
             job_id = row.get("id")
             manifest = _manifest_ok(self.paths.runs / run_id / job_id,
-                                    job_id, run_id)
+                                    job_id, run_id, require_status=False)
             status = {COMPLETED: COMPLETED, "done": COMPLETED,
                       "error": FAILED}.get(str(row.get("status")), INTERRUPTED)
             if status == COMPLETED and manifest is None:
@@ -490,13 +508,17 @@ class JobScheduler:
 
         prepared: list[dict] = []
         issues: list[dict] = []
+        project_id = current.get("project_id")
+        animals = None
+        if project_id is not None:
+            animals = {item["id"] for item in self.store.list_animals(project_id)}
         for video in current.get("videos") or []:
             frozen = video.get("job")
             if not isinstance(frozen, Mapping):
                 issues.append({"asset_id": video.get("asset_id"), "field": "job",
                                "message": "缺少冻结任务，无法按原配置重跑"})
                 continue
-            refreshed, video_issues = self._refresh_frozen(frozen)
+            refreshed, video_issues = self._refresh_frozen(frozen, animals=animals)
             if video_issues:
                 for issue in video_issues:
                     entry = dict(issue)
@@ -518,30 +540,33 @@ class JobScheduler:
         if issues:
             raise JobError("原配置无法重新验证", fields=issues)
 
-        if status == COMPLETED:
-            new_id_value = new_id()
-            for video in prepared:
-                video["job"] = {**video["job"], "job_id": new_id_value}
-                video["job_id"] = new_id_value
-            batch = self.store.create_batch(
-                assay=current.get("assay"),
-                videos=prepared,
-                draft_id=current.get("draft_id"),
-                project_id=current.get("project_id"),
-                batch_id=new_id_value,
-            )
-        else:
-            with self.store.mutate() as connection:
-                record = self.store.batch_in(connection, batch_id)
-                if record is None:
-                    raise NotFoundError("任务不存在")
-                if record.get("status") != status:
-                    raise JobConflict("任务状态已变化，未排队")
+        # 两个分支都要在最终写事务内重读来源与状态：删除已提交则不存在，
+        # 另一个请求改了状态则明确冲突，不能基于事务前快照派生新批次。
+        with self.store.mutate() as connection:
+            record = self.store.batch_in(connection, batch_id)
+            if record is None:
+                raise NotFoundError("任务不存在")
+            if record.get("status") != status:
+                raise JobConflict("任务状态已变化，未排队")
+            if status == COMPLETED:
+                new_batch_id = new_id()
+                for video in prepared:
+                    video["job"] = {**video["job"], "job_id": new_batch_id}
+                    video["job_id"] = new_batch_id
+                batch = self.store.create_batch(
+                    assay=record.get("assay"),
+                    videos=prepared,
+                    draft_id=record.get("draft_id"),
+                    project_id=record.get("project_id"),
+                    batch_id=new_batch_id,
+                    connection=connection,
+                )
+            else:
                 owned = list(record.get("owned_run_ids") or [])
                 for video in prepared:
                     if video["run_id"] not in owned:
                         owned.append(video["run_id"])
-                record = self.store.patch_batch(connection, batch_id, {
+                batch = self.store.patch_batch(connection, batch_id, {
                     "status": QUEUED,
                     "videos": prepared,
                     "progress": {"fraction": 0.0, "current": 0,
@@ -552,15 +577,20 @@ class JobScheduler:
                     "finished_at": None,
                     "owned_run_ids": owned,
                 })
-            batch = record
         self._wake.set()
         if self.inline:
             self._start_batch(batch["id"])
             self._run_batch(batch["id"])
         return self.get(batch["id"])
 
-    def _refresh_frozen(self, frozen: Mapping[str, Any]) -> tuple[dict, list[dict]]:
-        """按原配置重新取身份与媒体事实；不读取草稿或当前默认值。"""
+    def _refresh_frozen(self, frozen: Mapping[str, Any], *,
+                        animals: set[str] | None = None
+                        ) -> tuple[dict, list[dict]]:
+        """按原配置重新取身份与媒体事实；不读取草稿或当前默认值。
+
+        ``animals`` 来自冻结 job 的 project_id 现有动物；项目单位必须仍绑定
+        本项目动物，缺失/跨项目一律拒绝重跑。
+        """
 
         item = deepcopy(dict(frozen))
         asset = dict(item.get("asset") or {})
@@ -586,7 +616,7 @@ class JobScheduler:
         item["asset"] = asset
         item["algorithm_version"] = ALGORITHM_VERSION
         item["run_id"] = new_id()
-        issues = engine.validate_job(item)
+        issues = engine.validate_job(item, animals=animals)
         return item, issues
 
     # -- 删除 -----------------------------------------------------------
@@ -601,12 +631,53 @@ class JobScheduler:
             status = record.get("status")
             if status not in TERMINAL:
                 raise JobConflict("任务尚未结束，不能删除")
-            targets = self._deletion_targets(record)
+            plan = self._removal_plan(record)
+            protected = self._protected_paths()
+            blocked = [item for item in plan if item[0] == "file"
+                       and str(item[1].resolve()) in protected]
+            if not blocked:
+                # 目录里可能放着未登记却已被其他任务冻结的输入：整树删除前
+                # 逐个核对受保护文件，不能因为“没声明”就带走原片。
+                for kind, path in plan:
+                    if kind != "dir":
+                        continue
+                    for item in path.rglob("*"):
+                        if item.is_file() and str(item.resolve()) in protected:
+                            blocked.append(("file", item))
+                            break
+                    if blocked:
+                        break
+            if not blocked:
+                # 目录里可能放着未登记却已被其他任务冻结的输入：整树删除前
+                # 逐个核对受保护文件，不能因为“没声明”就带走原片。
+                for kind, path in plan:
+                    if kind != "dir":
+                        continue
+                    for item in path.rglob("*"):
+                        if item.is_file() and str(item.resolve()) in protected:
+                            blocked.append(("file", item))
+                            break
+                    if blocked:
+                        break
+            if blocked:
+                # 已登记或已冻结的输入不能被任务清理带走：拒绝并保留记录。
+                raise JobError(
+                    f"结果目录内有受保护的输入文件，未删除：{blocked[0][1].name}",
+                    status=409)
             try:
-                for path in targets:
-                    self._remove(path)
+                for kind, path in plan:
+                    if kind == "file":
+                        if str(path.resolve()) in protected:
+                            continue
+                        path.unlink(missing_ok=True)
+                for kind, path in plan:
+                    if kind != "dir":
+                        continue
+                    try:
+                        path.rmdir()     # 只删空根目录
+                    except OSError:
+                        pass             # 还有不能认领的子项：原样保留
             except OSError as error:
-                # 事务回滚：记录保留，可重试；已删掉的部分允许不存在。
                 raise JobError(f"清理任务文件失败：{error}", status=409)
             self.store.delete_batch_record(batch_id, connection)
 
@@ -619,45 +690,146 @@ class JobScheduler:
                 if str(row.get("status")) in ("running", "queued")]
         if dead:
             raise JobConflict("任务尚未结束，不能删除")
+        protected = self._protected_paths()
         for row in rows:
             directory = self.paths.runs / run_id / row["id"]
-            manifest = _manifest_ok(directory, row["id"], run_id)
+            # 旧记录按可信 job 行核对，允许缺状态的旧清单。
+            manifest = _manifest_ok(directory, row["id"], run_id,
+                                    require_status=False)
             if manifest is None:
                 continue
             if not _under(self.paths.runs, directory):
                 raise JobError("任务目录不在数据根内，已拒绝删除", status=409)
-            self._remove(directory)
+            for name in manifest.get("files") or []:
+                candidate = directory / str(name)
+                if candidate.is_file() and str(candidate.resolve()) in protected:
+                    raise JobError("结果目录内有受保护的输入文件，未删除："
+                                   + candidate.name, status=409)
+            for name in manifest.get("files") or []:
+                candidate = directory / str(name)
+                if candidate.is_file() and not candidate.is_symlink():
+                    candidate.unlink(missing_ok=True)
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
         connection.execute("DELETE FROM jobs WHERE run_id = ?", (run_id,))
 
-    def _deletion_targets(self, record: Mapping[str, Any]) -> list[Path]:
-        """只认本任务能证明归属的文件；其他材料原样保留。"""
+    def _protected_paths(self) -> set[str]:
+        """已登记资产与其他冻结任务引用的源文件：清理时一律保护。"""
+
+        protected: set[str] = set()
+        for asset in self.store.list_assets():
+            path = asset.get("path")
+            if isinstance(path, str) and path:
+                protected.add(str(Path(path).resolve()))
+        for batch in self.store.list_batches():
+            for video in batch.get("videos") or []:
+                job = video.get("job") or {}
+                asset = job.get("asset") or {}
+                for value in (asset.get("path"),
+                              (asset.get("identity") or {}).get("path")):
+                    if isinstance(value, str) and value:
+                        protected.add(str(Path(value).resolve()))
+        return protected
+
+    def _removal_plan(self, record: Mapping[str, Any]) -> list[tuple[str, Path]]:
+        """按可信材料列清理计划：只认本任务能证明归属的文件。
+
+        ``owned_run_ids`` 不是压倒性授权：stage/task/result 各自的 job.json 与
+        清单必须自称同一 job_id/run_id，冲突或不能认领的子项原样保留。
+        """
 
         batch_id = str(record.get("id"))
-        targets: list[Path] = []
-        tasks_root = self.paths.tasks / batch_id
+        plan: list[tuple[str, Path]] = []
         run_ids = [str(item) for item in record.get("owned_run_ids") or []
                    if isinstance(item, str) and _SAFE_NAME.fullmatch(item)]
+        tasks_root = self.paths.tasks / batch_id
+        if not run_ids and tasks_root.is_dir() and _under(self.paths.tasks,
+                                                          tasks_root):
+            # 旧记录缺 owned_run_ids：只从本任务自己的 job.json 恢复归属。
+            for child in sorted(tasks_root.iterdir()):
+                job_file = child / "job.json"
+                if not job_file.is_file():
+                    continue
+                try:
+                    frozen = read_json_file(job_file, default=None)
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(frozen, Mapping):
+                    continue
+                if frozen.get("job_id") != batch_id:
+                    continue
+                run_id = frozen.get("run_id")
+                if isinstance(run_id, str) and _SAFE_NAME.fullmatch(run_id):
+                    run_ids.append(run_id)
+
         for run_id in run_ids:
             stage = self.paths.runs / f".{run_id}.tmp"
             if stage.exists() and _under(self.paths.runs, stage):
-                targets.append(stage)
+                if self._stage_belongs(stage, batch_id, run_id):
+                    plan.extend(("file", item) for item in stage.rglob("*")
+                                if item.is_file())
+                    plan.append(("dir", stage))
             destination = self.paths.runs / run_id
-            if not destination.exists():
+            if not destination.exists() or not _under(self.paths.runs,
+                                                      destination):
                 continue
             manifest = _manifest_ok(destination, batch_id, run_id)
             if manifest is None:
-                # 清单不可核对：可能是别的任务的材料，绝不按名字猜。
+                # 清单自称呼别的任务或不可核对：不按名字猜归属。
                 continue
-            if not _under(self.paths.runs, destination):
-                raise JobError("结果目录不在数据根内，已拒绝删除", status=409)
-            targets.append(destination)
+            for name in manifest.get("files") or []:
+                candidate = destination / str(name)
+                if candidate.is_file() and not candidate.is_symlink():
+                    plan.append(("file", candidate))
+            plan.append(("dir", destination))
+
         if tasks_root.is_dir() and _under(self.paths.tasks, tasks_root):
             for child in tasks_root.iterdir():
-                if child.name in ("job.json", "progress.json", "worker.log"):
-                    targets.append(child)
+                if child.is_file() and child.name in ("job.json", "progress.json",
+                                                      "worker.log"):
+                    if child.name != "job.json" or self._task_belongs(
+                            child, batch_id):
+                        plan.append(("file", child))
                 elif child.is_dir() and child.name in run_ids:
-                    targets.append(child)
-        return targets
+                    if self._task_belongs(child / "job.json", batch_id):
+                        # 只清本任务自己的三个文件；其他子项原样保留。
+                        for name in ("job.json", "progress.json", "worker.log"):
+                            candidate = child / name
+                            if candidate.is_file():
+                                plan.append(("file", candidate))
+                        plan.append(("dir", child))
+            plan.append(("dir", tasks_root))
+        return plan
+
+    @staticmethod
+    def _task_belongs(job_file: Path, batch_id: str) -> bool:
+        """task 内 job.json 必须自称本任务；缺失或冲突都不认领。"""
+
+        if not job_file.is_file():
+            return False
+        try:
+            frozen = read_json_file(job_file, default=None)
+        except (OSError, ValueError):
+            return False
+        return isinstance(frozen, Mapping) and frozen.get("job_id") == batch_id
+
+    @staticmethod
+    def _stage_belongs(stage: Path, batch_id: str, run_id: str) -> bool:
+        """stage 内 frozen_job.json 必须自称同一任务与运行。"""
+
+        frozen_path = stage / "frozen_job.json"
+        if not frozen_path.is_file():
+            return False
+        try:
+            frozen = read_json_file(frozen_path, default=None)
+        except (OSError, ValueError):
+            return False
+        if not isinstance(frozen, Mapping):
+            return False
+        return (frozen.get("job_id") == batch_id
+                and frozen.get("run_id") == run_id)
 
     @staticmethod
     def _remove(path: Path) -> None:
@@ -853,13 +1025,21 @@ class JobScheduler:
             "cancel": self._cancel,
             "stopping": self._stopping,
         }
-        if self._runner is not None:
-            code = self._run_inline_runner(context)
-        elif self.inline:
-            code = worker.execute_job_file(job_path, stage, progress_path,
-                                           cancel=self._cancel.is_set)
-        else:
-            code = self._run_process(context)
+        try:
+            if self._runner is not None:
+                code = self._run_inline_runner(context)
+            elif self.inline:
+                code = worker.execute_job_file(job_path, stage, progress_path,
+                                               cancel=self._cancel.is_set)
+            else:
+                code = self._run_process(context)
+        except BaseException as error:
+            # 执行接口本身出错：先处理仍活的所属子进程，再给真实终态。
+            self._stop_active_process()
+            self._cleanup_stage(stage)
+            video["log"] = str(log_path)
+            return {"status": FAILED,
+                    "error": f"执行失败：{type(error).__name__}: {error}"}
         video["log"] = str(log_path)
 
         if self._stopping.is_set():
@@ -903,18 +1083,26 @@ class JobScheduler:
         env["PYTHONPATH"] = root + (os.pathsep + env["PYTHONPATH"]
                                     if env.get("PYTHONPATH") else "")
         log_path = context["log"]
+        process = None
         try:
             with open(log_path, "ab") as log:
                 process = self._spawn(command, log, env, root)
                 self._process = process
-                try:
-                    return self._wait(process, context)
-                finally:
-                    self._process = None
+                return self._wait(process, context)
         except OSError as error:
             self._write_error(context["progress_path"],
                               f"无法启动工作进程：{error}")
             return 1
+        finally:
+            # 引用先清掉，再释放本对象句柄；异常路径上的活进程由调用方终止。
+            self._process = None
+            if process is not None:
+                release = getattr(process, "release", None)
+                if callable(release):
+                    try:
+                        release()
+                    except Exception:
+                        LOGGER.exception("释放工作进程句柄失败")
 
     def _spawn(self, command: list[str], log: Any, env: dict, root: str) -> Any:
         if os.name == "nt":

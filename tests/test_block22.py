@@ -110,6 +110,7 @@ def _runner_factory(store: Store, *, fail_index: int | None = None,
         atomic_write_json(stage / "results.json", {"units": []})
         atomic_write_json(stage / "frozen_job.json", dict(job))
         atomic_write_json(stage / "result_manifest.json", {
+            "status": "completed",
             "run_id": job["run_id"], "job_id": job["job_id"],
             "assay": job["assay"],
             "files": ["summary.csv", "results.json", "frozen_job.json",
@@ -446,7 +447,9 @@ def test_delete_keeps_unowned_material(sandbox):
 
     scheduler.delete(done["id"])
     assert store.get_batch(done["id"]) is None
-    assert not (paths.runs / run_id).exists()
+    # 本任务声明的文件被清理；不能认领的旁文件原样保留，目录因此不空。
+    assert not (paths.runs / run_id / "summary.csv").exists()
+    assert foreign.is_file(), "无归属材料不能跟着任务一起删"
 
 
 def test_replay_rejects_running_batch(sandbox):

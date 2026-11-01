@@ -4,20 +4,24 @@ from __future__ import annotations
 
 import logging
 import json
+import os
 import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
-from flask import Flask, Response, jsonify, render_template, request, send_file
+from flask import (Flask, Response, after_this_request, jsonify,
+                   render_template, request, send_file)
 from werkzeug.exceptions import HTTPException
 
 from .. import assets as asset_service
 from .. import experiments
 from .. import field_templates
+from .. import landmarks as landmark_service
 from .. import figures as figure_service
 from .. import media as media_service
 from .. import preview as preview_service
+from .. import runs as run_service
 from ..assets import BackgroundError
 from ..config import APP_NAME, APP_VERSION, SCHEMA_VERSION, DataPaths
 from ..detection import common_detection_defaults
@@ -43,7 +47,7 @@ from ..jobs import (
     JobScheduler,
 )
 from .. import outputs as output_service
-from ..processes import JobOwnerRegistry
+from ..processes import JobOwnerRegistry, child_creation_flags, child_creation_flags
 from ..schema import ValidationError, is_number, is_valid_id, new_id
 from ..store import (
     NotFoundError,
@@ -64,7 +68,7 @@ RUN_FILES = ("observations.csv", "summary.csv", "events.csv", "bins.csv",
 RUN_FIGURE = re.compile(
     r"[A-Za-z0-9_-]+_(?:trajectory|heatmap|activity|objects|zones|sequence)"
     r"\.png")
-RUN_VIDEO = re.compile(r"[A-Za-z0-9_-]+_annotated\.mp4")
+RUN_VIDEO = re.compile(r"(?:[A-Za-z0-9_-]+_)?annotated\.mp4")
 
 
 def _is_run_file(name: str) -> bool:
@@ -191,21 +195,19 @@ def _filled_setting(store: Store, section: str, factory: Mapping[str, Any]) -> d
 
 
 def _settings_snapshot(store: Store, assay: str | None) -> dict:
-    """服务取出的当前实验设置对象：defaults/detection 已按实验键拆开。
+    """两个分区各自的合同形状：defaults 按实验键、detection 是当前对象。
 
-    Store 里两个分区按实验名保存；通用解析入口只接受当前实验的参数，所以
-    这里负责取出那一层，草稿创建、预览与最终校验都用同一份结果。
+    通用解析对 defaults 仍会按实验名取一层，对检测则直接使用传入对象；服务
+    必须按同一形状提供，草稿创建、预览与最终校验才共用一套规则。
     """
 
     defaults = store.get_setting("settings.defaults", default={})
     detection = store.get_setting("settings.detection", default={})
     defaults = defaults if isinstance(defaults, Mapping) else {}
     detection = detection if isinstance(detection, Mapping) else {}
-    saved_defaults = defaults.get(assay) if assay else None
     saved_detection = detection.get(assay) if assay else None
     return {
-        "defaults": deepcopy(dict(saved_defaults))
-        if isinstance(saved_defaults, Mapping) else {},
+        "defaults": deepcopy(dict(defaults)),
         "detection": deepcopy(dict(saved_detection))
         if isinstance(saved_detection, Mapping) else {},
         "output": _filled_setting(store, "output", COMMON_OUTPUT_DEFAULTS),
@@ -315,6 +317,24 @@ def _run_payload(job_dir: Path) -> dict:
                           "unit_name": row.get("unit_name"),
                           "summary": row, "figures": {}})
     entry["units"] = units
+    figures_map = (entry.get("manifest") or {}).get("figures")
+    if isinstance(figures_map, Mapping):
+        entry["figures"] = {str(key): list(value) if isinstance(value, list) else []
+                            for key, value in figures_map.items()}
+    else:
+        entry["figures"] = {}
+    for unit in units:
+        names = entry["figures"].get(str(unit.get("unit_id")))
+        if names is None:
+            info = unit.get("figures") or {}
+            names = [value for value in info.values()
+                     if isinstance(value, str) and value.endswith(".png")]
+        unit["figure_files"] = names
+        files = entry.get("files") or []
+        for name in names:
+            if name not in files:
+                files.append(name)
+        entry["files"] = files
     assay = ((entry.get("result") or {}).get("metadata") or {}).get("assay") \
         or (entry.get("job") or {}).get("assay")
     entry["assay"] = assay
@@ -562,17 +582,14 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
             raise ApiError("结果不存在", 404)
         if not _is_run_file(filename):
             raise ApiError("结果文件不存在", 404)
-        path = Path(paths.runs) / run_id / job_id / filename
-        if not path.is_file():
-            # 新批次把整个视频发布在 runs/{run_id} 下；旧记录仍是嵌套目录。
-            flat = Path(paths.runs) / run_id / filename
-            manifest = read_json_file(
-                Path(paths.runs) / run_id / "result_manifest.json", default=None)
-            if (flat.is_file() and isinstance(manifest, Mapping)
-                    and manifest.get("job_id") == job_id
-                    and manifest.get("run_id") == run_id):
-                path = flat
-        if not path.is_file():
+        # 与结果 API 共用同一份归属/状态/声明检查：失败清单不能从这里取文件。
+        run = run_service.resolve_run(store, paths, run_id)
+        if run is None or str(run.get("job_id")) != job_id:
+            raise ApiError("结果文件不存在", 404)
+        if not run_service.declared(run["manifest"], filename):
+            raise ApiError("结果文件不存在", 404)
+        path = run_service.safe_file(run["dir"], filename)
+        if path is None:
             raise ApiError("结果文件不存在", 404)
         if RUN_FIGURE.fullmatch(filename) or RUN_VIDEO.fullmatch(filename):
             # 图形与标注视频默认在结果页内联显示，带 download=1 时按附件下载。
@@ -1121,7 +1138,14 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
     def page_tasks():
         selected = request.args.get("job")
         batches = app.config["JOBS"].list()
-        drafts = [draft for draft in store.list_drafts() if not draft.get("videos")]
+        # “继续设置”是未提交的独立草稿：有视频、且没有任何批次引用它；
+        # 项目草稿走项目页，不混进独立入口。
+        submitted = {batch.get("draft_id") for batch in store.list_batches()
+                     if batch.get("draft_id")}
+        drafts = [draft for draft in store.list_drafts()
+                  if draft.get("project_id") is None
+                  and draft.get("videos")
+                  and draft.get("id") not in submitted]
         return render_template(
             "tasks.html", active="tasks", batches=batches, drafts=drafts,
             selected=selected if is_valid_id(selected) else None,
@@ -1131,9 +1155,181 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
     def page_result(run_id: str):
         if not is_valid_id(run_id):
             return render_template("not_found.html"), 404
-        results = _run_payloads(Path(paths.runs) / run_id)
-        return render_template("result.html", active="tasks", run_id=run_id,
-                               results=results)
+        run = run_service.resolve_run(store, paths, run_id)
+        results = _run_payloads(run["dir"] if run else Path(paths.runs) / run_id)
+        return render_template(
+            "result.html", active="tasks", run_id=run_id, results=results,
+            run=run,
+            run_spec=run_service.spec_of(run.get("assay")) if run else {},
+        )
+
+    # -- 已发布运行：清单、声明文件、打包与打开目录 ---------------------
+    def _require_run(run_id: str) -> dict:
+        if not is_valid_id(run_id):
+            raise ApiError("结果不存在", 404)
+        run = run_service.resolve_run(store, paths, run_id)
+        if run is None:
+            raise ApiError("结果不存在或尚未发布", 404)
+        return run
+
+    @app.get("/api/runs/<run_id>")
+    def api_run(run_id: str):
+        run = _require_run(run_id)
+        return success({
+            "job": run["job"],
+            "manifest": run["manifest"],
+            "summary": [unit.get("summary") or {} for unit in run["summary"]],
+            "files": run["files"],
+            "spec": run_service.spec_of(run["assay"]),
+            "status": run["status"],
+        })
+
+    @app.get("/api/runs/<run_id>/files/<path:relative>")
+    def api_run_file(run_id: str, relative: str):
+        run = _require_run(run_id)
+        if not run_service.declared(run["manifest"], relative):
+            raise ApiError("文件未在清单中声明", 404)
+        path = run_service.safe_file(run["dir"], relative)
+        if path is None:
+            raise ApiError("结果文件不存在", 404)
+        if request.args.get("download"):
+            return send_file(path, as_attachment=True,
+                             download_name=Path(relative).name)
+        mimetype = None
+        if relative.lower().endswith(".mp4"):
+            mimetype = "video/mp4"
+        elif relative.lower().endswith(".png"):
+            mimetype = "image/png"
+        return send_file(path, mimetype=mimetype, conditional=True)
+
+    @app.get("/api/runs/<run_id>/bundle")
+    def api_run_bundle(run_id: str):
+        import tempfile
+
+        run = _require_run(run_id)
+        asset = run.get("asset") or {}
+        name = run_service.bundle_name(asset.get("name"))
+        handle = tempfile.NamedTemporaryFile(prefix="bln-bundle-", suffix=".zip",
+                                             delete=False)
+        handle.close()
+        target = Path(handle.name)
+        try:
+            run_service.write_bundle(target, run)
+        except OSError as error:
+            target.unlink(missing_ok=True)
+            raise ApiError(f"无法打包结果：{error}", 500)
+
+        @after_this_request
+        def _cleanup(response):
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return response
+
+        return send_file(target, mimetype="application/zip",
+                         as_attachment=True, download_name=name)
+
+    @app.post("/api/runs/<run_id>/open")
+    def api_run_open(run_id: str):
+        import subprocess
+
+        run = _require_run(run_id)
+        directory = Path(run["dir"]).resolve()
+        if os.name != "nt":
+            return success({"path": str(directory), "opened": False})
+        try:
+            subprocess.Popen(["explorer", str(directory)],
+                             creationflags=child_creation_flags())
+        except OSError as error:
+            raise ApiError(f"无法打开结果目录：{error}", 500)
+        return success({"path": str(directory), "opened": True})
+
+    # -- 经典关键点会话 -------------------------------------------------
+    @app.get("/api/landmarks")
+    def list_landmarks():
+        return success({"sessions": landmark_service.list_sessions(paths)})
+
+    @app.post("/api/landmarks")
+    def create_landmark():
+        body = _json_body()
+        try:
+            session = landmark_service.create_session(store, paths, body)
+        except ValidationError as error:
+            raise ApiError(error.message, 400, [error.as_issue()])
+        return success({"session": session}, 201)
+
+    @app.get("/api/landmarks/<session_id>")
+    def get_landmark(session_id: str):
+        session = landmark_service.get_session(paths, session_id)
+        if session is None:
+            raise ApiError("会话不存在", 404)
+        return success({"session": session})
+
+    @app.put("/api/landmarks/<session_id>")
+    def update_landmark(session_id: str):
+        body = _json_body()
+        try:
+            session = landmark_service.update_session(paths, session_id, body)
+        except ValidationError as error:
+            status = 404 if error.message == "会话不存在" else 400
+            raise ApiError(error.message, status, [error.as_issue()])
+        return success({"session": session})
+
+    @app.post("/api/landmarks/<session_id>/evaluate")
+    def evaluate_landmark(session_id: str):
+        session = landmark_service.get_session(paths, session_id)
+        if session is None:
+            raise ApiError("会话不存在", 404)
+        try:
+            evaluation = landmark_service.evaluate(paths, session)
+            session = landmark_service.save_evaluation(paths, session,
+                                                       evaluation)
+        except ValidationError as error:
+            raise ApiError(error.message, 400, [error.as_issue()])
+        except media_service.MediaError as error:
+            raise ApiError(str(error), 422, [{"field": "frames",
+                                              "message": str(error)}])
+        return success({"session": session, "evaluation": evaluation})
+
+    @app.get("/landmarks")
+    def page_landmarks():
+        """只从已有草稿的几何里选视频/动物；不在这里新建分析配置。"""
+
+        by_asset: dict[str, dict] = {}
+        for draft in store.list_drafts():
+            for video in draft.get("videos") or []:
+                asset_id = video.get("asset_id")
+                if not is_valid_id(asset_id):
+                    continue
+                entry = by_asset.setdefault(str(asset_id), {"units": [],
+                                                            "asset": None})
+                for unit in video.get("units") or []:
+                    if not isinstance(unit.get("geometry"), Mapping):
+                        continue
+                    if not unit.get("geometry"):
+                        continue
+                    entry["units"].append({
+                        "id": unit.get("id"),
+                        "name": unit.get("name"),
+                        "assay": draft.get("assay"),
+                        "draft_id": draft.get("id"),
+                        "geometry": unit.get("geometry"),
+                        "options": unit.get("options") or {},
+                        "detection": unit.get("detection") or {},
+                    })
+        media = []
+        for asset_id, entry in by_asset.items():
+            if not entry["units"]:
+                continue
+            asset = store.get_asset(asset_id)
+            if asset is None:
+                continue
+            entry["asset"] = asset
+            media.append(entry)
+        return render_template("landmarks.html", active="settings",
+                               sessions=landmark_service.list_sessions(paths),
+                               media=media)
 
     @app.get("/settings")
     def page_settings():
@@ -1173,9 +1369,5 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
             style_fields=web_descriptors.STYLE_FIELDS,
             output_fields=web_descriptors.OUTPUT_FIELDS,
         )
-
-    @app.get("/landmarks")
-    def page_landmarks():
-        return render_template("landmarks.html", active="landmarks")
 
     return app

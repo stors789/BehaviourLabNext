@@ -82,7 +82,8 @@ class LocalService:
         server_factory: Callable[[Any, str, int, int], Any] | None = None,
         ready_probe: Callable[[str, str | Path], tuple[bool, str]] | None = None,
         owner_registry: JobOwnerRegistry | None = None,
-        stop_callbacks: Sequence[Callable[[], None]] | None = None,
+        stop_callbacks: Sequence[Callable[[], object]] | None = None,
+        final_callbacks: Sequence[Callable[[], object]] | None = None,
     ) -> None:
         self.app = app
         self.paths = paths
@@ -93,7 +94,9 @@ class LocalService:
         self._server_factory = server_factory or _default_server_factory
         self._ready_probe = ready_probe or check_health
         self._owner = owner_registry or JobOwnerRegistry(paths)
+        # 先停任务、再排空 HTTP、最后收尾（例如关闭 Store），顺序不可交换。
         self._stop_callbacks = list(stop_callbacks or [])
+        self._final_callbacks = list(final_callbacks or [])
         self._server: Any = None
         self._thread: threading.Thread | None = None
         self._owner_acquired = False
@@ -145,11 +148,15 @@ class LocalService:
         except KeyboardInterrupt:
             return
 
-    def _shutdown_server(self, server: Any) -> None:
+    def _shutdown_server(self, server: Any) -> bool:
+        """关闭监听并尽量排空所属连接；返回是否确认排空。"""
+
+        complete = True
         try:
             server.close()
         except Exception:
             LOGGER.exception("关闭本地服务监听失败")
+            complete = False
 
         channels = getattr(server, "active_channels", None)
         if isinstance(channels, dict):
@@ -167,28 +174,53 @@ class LocalService:
                 dispatcher.shutdown()
             except Exception:
                 LOGGER.exception("关闭服务调度线程失败")
+                complete = False
+
+        remaining = getattr(server, "active_channels", None)
+        if isinstance(remaining, dict) and remaining:
+            # 仍有连接在用数据库：这是“尚在关闭”，不能当作完成。
+            complete = False
+        return complete
 
     def stop(self) -> None:
         with self._lock:
             if self._stopped:
                 return
             self._stopped = True
+            complete = True
             for callback in self._stop_callbacks:
                 try:
-                    callback()
+                    result = callback()
+                    if result is False:
+                        complete = False
                 except Exception:
                     LOGGER.exception("停止任务/工作进程失败")
+                    complete = False
             server = self._server
             self._server = None
             if server is not None:
-                self._shutdown_server(server)
+                if not self._shutdown_server(server):
+                    complete = False
             thread = self._thread
             self._thread = None
             if thread is not None and thread.is_alive():
                 thread.join(timeout=3.0)
                 if thread.is_alive():
                     LOGGER.warning("服务线程在 3 秒内未退出")
+                    complete = False
+            for callback in self._final_callbacks:
+                try:
+                    result = callback()
+                    if result is False:
+                        complete = False
+                except Exception:
+                    LOGGER.exception("关闭收尾失败")
+                    complete = False
             if self._owner_acquired:
-                self._owner.release()
-                self._owner_acquired = False
-            LOGGER.info("本地服务已停止")
+                if complete:
+                    self._owner.release()
+                    self._owner_acquired = False
+                else:
+                    # 未完成关闭：保留数据根所有权，等旧线程真正退出。
+                    LOGGER.warning("关闭未完成，保留数据根所有权")
+            LOGGER.info("本地服务已停止（complete=%s）", complete)

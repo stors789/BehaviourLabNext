@@ -85,11 +85,13 @@ def main(argv: list[str] | None = None) -> int:
 
         app = create_app(data_dir=str(paths.root))
         jobs = app.config["JOBS"]
-        # 服务与调度器共享同一份数据根所有权：关闭时先停调度、再放锁。
+        store = app.config["STORE"]
+        # 关闭顺序固定：停调度 → 排空 HTTP → 关闭 Store → 释放唯一所有权。
         service = LocalService(
             app, paths, port=args.port,
             owner_registry=app.config["JOB_OWNER"],
             stop_callbacks=[jobs.shutdown],
+            final_callbacks=[store.close],
         )
         atexit.register(service.stop)
         service.start()

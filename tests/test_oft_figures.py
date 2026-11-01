@@ -152,7 +152,7 @@ def test_result_page_shows_figures_and_downloads(client, store, tmp_path,
         name="旷场.mp4", path=str(source), project_id=None,
         metadata={"width": 200, "height": 200, "duration_s": 1.0,
                   "fps": 5.0, "frame_count": 5})
-    draft = store.create_draft("oft", videos=[{
+    draft = store.create_draft("oft", output={"annotated_video": False}, videos=[{
         "asset_id": asset["id"],
         "window": {"start_s": 0.0, "end_s": 1.0},
         "orientation": 0, "fps_override": None, "sample_fps": None,
