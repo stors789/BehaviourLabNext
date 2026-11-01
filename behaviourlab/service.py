@@ -68,7 +68,13 @@ def check_health(url: str, data_root: str | Path) -> tuple[bool, str]:
 def _default_server_factory(app: Any, host: str, port: int, threads: int) -> Any:
     from waitress import create_server
 
-    return create_server(app, host=host, port=port, threads=threads)
+    return create_server(
+        app,
+        host=host,
+        port=port,
+        threads=threads,
+        clear_untrusted_proxy_headers=True,
+    )
 
 
 class LocalService:
