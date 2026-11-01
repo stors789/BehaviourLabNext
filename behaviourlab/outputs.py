@@ -133,9 +133,10 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
                   style: Mapping[str, Any] | None) -> dict:
     """每动物可用图形：活动曲线不依赖场地宽高，轨迹/热图才需要。"""
 
+    missing_size_note = False
     figures_info: dict[str, Any] = {"stem": stem, "trajectory": None,
                                     "heatmap": None, "activity": None,
-                                    "objects": None}
+                                    "objects": None, "zones": None}
     name = str(summary.get("unit_name") or summary.get("unit_id") or "")
     notes: list[str] = []
 
@@ -224,6 +225,20 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
                 if not (target / filename).is_file():
                     figures_info[key] = None
     elif figures_info["activity"] is None:
+        # 尺寸缺失只是“没有轨迹/热图”的原因；若专属图形已生成就不刷噪音。
+        missing_size_note = True
+
+    if str(summary.get("mode")) == "epm":
+        zones_figure = f"{stem}_zones.png"
+        try:
+            if figures.epm_zones_png(target / zones_figure, summary,
+                                     title=name, style=style):
+                figures_info["zones"] = zones_figure
+        except (OSError, ValueError) as error:
+            notes.append(f"区域时长图生成失败：{error}")
+
+    if missing_size_note and not any(
+            figures_info.get(key) for key in ("zones", "objects")):
         notes.append("没有可用的场地尺寸，未生成图形")
 
     if isinstance(summary.get("objects"), list) and summary["objects"]:
@@ -275,7 +290,8 @@ def export_result(directory: str | Path, job: Mapping[str, Any],
                 if item.get("unit_id") == unit_id]
         stem = figure_stem(row, used)
         info = _unit_figures(target, row, rows, stem, style)
-        for key in ("trajectory", "heatmap", "activity", "objects"):
+        for key in ("trajectory", "heatmap", "activity", "objects",
+                    "zones"):
             if info.get(key):
                 files.append(info[key])
         units.append({"unit_id": unit_id, "unit_name": row.get("unit_name"),

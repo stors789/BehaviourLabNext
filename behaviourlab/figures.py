@@ -322,6 +322,39 @@ def nor_objects_png(path: str | Path, summary: Mapping[str, Any], *,
     return True
 
 
+EPM_ZONE_LABELS = (("open", "开放臂"), ("closed", "封闭臂"),
+                   ("center", "中心区"), ("unknown", "区外"))
+
+
+def epm_zones_png(path: str | Path, summary: Mapping[str, Any], *,
+                  title: str = "",
+                  style: Mapping[str, Any] | None = None) -> bool:
+    """EPM 四类区域占用时长（秒）；没有区域数据不出图。"""
+
+    seconds = summary.get("zone_seconds")
+    if not isinstance(seconds, Mapping) or not seconds:
+        return False
+    color, _, _, dpi = _style(style)
+    labels = [label for _, label in EPM_ZONE_LABELS]
+    values = [float(_finite(seconds.get(key)) or 0.0)
+              for key, _ in EPM_ZONE_LABELS]
+    figure = Figure(figsize=(4.2, 2.6))
+    FigureCanvasAgg(figure)
+    axes = figure.add_subplot(111)
+    positions = list(range(len(labels)))
+    axes.bar(positions, values, 0.55, color=color)
+    axes.set_xticks(positions)
+    axes.set_xticklabels(labels, fontsize=8)
+    axes.set_ylabel("s")
+    axes.spines["top"].set_visible(False)
+    axes.spines["right"].set_visible(False)
+    if title:
+        axes.set_title(title, fontsize=9, color="#333333")
+    figure.tight_layout()
+    figure.savefig(path, format="png", dpi=dpi)
+    return True
+
+
 def center_rect_for(summary: Mapping[str, Any]) -> tuple[float, float, float, float] | None:
     width = _finite(summary.get("arena_width_cm"))
     height = _finite(summary.get("arena_height_cm"))

@@ -409,6 +409,12 @@ def create_preview(
         _draw_candidates(canvas, result, thickness)
     drawn = []
     for key, shape in geometry.items():
+        if key == "zones" and isinstance(shape, Mapping):
+            # EPM 的五个区域嵌在 zones 下，逐个叠画而不是当成一个形状。
+            for zone in shape.values():
+                if isinstance(zone, Mapping):
+                    _draw_shape(canvas, zone, _bgr("#ffd26f"), thickness)
+            continue
         if not isinstance(shape, Mapping):
             continue
         _draw_shape(canvas, shape, _bgr("#ffd26f"), thickness)

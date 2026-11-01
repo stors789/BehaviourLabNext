@@ -611,8 +611,8 @@ def test_workspace_reads_and_writes_object_steps_through_bridge():
     assert "unit.geometry[state.stepKey]" not in source
     for marker in ("function stepShape(unit, key)",
                    "stepShape(unit, state.stepKey)",
-                   "window.BLCore.norApply(unit.geometry, key, shape)",
-                   "window.BLCore.norClear(unit.geometry, state.stepKey)",
+                   "window.BLCore.stepApply(state.assay, unit.geometry, key, shape)",
+                   "window.BLCore.stepClear(state.assay, unit.geometry, state.stepKey)",
                    "function norRoleRow(index)",
                    'state.assay === "nor" && step.role === "object"'):
         assert marker in source, marker
@@ -783,7 +783,7 @@ def test_undo_refreshes_inspector_without_reload():
         'el.toolUndo.addEventListener("click", () => {', 1)[1].split(
             "\n    });", 1)[0]
     # 撤销几何仍沿用"清除该步骤"的语义，并即时刷新侧栏与预览确认。
-    assert "window.BLCore.norClear(unit.geometry, state.stepKey)" in block
+    assert "window.BLCore.stepClear(state.assay, unit.geometry, state.stepKey)" in block
     assert "state.previewGate.invalidate()" in block
     assert "renderInspector()" in block
     assert '} else if (result === "points") {' not in block
@@ -797,7 +797,7 @@ def test_undo_refreshes_inspector_without_reload():
         'el.toolUndo.addEventListener("click", () => {', 1)[1].split(
             "\n    });", 1)[0]
     # 撤销几何仍沿用"清除该步骤"的语义，并即时刷新侧栏与预览确认。
-    assert "window.BLCore.norClear(unit.geometry, state.stepKey)" in block
+    assert "window.BLCore.stepClear(state.assay, unit.geometry, state.stepKey)" in block
     assert "state.previewGate.invalidate()" in block
     assert "renderInspector()" in block
     assert '} else if (result === "points") {' not in block

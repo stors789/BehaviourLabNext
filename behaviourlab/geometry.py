@@ -284,6 +284,52 @@ def _segments_cross(a, b, c, d) -> bool:
     return o1 != o2 and o3 != o4
 
 
+def segments_intersect(a: Sequence[float], b: Sequence[float],
+                       c: Sequence[float], d: Sequence[float]) -> bool:
+    """两条线段是否相交：含端点接触与共线重叠，共线但分离不算。"""
+
+    def orient(p, q, r):
+        value = (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+        return 0 if abs(value) < 1e-12 else (1 if value > 0 else -1)
+
+    def between(p, q, r):
+        return (min(p[0], q[0]) - 1e-12 <= r[0] <= max(p[0], q[0]) + 1e-12
+                and min(p[1], q[1]) - 1e-12 <= r[1] <= max(p[1], q[1]) + 1e-12)
+
+    o1 = orient(a, b, c)
+    o2 = orient(a, b, d)
+    o3 = orient(c, d, a)
+    o4 = orient(c, d, b)
+    if o1 != o2 and o3 != o4:
+        return True
+    if o1 == 0 and between(a, b, c):
+        return True
+    if o2 == 0 and between(a, b, d):
+        return True
+    if o3 == 0 and between(c, d, a):
+        return True
+    if o4 == 0 and between(c, d, b):
+        return True
+    return False
+
+
+def polygon_self_intersects(points: Sequence[Sequence[float]]) -> bool:
+    """简单多边形判定：任意非相邻边都不得相交。"""
+
+    count = len(points)
+    if count < 4:
+        return False
+    for first in range(count):
+        a, b = points[first], points[(first + 1) % count]
+        for second in range(first + 1, count):
+            if second in ((first + 1) % count, (first - 1) % count):
+                continue
+            c, d = points[second], points[(second + 1) % count]
+            if segments_intersect(a, b, c, d):
+                return True
+    return False
+
+
 def ellipse_normalized(
     point: Sequence[float],
     center: Sequence[float],

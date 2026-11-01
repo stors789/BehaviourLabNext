@@ -302,7 +302,7 @@
             <tr><th>路径</th><td>
               总 {{ num(s.total_distance_cm, 3) }} cm · 可测 {{ num(s.measurable_motion_time_s, 3) }} s ·
               移动 {{ num(s.moving_time_s, 3) }} s / 漂浮 {{ num(s.floating_time_s, 3) }} s ·
-              均速 {{ num(s.mean_speed_cm_s, 3) }} / 最大 {{ num(s.max_speed_cm_s, 3) }} cm/s
+              估计平均速度 {{ num(s.mean_speed_cm_s, 3) }} / 最大 {{ num(s.max_speed_cm_s, 3) }} cm/s
             </td></tr>
             <tr><th>效率</th><td>
               确认前路径 {{ num(s.path_length_to_platform_cm, 3) }} cm · 效率 {{ num(s.path_efficiency, 3) }} ·
@@ -505,6 +505,93 @@
         <figcaption>热图（40×40 箱，秒/箱，按有效曝光加权）</figcaption>
       </figure>
       {% endif %}
+    </div>
+    {% elif unit.figures.note %}
+    <p class="muted">{{ unit.figures.note }}</p>
+    {% endif %}
+
+    {% elif assay == "epm" %}
+    <div class="metric-grid">
+      {{ metric("开放臂时间", num(s.open_time_s, 3), "s") }}
+      {{ metric("封闭臂时间", num(s.closed_time_s, 3), "s") }}
+      {{ metric("中心区时间", num(s.center_time_s, 3), "s") }}
+      {{ metric("开放臂时间占总时长", num(s.open_time_percent_total, 1), "%") }}
+      {{ metric("开放臂时间占臂区时长", num(s.open_time_percent_arms_only, 1), "%") }}
+      {{ metric("开放臂进入次数", s.open_entries if s.open_entries is not none else "—", "次") }}
+    </div>
+
+    <details class="fold">
+      <summary>全部指标</summary>
+      <div class="fold-body">
+        <table class="simple-table">
+          <tbody>
+            <tr><th>入臂</th><td>
+              开放 {{ s.open_entries }} 次 · 封闭 {{ s.closed_entries }} 次 ·
+              总计 {{ s.total_arm_entries }} 次 · 开放进入比例 {{ num(s.open_entry_percent, 1) }} % ·
+              首次进入开放臂潜伏期 {{ num(s.first_open_entry_latency_s, 3) }} s
+            </td></tr>
+            <tr><th>时间</th><td>
+              窗口 {{ num(s.total_time_s, 3) }} s · 检测 {{ num(s.observed_time_s, 3) }} s ·
+              缺失 {{ num(s.missing_time_s, 3) }} s · 区外 {{ num(s.unknown_time_s, 3) }} s
+              （{{ s.detected_frames }} / {{ s.window_frames }} 行）
+            </td></tr>
+            <tr><th>估计运动</th><td>
+              估计总距离 {{ num(s.total_distance_cm, 3) }} cm_estimated ·
+              估计平均速度 {{ num(s.mean_speed_cm_s, 3) }} / 最大 {{ num(s.max_speed_cm_s, 3) }} cm/s ·
+              移动 {{ num(s.moving_time_s, 3) }} s / 静止 {{ num(s.immobility_time_s, 3) }} s ·
+              可测 {{ num(s.measurable_motion_time_s, 3) }} s
+            </td></tr>
+            <tr><th>估计尺度</th><td>
+              {{ num(s.cm_per_px_est, 4) }} cm_estimated/px（手画臂长与中心边长的比例平均，非透视校正）
+            </td></tr>
+            <tr><th>参数</th><td>
+              中心区边长 {{ num(s.center_size_cm, 2) }} cm ·
+              开放臂长 {{ num(s.open_arm_length_cm, 2) }} cm ·
+              封闭臂长 {{ num(s.closed_arm_length_cm, 2) }} cm ·
+              入臂深度比例 {{ num(s.entry_depth_ratio, 2) }} ·
+              中心重置 {{ num(s.entry_reset_center_s, 2) }} s ·
+              移动阈值 {{ num(s.movement_threshold_cm_s, 2) }} cm/s ·
+              箱宽 {{ num(s.bin_seconds, 2) }} s
+            </td></tr>
+            <tr><th>窗口</th><td>
+              {% if s.analysis_window_start_s is not none %}
+              {{ num(s.analysis_window_start_s, 3) }}–{{ num(s.analysis_window_end_s, 3) }} s
+              {% else %}未确定{% endif %}
+            </td></tr>
+          </tbody>
+        </table>
+        {% set unit_bins = (entry.result.bins or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
+        {% if unit_bins %}
+        <table class="simple-table">
+          <thead>
+            <tr><th>箱</th><th>时间（s）</th><th>检测</th><th>开放</th><th>封闭</th><th>中心</th><th>入臂</th><th>距离</th><th>均速</th></tr>
+          </thead>
+          <tbody>
+            {% for b in unit_bins %}
+            <tr>
+              <td>{{ b.bin_index }}</td>
+              <td>{{ num(b.start_s, 2) }}–{{ num(b.end_s, 2) }}</td>
+              <td>{{ num(b.observed_time_s, 2) }}</td>
+              <td>{{ num(b.open_time_s, 2) }}</td>
+              <td>{{ num(b.closed_time_s, 2) }}</td>
+              <td>{{ num(b.center_time_s, 2) }}</td>
+              <td>{{ b.open_entries }} / {{ b.closed_entries }}</td>
+              <td>{{ num(b.distance_cm, 2) }}</td>
+              <td>{{ num(b.mean_speed_cm_s, 2) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+    </details>
+    <p class="muted">距离与速度为手画尺寸的估计值（cm_estimated），请结合视频与人工复核。</p>
+    {% if unit.figures.zones %}
+    <div class="figure-row">
+      <figure>
+        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.zones }}" alt="区域时长">
+        <figcaption>区域占用时长（秒，估计）</figcaption>
+      </figure>
     </div>
     {% elif unit.figures.note %}
     <p class="muted">{{ unit.figures.note }}</p>

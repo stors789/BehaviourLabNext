@@ -41,7 +41,7 @@ RUN_FILES = ("observations.csv", "summary.csv", "events.csv", "bins.csv",
              "frozen_job.json", "results.json", "result_manifest.json",
              "report.md")
 RUN_FIGURE = re.compile(
-    r"[A-Za-z0-9_-]+_(?:trajectory|heatmap|activity|objects)\.png")
+    r"[A-Za-z0-9_-]+_(?:trajectory|heatmap|activity|objects|zones)\.png")
 
 
 def _is_run_file(name: str) -> bool:

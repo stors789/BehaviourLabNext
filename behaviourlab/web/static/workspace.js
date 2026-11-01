@@ -732,15 +732,17 @@
       (target && target.options) || {});
   }
 
-  // NOR 的物体步骤存在 geometry.objects 里，画布通过同一桥接读写。
+  // 画布步骤键与持久化结构不一定同名（NOR 的物体、EPM 的五区），
+  // 统一通过 BLCore 的步骤桥接读写。
   function stepShape(unit, key) {
-    return window.BLCore.norShape(unit ? unit.geometry : null, key);
+    return window.BLCore.stepShape(state.assay,
+      unit ? unit.geometry : null, key);
   }
 
   function setStepShape(unit, key, shape) {
     if (!unit) return;
     if (!unit.geometry) unit.geometry = {};
-    window.BLCore.norApply(unit.geometry, key, shape);
+    window.BLCore.stepApply(state.assay, unit.geometry, key, shape);
   }
 
   function norObjectShapes(unit) {
@@ -2103,7 +2105,7 @@
       const result = state.editor.undo();
       const unit = currentUnit();
       if (result === "geometry" && unit && unit.geometry) {
-        window.BLCore.norClear(unit.geometry, state.stepKey);
+        window.BLCore.stepClear(state.assay, unit.geometry, state.stepKey);
         markDirty();
         state.previewGate.invalidate();
       }
@@ -2115,7 +2117,7 @@
       const unit = currentUnit();
       state.editor.redraw();
       if (unit && unit.geometry) {
-        window.BLCore.norClear(unit.geometry, state.stepKey);
+        window.BLCore.stepClear(state.assay, unit.geometry, state.stepKey);
         markDirty();
         state.previewGate.invalidate();
       }

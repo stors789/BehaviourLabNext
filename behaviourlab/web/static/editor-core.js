@@ -560,6 +560,15 @@
           + count(behavior.object_2_exploration_s) + " s）· 接近 "
           + count((Number(behavior.object_1_zone_time_s) || 0)
             + (Number(behavior.object_2_zone_time_s) || 0)) + " s");
+      } else if (behavior.mode === "epm") {
+        const count = (number) => (typeof number === "number" && isFinite(number)
+          ? String(number) : "—");
+        lines.push("行为 " + value(behavior.total_time_s) + " s：开放 "
+          + value(behavior.open_time_s) + " / 封闭 "
+          + value(behavior.closed_time_s) + " / 中心 "
+          + value(behavior.center_time_s) + " s · 入臂 "
+          + count(behavior.total_arm_entries) + " 次（开放 "
+          + count(behavior.open_entries) + "）");
       } else {
         lines.push("行为 " + value(behavior.total_time_s) + " s：非挣扎 "
           + value(behavior.immobility_time_s) + " / 挣扎 "
@@ -745,6 +754,49 @@
     return objects;
   }
 
+  // EPM 的五区存成 geometry.zones.<key>；画布步骤键与区域键同名。
+  const NESTED_ZONE_STEPS = {
+    epm: ["center", "open_1", "open_2", "closed_1", "closed_2"],
+  };
+
+  function stepShape(assay, geometry, key) {
+    if (!geometry) return null;
+    if (assay === "nor") return norShape(geometry, key);
+    const nested = NESTED_ZONE_STEPS[assay];
+    if (nested && nested.includes(key)) {
+      const zones = geometry.zones;
+      const shape = zones && typeof zones === "object" ? zones[key] : null;
+      return shape ? clone(shape) : null;
+    }
+    return norKeyShape(geometry, key);
+  }
+
+  function stepApply(assay, geometry, key, shape) {
+    if (!geometry) return;
+    if (assay === "nor") {
+      norApply(geometry, key, shape);
+      return;
+    }
+    const nested = NESTED_ZONE_STEPS[assay];
+    if (nested && nested.includes(key)) {
+      if (shape) {
+        if (!geometry.zones || typeof geometry.zones !== "object") {
+          geometry.zones = {};
+        }
+        geometry.zones[key] = clone(shape);
+      } else if (geometry.zones && typeof geometry.zones === "object") {
+        delete geometry.zones[key];
+      }
+      return;
+    }
+    if (shape) geometry[key] = shape;
+    else delete geometry[key];
+  }
+
+  function stepClear(assay, geometry, key) {
+    stepApply(assay, geometry, key, null);
+  }
+
   function norNormalizeRoles(geometry, phase) {
     if (!geometry) return norObjects(geometry);
     const objects = norObjects(geometry);
@@ -782,5 +834,8 @@
     norClear,
     norSetRole,
     norNormalizeRoles,
+    stepShape,
+    stepApply,
+    stepClear,
   };
 });
