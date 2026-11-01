@@ -466,6 +466,21 @@ def validate_draft(draft: Mapping[str, Any], *,
                         entry["field"] = (f"{unit_prefix}.{field}" if field
                                           else unit_prefix)
                         issues.append(entry)
+                # 人工输入的专用校验（Barnes 的洞序列与入箱时刻）：与窗口
+                # 无关的结构、洞号与顺序在这里报，运行期再检查真实动物窗。
+                manual_checker = (getattr(experiments.get(assay),
+                                          "validate_unit_manual", None)
+                                  if experiments.exists(assay) else None)
+                if manual_checker is not None:
+                    merged = resolve_options(assay, draft=draft, video=video,
+                                             unit=unit)
+                    for issue in manual_checker(unit, options=merged,
+                                                complete=complete):
+                        entry = dict(issue)
+                        field = issue.get("field")
+                        entry["field"] = (f"{unit_prefix}.{field}" if field
+                                          else unit_prefix)
+                        issues.append(entry)
                 if ymaze:
                     # 自动单位按合并后的检测配置校验：draft/video 层的无效值
                     # 若被单位层覆盖，不应再单独报错。

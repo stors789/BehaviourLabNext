@@ -52,6 +52,8 @@
     playLastTime: null,
     rate: 1,
     editCounter: 0,
+    // 人工洞序列的编辑文本与格式错误按动物缓存，互不影响。
+    manualCache: new Map(),
   };
 
   const el = {
@@ -725,6 +727,7 @@
     const spec = currentSpec();
     if (spec && state.stepKey !== spec.key) selectStep(spec.key);
     state.recordMode = isManualMode();
+    pruneManualCache();
     renderTasknav();
   }
 
@@ -1848,6 +1851,171 @@
     el.preview.hidden = !confirmed && !state.previewAwaiting;
   }
 
+  // -- 人工事件（Barnes）----------------------------------------------
+  // hole_visits:null 表示自动探洞；[] 表示人工确认零访问，两者不能混。
+  function manualCache() {
+    if (!state.manualCache) state.manualCache = new Map();
+    return state.manualCache;
+  }
+
+  function manualText(unit) {
+    const key = unit && unit.id ? unit.id : null;
+    if (key && manualCache().has(key)) return manualCache().get(key);
+    const list = unit && unit.manual && Array.isArray(unit.manual.hole_visits)
+      ? unit.manual.hole_visits : [];
+    const text = list.map((item) => {
+      if (!item || typeof item.time_s !== "number" || !Number.isFinite(item.time_s)) {
+        return "";
+      }
+      const hole = item.hole_id == null ? "" : String(item.hole_id);
+      return item.time_s + ", " + hole;
+    }).filter(Boolean).join("\n");
+    const entry = { text, error: null };
+    if (key) manualCache().set(key, entry);
+    return entry;
+  }
+
+  function parseManualVisits(text) {
+    return window.BLCore.parseManualVisits(text);
+  }
+
+  function manualFormatError() {
+    const video = currentVideo();
+    if (!video) return null;
+    for (const unit of video.units || []) {
+      if (!unit || !unit.manual || !Array.isArray(unit.manual.hole_visits)) continue;
+      const cached = unit.id ? manualCache().get(unit.id) : null;
+      if (cached && cached.error) return cached.error;
+    }
+    return null;
+  }
+
+  function pruneManualCache() {
+    if (!state.manualCache) return;
+    const alive = new Set();
+    ((state.draft && state.draft.videos) || []).forEach((video) => {
+      (video.units || []).forEach((unit) => {
+        if (unit && unit.id) alive.add(unit.id);
+      });
+    });
+    Array.from(manualCache().keys()).forEach((key) => {
+      if (!alive.has(key)) manualCache().delete(key);
+    });
+  }
+
+  function appendManualEvents(body, unit) {
+    if (state.assay !== "barnes" || !unit) return;
+    const manual = unit.manual && typeof unit.manual === "object" ? unit.manual : null;
+    const enabled = Boolean(manual && manual.hole_visits !== null
+      && manual.hole_visits !== undefined);
+    const probe = effectiveOption(unit, "trial_type", "training") === "probe";
+
+    const fold = document.createElement("details");
+    fold.className = "fold";
+    const summary = document.createElement("summary");
+    summary.textContent = "人工事件";
+    const inner = document.createElement("div");
+    inner.className = "fold-body";
+
+    const toggle = document.createElement("label");
+    toggle.className = "field inline";
+    const caption = document.createElement("span");
+    caption.textContent = "使用人工洞序列";
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.checked = enabled;
+    check.addEventListener("change", () => {
+      const target = currentUnit();
+      if (!target) return;
+      if (!target.manual || typeof target.manual !== "object") target.manual = {};
+      // 切换即改模式：关闭写 null，重新打开从空人工列表开始。
+      target.manual.hole_visits = check.checked ? [] : null;
+      if (target.id) manualCache().delete(target.id);
+      invalidatePreview();
+      markDirty();
+      renderInspector();
+    });
+    toggle.append(caption, check);
+    inner.append(toggle);
+
+    if (enabled) {
+      const area = document.createElement("textarea");
+      area.rows = 4;
+      area.className = "manual-visits";
+      area.placeholder = "视频秒, 洞号";
+      const entry = manualText(unit);
+      area.value = entry.text;
+      const hint = document.createElement("p");
+      hint.className = "muted";
+      hint.textContent = entry.error || "每行一条；按输入顺序计分，不自动排序。";
+      if (entry.error) hint.dataset.tone = "error";
+      area.addEventListener("input", () => {
+        const target = currentUnit();
+        if (!target) return;
+        const cached = manualText(target);
+        cached.text = area.value;
+        const parsed = parseManualVisits(area.value);
+        if (parsed.error) {
+          // 保留原始编辑文本与错误；不覆盖最后一份合法数组。
+          cached.error = parsed.error;
+          hint.textContent = parsed.error;
+          hint.dataset.tone = "error";
+          status(parsed.error, "error");
+          invalidatePreview();
+          return;
+        }
+        cached.error = null;
+        hint.textContent = "每行一条；按输入顺序计分，不自动排序。";
+        delete hint.dataset.tone;
+        if (!target.manual || typeof target.manual !== "object") target.manual = {};
+        target.manual.hole_visits = parsed.entries;
+        invalidatePreview();
+        markDirty();
+      });
+      inner.append(area, hint);
+    }
+
+    if (!probe) {
+      const escapeLabel = document.createElement("label");
+      escapeLabel.className = "field inline";
+      const escapeCaption = document.createElement("span");
+      escapeCaption.textContent = "确认入箱时间（视频秒）";
+      const escapeInput = document.createElement("input");
+      escapeInput.type = "number";
+      escapeInput.step = "any";
+      escapeInput.min = "0";
+      escapeInput.placeholder = "未确认";
+      const current = manual && manual.escape_time_s != null
+        ? manual.escape_time_s : null;
+      escapeInput.value = current == null ? "" : String(current);
+      escapeInput.addEventListener("change", () => {
+        const target = currentUnit();
+        if (!target) return;
+        if (!target.manual || typeof target.manual !== "object") target.manual = {};
+        const raw = escapeInput.value.trim();
+        if (!raw) {
+          target.manual.escape_time_s = null;
+        } else {
+          const seconds = Number(raw);
+          if (!Number.isFinite(seconds) || seconds < 0) {
+            status("确认入箱时间必须是非负秒数", "error");
+            escapeInput.value = target.manual.escape_time_s == null
+              ? "" : String(target.manual.escape_time_s);
+            return;
+          }
+          target.manual.escape_time_s = seconds;
+        }
+        invalidatePreview();
+        markDirty();
+      });
+      escapeLabel.append(escapeCaption, escapeInput);
+      inner.append(escapeLabel);
+    }
+
+    fold.append(summary, inner);
+    body.append(fold);
+  }
+
   function appendExperimentSettings(body, unit) {
     const settings = document.createElement("details");
     settings.className = "fold";
@@ -1859,6 +2027,7 @@
     inner.append(parameterFields(unit));
     settings.append(summary, inner);
     body.append(settings);
+    appendManualEvents(body, unit);
 
     const animal = document.createElement("details");
     animal.className = "fold";
@@ -2046,6 +2215,11 @@
       if (param.key === "phase" && state.assay === "nor") {
         if (!target.geometry) target.geometry = {};
         window.BLCore.norNormalizeRoles(target.geometry, changed);
+      }
+      if (param.key === "trial_type" && state.assay === "barnes") {
+        // 探测试次没有入箱：切到 probe 立即清掉确认时间并保存；切回不再恢复。
+        if (!target.manual || typeof target.manual !== "object") target.manual = {};
+        if (changed === "probe") target.manual.escape_time_s = null;
       }
       invalidatePreview();
       markDirty();
@@ -2420,6 +2594,12 @@
 
   async function runPreview(kind) {
     if (!state.draftId) return;
+    const formatError = manualFormatError();
+    if (formatError) {
+      // 非法人工格式不落盘、不预览：先修好输入。
+      status(formatError, "error");
+      return;
+    }
     // 只接受显式的阶段名；事件对象等非字符串一律按当前阶段处理。
     const type = typeof kind === "string"
       ? kind : (state.step === "review" ? "behavior" : "detection");
@@ -2497,8 +2677,10 @@
           return;
         }
         setPreviewNote(window.BLCore.previewNoteFor(data));
-        status((data.preview_scope && data.preview_scope.mode === "frame"
-          ? "本帧预览" : "片段预览") + " · 帧 " + data.frame_index, "ok");
+        const scopeMode = data.preview_scope && data.preview_scope.mode;
+        const scopeLabel = scopeMode === "frame" ? "本帧预览"
+          : scopeMode === "configured" ? "配置范围预览" : "片段预览";
+        status(scopeLabel + " · 帧 " + data.frame_index, "ok");
         renderInspector();
       };
       el.preview.onerror = () => {
@@ -2530,6 +2712,11 @@
   }
 
   async function primaryAction() {
+    const formatError = manualFormatError();
+    if (formatError) {
+      status(formatError, "error");
+      return;
+    }
     if (state.step === "review") {
       if (state.previewGate.confirmed(previewConfig("behavior"))) await startAnalysis();
       else await runPreview("behavior");

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -355,8 +356,10 @@ def create_preview(
     height, width = info.image.shape[:2]
     orientation = int(video.get("orientation", 0) or 0)
     manual_scope = is_manual_path(draft.get("assay", ""), unit)
-    # 人工记录路径不运行自动检测，也不为它伪造检测区域。
-    detect_here = not (kind == "behavior" and manual_scope)
+    # 纯人工 Y 记录不运行自动检测；Barnes 的人工只换洞访问序列，仍要真实捕获
+    # 身体/鼻尖覆盖与路径，检测区域与候选照常显示。
+    detect_here = not (kind == "behavior" and manual_scope
+                       and draft.get("assay") == "ymaze")
     region_source = None
     result = None
     if detect_here:
@@ -406,7 +409,8 @@ def create_preview(
             "geometry": geometry,
             "options": dict(options),
             "detection": settings,
-            "manual": unit.get("manual"),
+            # 人工记录按值传入：预览不得写回或改写草稿里的输入。
+            "manual": deepcopy(unit.get("manual")),
         }
         try:
             behavior = module.preview_analysis(
@@ -497,6 +501,15 @@ def create_preview(
         warnings.append("头向未判定：缺少细尾证据。")
     if missing:
         warnings.append("尚未绘制：" + "、".join(missing))
+
+    if behavior is not None and behavior.get("visit_source") == "manual":
+        # 人工序列只决定洞访问与入箱评分；身体/鼻尖覆盖仍来自本次真实捕获。
+        start = behavior.get("window_start_s")
+        end = behavior.get("window_end_s")
+        span = (f"{float(start):.3f}–{float(end):.3f} s"
+                if start is not None and end is not None else "未确定")
+        warnings.append("行为预览保留人工洞访问与入箱评分，统计范围为动物窗 "
+                        + span + "；覆盖与路径仍来自本次真实捕获。")
 
     manual_behavior = bool(behavior) and behavior.get("manual") is True
     if manual_behavior and behavior.get("events") == 0:

@@ -977,6 +977,7 @@
               没有确认入箱（{{ "删失" if s.total_censored else "不适用" }}）
               {% else %}
               潜伏期 {{ num(s.total_latency_s, 3) }} s · 路径 {{ num(s.total_path_cm, 3) }} cm · 错误 {{ s.total_errors }} 次
+              {% if s.visit_source == "manual" %}（人工确认）{% endif %}
               {% endif %}
               · 逃避候选 {{ s.escape_candidates }} 次（未确认）
             </td></tr>

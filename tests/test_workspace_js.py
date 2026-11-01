@@ -272,3 +272,29 @@ def test_ldb_geometry_steps_follow_visibility():
     inspector = source.split("const steps = geometrySteps();", 1)[1].split(
         "const required = steps.filter", 1)[0]
     assert "steps.some((step) => step.key === state.stepKey)" in inspector
+
+
+def test_barnes_manual_events_wiring():
+    """人工洞序列与确认入箱的界面接线：面板、探针清理与提交闸门。"""
+
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    panel = source.split("function appendManualEvents", 1)[1].split(
+        "\n  function appendExperimentSettings", 1)[0]
+    assert 'summary.textContent = "人工事件"' in panel
+    assert 'caption.textContent = "使用人工洞序列"' in panel
+    assert 'escapeCaption.textContent = "确认入箱时间（视频秒）"' in panel
+    # 切换复选框即改模式：勾选写 []，取消写 null，并清掉该动物的编辑缓存。
+    assert "target.manual.hole_visits = check.checked ? [] : null;" in panel
+    assert "manualCache().delete(target.id);" in panel
+    # 格式错误保留原始文本，不覆盖最后一份合法数组。
+    assert "cached.error = parsed.error;" in panel
+    assert "target.manual.hole_visits = parsed.entries;" in panel
+
+    toggle = source.split('param.key === "trial_type" && state.assay === "barnes"',
+                          1)[1].split("\n      }", 1)[0]
+    assert 'changed === "probe"' in toggle
+    assert "target.manual.escape_time_s = null;" in toggle
+
+    # 非法格式与保存失败都不得进入预览或提交。
+    assert source.count("manualFormatError()") >= 3

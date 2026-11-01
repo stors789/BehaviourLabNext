@@ -739,10 +739,13 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
     def create_preview(draft_id: str):
         _require_draft(draft_id)
         body = _json_body()
+        unit_id = body.get("unit_id")
         try:
             result = preview_service.create_preview(store, paths, draft_id, body)
         except ValidationError as error:
-            raise ApiError(error.message, 400, [error.as_issue()])
+            # 字段问题带上单位身份，界面才能定位到具体动物的人工输入。
+            raise ApiError(error.message, 400, [error.as_issue(
+                unit_id=unit_id if is_valid_id(unit_id) else None)])
         except media_service.MediaError as error:
             raise ApiError(str(error), 422,
                            [{"field": "frame_index", "message": str(error)}])

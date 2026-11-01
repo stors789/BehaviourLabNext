@@ -4,6 +4,7 @@ const assert = require("assert");
 const {
   saveThenPreview,
   previewNoteFor,
+  parseManualVisits,
   issueText,
   setFieldLabels,
   mwmLines,
@@ -446,6 +447,27 @@ function barnesScopeNotes() {
   assert.ok(!detection.text.includes("片段估计"), detection.text);
 }
 
+// Barnes 人工洞序列文本：中文逗号、空行、缺字段与非法时间。
+function manualVisitsParsing() {
+  const parsed = parseManualVisits("0.4，2\n1.2, 2\n\n2.4,1\n");
+  assert.deepStrictEqual(parsed.entries, [
+    { time_s: 0.4, hole_id: "2" },
+    { time_s: 1.2, hole_id: "2" },
+    { time_s: 2.4, hole_id: "1" },
+  ]);
+  assert.deepStrictEqual(parseManualVisits("   ").entries, [],
+    "全空白输入表示零访问");
+  assert.deepStrictEqual(parseManualVisits(null).entries, []);
+  assert.ok(parseManualVisits("0.4").error.includes("第 1 行"));
+  assert.ok(parseManualVisits("0.4,2,3").error.includes("第 1 行"));
+  assert.ok(parseManualVisits(",2").error.includes("第 1 行"));
+  assert.ok(parseManualVisits("0.4,").error.includes("第 1 行"));
+  assert.ok(parseManualVisits("-1,2").error.includes("非负"));
+  assert.ok(parseManualVisits("abc,2").error.includes("非负"));
+  assert.ok(parseManualVisits("1,2\n0.5,1").entries.length === 2,
+    "解析保留输入顺序，排序留给最终校验");
+}
+
 (async () => {
   await saveRunsFirst();
   await saveFailureStopsPreview();
@@ -457,6 +479,7 @@ function barnesScopeNotes() {
   behaviorNote();
   mwmQuadrantGuides();
   barnesScopeNotes();
+  manualVisitsParsing();
   await saveFailureCarriesFieldReason();
   console.log("workspace-preview OK");
 })().catch((error) => {

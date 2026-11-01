@@ -510,6 +510,27 @@
     no_candidate_within_gate: "门限内没有符合的候选",
   };
 
+  // Barnes 人工洞序列：一行“视频秒, 洞号”，兼容中文逗号；保留输入顺序。
+  function parseManualVisits(text) {
+    const lines = String(text == null ? "" : text).split(/\r?\n/);
+    const entries = [];
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index].trim();
+      if (!line) continue;
+      const parts = line.replace(/，/g, ",").split(",")
+        .map((part) => part.trim());
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        return { error: "第 " + (index + 1) + " 行应为“视频秒,洞号”" };
+      }
+      const seconds = Number(parts[0]);
+      if (!Number.isFinite(seconds) || seconds < 0) {
+        return { error: "第 " + (index + 1) + " 行时间必须是非负秒数" };
+      }
+      entries.push({ time_s: seconds, hole_id: parts[1] });
+    }
+    return { entries };
+  }
+
   // 预览范围说明：configured 是完整配置范围，普通自动预览才是片段估计。
   function previewFramePrefix(frameTime) {
     return (typeof frameTime === "number" && isFinite(frameTime))
@@ -964,6 +985,7 @@
     SaveQueue,
     previewSignature,
     previewNoteFor,
+    parseManualVisits,
     issueText,
     setFieldLabels,
     saveThenPreview,

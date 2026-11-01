@@ -333,6 +333,68 @@ def target_hole_id(options: Mapping[str, Any]) -> str:
     return value
 
 
+def validate_unit_manual(unit: Mapping[str, Any], *,
+                         options: Mapping[str, Any] | None = None,
+                         complete: bool = False) -> list[dict]:
+    """人工洞序列与确认入箱的结构校验；与动物窗相关的检查留到运行期。"""
+
+    manual = unit.get("manual")
+    if manual is None:
+        return []
+    if not isinstance(manual, Mapping):
+        return [{"field": "manual", "message": "必须是对象或 null"}]
+    values = options if isinstance(options, Mapping) else {}
+    geometry = unit.get("geometry") or {}
+    holes, _ = holes_of(geometry, values.get("hole_count"))
+    raw_holes = geometry.get("holes")
+    # 洞位本身有错时只报洞位，不对洞号做连带判断。
+    ids = ({item["id"] for item in holes}
+           if isinstance(raw_holes, list) and holes
+           and len(holes) == len(raw_holes) else None)
+
+    issues: list[dict] = []
+    visits = manual.get("hole_visits")
+    if visits is not None:
+        if not isinstance(visits, list):
+            issues.append({"field": "manual.hole_visits",
+                           "message": "必须是数组或 null"})
+        else:
+            previous: float | None = None
+            for index, item in enumerate(visits):
+                field = f"manual.hole_visits[{index}]"
+                if not isinstance(item, Mapping):
+                    issues.append({"field": field,
+                                   "message": "每条访问必须是 {time_s, hole_id}"})
+                    continue
+                seconds = _finite(item.get("time_s"))
+                if seconds is None or seconds < 0:
+                    issues.append({"field": f"{field}.time_s",
+                                   "message": "时间必须是非负的有限秒数"})
+                elif previous is not None and seconds < previous - 1e-12:
+                    issues.append({"field": f"{field}.time_s",
+                                   "message": "访问时间必须非递减"})
+                else:
+                    previous = seconds
+                raw_id = item.get("hole_id")
+                if isinstance(raw_id, bool) or raw_id is None \
+                        or not str(raw_id).strip():
+                    issues.append({"field": f"{field}.hole_id",
+                                   "message": "洞号不能为空"})
+                elif ids is not None and str(raw_id) not in ids:
+                    issues.append({"field": f"{field}.hole_id",
+                                   "message": f"洞号 {raw_id} 不在已标洞号中"})
+
+    escape = manual.get("escape_time_s")
+    if escape is not None:
+        if _finite(escape) is None or float(escape) < 0:
+            issues.append({"field": "manual.escape_time_s",
+                           "message": "必须是非负的有限秒数或 null"})
+        elif values.get("trial_type") == "probe":
+            issues.append({"field": "manual.escape_time_s",
+                           "message": "探测试次不接受确认入箱时间"})
+    return issues
+
+
 def require_geometry(geometry: Mapping[str, Any] | None,
                      options: Mapping[str, Any]) -> tuple[
         tuple[list[float], list[float], float], list[dict]]:
@@ -763,18 +825,24 @@ def process_unit(unit: Mapping[str, Any], captured: Sequence[Mapping[str, Any]],
     escape = _finite(manual.get("escape_time_s"))
     probe = options.get("trial_type") == "probe"
 
+    # 自动洞访问始终计算：人工模式只换主序列，不删除自动审计记录。
+    automatic_visits = _visits_for(rows, holes, options)
     visits = (_manual_visits(manual_visits) if manual_source
-              else _visits_for(rows, holes, options))
+              else automatic_visits)
+    if manual_source or escape is not None:
+        # 人工时刻必须落在真实动物窗内；不裁剪、不延长、不改 null 迁就输入。
+        check_manual_window(visits if manual_source else [], escape, window)
     if probe:
         # 探测试次没有入箱概念：既不产生候选，也不保留逃避字段。
-        escapes: list[dict] = []
+        candidates: list[dict] = []
         escape = None
     else:
-        escapes = escape_candidates(rows, target_point,
-                                    float(options["hole_radius_cm"]), target)
+        candidates = escape_candidates(rows, target_point,
+                                       float(options["hole_radius_cm"]), target)
 
-    scoring = _scored(visits, target, None if probe else escape)
-    events = _event_rows(unit, visits, escapes)
+    scored_escape = None if probe else escape
+    scoring = _scored(visits, target, scored_escape)
+    events = _event_rows(unit, visits, candidates, scored_escape, target)
 
     times = timeline.time_summary(rows)
     total = times["total_time_s"]
@@ -852,7 +920,7 @@ def process_unit(unit: Mapping[str, Any], captured: Sequence[Mapping[str, Any]],
         "total_censored": total_censored,
         "total_errors": total_errors,
         "total_path_cm": total_path,
-        "escape_candidates": len(escapes),
+        "escape_candidates": len(candidates),
         "body_time_s": body_time,
         "nose_time_s": nose_time,
         "target_sector_time_s": sector_time,
@@ -880,15 +948,25 @@ def process_unit(unit: Mapping[str, Any], captured: Sequence[Mapping[str, Any]],
             "nose_time_s": hole_nose.get(hole["id"], 0.0),
             "visits": len([item for item in scored
                            if item["hole_id"] == hole["id"]]),
-            "automatic_visits": len([item for item in events
-                                     if item["kind"] == "hole_visit"
-                                     and item["source"] == "automatic"
-                                     and item["hole_id"] == hole["id"]]),
+            "automatic_visits": len([item for item in automatic_visits
+                                     if item["hole_id"] == hole["id"]]),
         })
 
-    automatic_table = [dict(item) for item in events
-                       if item["kind"] == "hole_visit"
-                       and item["source"] == "automatic"]
+    if manual_source:
+        # 人工模式：自动访问只作审计记录，用独立事件号避免与主序列混淆。
+        automatic_table = []
+        for index, item in enumerate(automatic_visits, start=1):
+            entry = dict(item)
+            entry.update({
+                "event_id": f"{unit.get('id')}:automatic_hole_visit:{index}",
+                "unit_id": unit.get("id"),
+                "unit_name": unit.get("name"),
+            })
+            automatic_table.append(entry)
+    else:
+        automatic_table = [dict(item) for item in events
+                           if item["kind"] == "hole_visit"
+                           and item["source"] == "automatic"]
 
     metadata = {
         "mode": KEY,
@@ -902,6 +980,7 @@ def process_unit(unit: Mapping[str, Any], captured: Sequence[Mapping[str, Any]],
         "coverage_denominator": "full animal window exposure",
         "primary_origin": "animal window start",
         "manual_entry_endpoint_s": escape,
+        "manual_empty_means": ("zero visits" if manual_source else None),
         "mean_speed_denominator": "completed motion duration inside the disc",
         "sector_width_rad": 2.0 * math.pi / float(options["hole_count"]),
     }
@@ -953,15 +1032,49 @@ def _manual_visits(entries: Any) -> list[dict]:
     return visits
 
 
+def check_manual_window(visits: Sequence[Mapping[str, Any]],
+                        escape: float | None,
+                        window: timeline.Window) -> None:
+    """人工时刻必须落在真实动物窗内：访问是半开窗，入箱时间右端可等于窗尾。"""
+
+    if not visits and escape is None:
+        return
+    if not window.known:
+        field = ("manual.escape_time_s" if escape is not None
+                 else "manual.hole_visits")
+        raise ValidationError("没有有效动物窗，无法校验人工记录的时刻", field)
+    start = float(window.start_s)
+    end = float(window.end_s)
+    for index, item in enumerate(visits):
+        moment = item.get("time_s")
+        if moment is None or not (start - 1e-9 <= float(moment) < end):
+            raise ValidationError(
+                f"人工访问必须落在动物窗 {start:g}–{end:g} s 内",
+                f"manual.hole_visits[{index}].time_s")
+    if escape is not None and not (start - 1e-9 <= float(escape)
+                                   <= end + 1e-9):
+        raise ValidationError(
+            f"确认入箱时间必须落在动物窗 {start:g}–{end:g} s 内",
+            "manual.escape_time_s")
+
+
 def _event_rows(unit: Mapping[str, Any],
                 visits: Sequence[Mapping[str, Any]],
-                escapes: Sequence[Mapping[str, Any]]) -> list[dict]:
+                candidates: Sequence[Mapping[str, Any]],
+                escape: float | None,
+                target: str) -> list[dict]:
     """事件 id 按 kind 与顺序生成，再按 time_s、kind 稳定排序。"""
 
     unit_id = unit.get("id")
     counters: dict[str, int] = {}
     events: list[dict] = []
-    for item in list(visits) + list(escapes):
+    rows = list(visits) + list(candidates)
+    if escape is not None:
+        # 人工确认入箱是独立端点，不能由未确认的消失候选替代。
+        rows.append({"kind": "escape_confirmed", "target": target,
+                     "time_s": float(escape), "confirmed_s": float(escape),
+                     "source": "manual"})
+    for item in rows:
         kind = item["kind"]
         counters[kind] = counters.get(kind, 0) + 1
         entry = dict(item)
@@ -1185,9 +1298,16 @@ def preview_analysis(*, asset: Mapping[str, Any], video: Mapping[str, Any],
         "visit_source": summary["visit_source"],
         "target_hole": summary["target_hole"],
         "visits": summary["visits"],
+        "unscored_visits": summary["unscored_visits"],
+        "post_escape_visits": summary["post_escape_visits"],
         "primary_latency_s": summary["primary_latency_s"],
         "primary_errors": summary["primary_errors"],
         "primary_censored": summary["primary_censored"],
+        "primary_path_cm": summary["primary_path_cm"],
+        "total_latency_s": summary["total_latency_s"],
+        "total_errors": summary["total_errors"],
+        "total_path_cm": summary["total_path_cm"],
+        "total_censored": summary["total_censored"],
         "nose_coverage_percent": summary["nose_coverage_percent"],
         "body_coverage_percent": summary["body_coverage_percent"],
         "target_sector_time_s": summary["target_sector_time_s"],

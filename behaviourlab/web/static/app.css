@@ -1208,6 +1208,15 @@ summary:focus-visible {
   outline-offset: 1px;
 }
 
+/* 人工洞序列：一行“视频秒, 洞号”，保留原始文本以便报格式错误。 */
+.manual-visits {
+  width: 100%;
+  min-height: 84px;
+  resize: vertical;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+
 .field-row {
   display: flex;
   gap: 14px;
