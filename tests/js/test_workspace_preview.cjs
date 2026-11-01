@@ -10,6 +10,9 @@ const {
   issueText,
   setFieldLabels,
   mwmLines,
+  normalizeWindow,
+  assignWindow,
+  removeUnit,
 } = require("../../behaviourlab/web/static/editor-core.js");
 
 const CONFIG = {
@@ -496,6 +499,60 @@ function previewActionContract() {
   assert.strictEqual(manualFormatIssue([], () => null), null);
 }
 
+// 动物时间窗：global 写 null，exact 校验起止，relative 保留负偏移；
+// 一次只写当前动物，另一只小鼠的窗口保持不变。
+function animalWindowValues() {
+  const first = { id: "a", window: null };
+  const second = { id: "b", window: { mode: "exact", start_s: 1, end_s: 2 } };
+
+  assert.deepStrictEqual(assignWindow(first, "global", {}),
+    { window: null, error: null });
+  assert.strictEqual(first.window, null);
+
+  assert.deepStrictEqual(assignWindow(first, "exact", { start_s: "1.5", end_s: "4" }),
+    { window: { mode: "exact", start_s: 1.5, end_s: 4 }, error: null });
+  assert.deepStrictEqual(first.window, { mode: "exact", start_s: 1.5, end_s: 4 });
+  assert.ok(normalizeWindow("exact", { start_s: "", end_s: 4 }).error);
+  assert.ok(normalizeWindow("exact", { start_s: 4, end_s: 4 }).error);
+  assert.ok(normalizeWindow("exact", { start_s: -1, end_s: 4 }).error);
+
+  // 负偏移合法，持续时间必须为正：-1 / 3 不得被控件改成 0。
+  const relative = assignWindow(first, "relative",
+    { offset_s: "-1", duration_s: "3" });
+  assert.deepStrictEqual(relative.window,
+    { mode: "relative", offset_s: -1, duration_s: 3 });
+  assert.strictEqual(first.window.offset_s, -1);
+  assert.strictEqual(first.window.duration_s, 3);
+  assert.ok(normalizeWindow("relative", { offset_s: "", duration_s: 3 }).error);
+  assert.ok(normalizeWindow("relative", { offset_s: 0, duration_s: 0 }).error);
+  assert.deepStrictEqual(normalizeWindow("relative", { offset_s: 0, duration_s: 2 }),
+    { window: { mode: "relative", offset_s: 0, duration_s: 2 }, error: null });
+
+  // 校验失败不写任何动物；写入只影响传入的那一只。
+  assert.ok(assignWindow(first, "exact", { start_s: 3, end_s: 1 }).error);
+  assert.deepStrictEqual(first.window,
+    { mode: "relative", offset_s: -1, duration_s: 3 });
+  assert.deepStrictEqual(second.window, { mode: "exact", start_s: 1, end_s: 2 });
+}
+
+// 删除当前小鼠：只去掉这一只，剩一只时没有删除入口，输入数组不被改写。
+function unitRemoval() {
+  const units = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  const plan = removeUnit(units, 1);
+  assert.deepStrictEqual(plan.units.map((item) => item.id), ["a", "c"]);
+  assert.strictEqual(plan.removed.id, "b");
+  assert.strictEqual(plan.index, 1);
+  assert.deepStrictEqual(units.map((item) => item.id), ["a", "b", "c"]);
+
+  const last = removeUnit(units, 2);
+  assert.deepStrictEqual(last.units.map((item) => item.id), ["a", "b"]);
+  assert.strictEqual(last.index, 1, "删到末尾时选中前一只");
+
+  assert.strictEqual(removeUnit([{ id: "a" }], 0), null, "最后一只不能删除");
+  assert.strictEqual(removeUnit(units, 9), null);
+  assert.strictEqual(removeUnit(null, 0), null);
+}
+
 (async () => {
   await saveRunsFirst();
   await saveFailureStopsPreview();
@@ -508,6 +565,8 @@ function previewActionContract() {
   mwmQuadrantGuides();
   barnesScopeNotes();
   manualVisitsParsing();
+  animalWindowValues();
+  unitRemoval();
   previewActionContract();
   await saveFailureCarriesFieldReason();
   console.log("workspace-preview OK");

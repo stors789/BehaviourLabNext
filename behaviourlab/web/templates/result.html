@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}结果 · {{ app_name }}{% endblock %}
+{% block topcenter %}<p class="page-context">分析结果</p>{% endblock %}
 
 {% macro num(value, digits=2) -%}
 {%- if value is none -%}—

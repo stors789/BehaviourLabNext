@@ -26,6 +26,9 @@
     frame: 0,
     lastFrame: 0,
     shownFrame: 0,
+    // 视频设置页自己的源帧位置：与场地画布的当前帧互不干扰。
+    rangeFrame: 0,
+    rangeToken: 0,
     image: null,
     imageToken: 0,
     frameInfo: null,
@@ -73,10 +76,19 @@
     selectedEmpty: document.querySelector("#selected-empty"),
     selectedCount: document.querySelector("#selected-count"),
     setup: document.querySelector("#setup-videos"),
+    setupNote: document.querySelector("#setup-note"),
+    selectStatus: document.querySelector("#select-status"),
+    rangeStatus: document.querySelector("#range-status"),
     rangeList: document.querySelector("#range-list"),
     rangeImage: document.querySelector("#range-image"),
     rangeEmpty: document.querySelector("#range-empty"),
     rangeForm: document.querySelector("#range-form"),
+    rangeVideoName: document.querySelector("#range-video-name"),
+    rangeFpsNote: document.querySelector("#range-fps-note"),
+    rangeSlide: document.querySelector("#range-frame-range"),
+    rangeIndex: document.querySelector("#range-frame-number"),
+    rangeTime: document.querySelector("#range-time-label"),
+    backToSelect: document.querySelector("#back-to-select"),
     windowStart: document.querySelector("#window-start"),
     windowEnd: document.querySelector("#window-end"),
     orientation: document.querySelector("#orientation"),
@@ -90,6 +102,7 @@
     toolUndo: document.querySelector("#tool-undo"),
     toolRedraw: document.querySelector("#tool-redraw"),
     toolFinish: document.querySelector("#tool-finish"),
+    toolTitle: document.querySelector("#toolhead-title"),
     frameRange: document.querySelector("#frame-range"),
     frameNumber: document.querySelector("#frame-number"),
     timeLabel: document.querySelector("#time-label"),
@@ -132,9 +145,17 @@
     body: JSON.stringify(body),
   });
 
+  // 状态写到当前阶段真正可见的那一条：选择/视频设置页没有画布状态栏。
+  function statusNode() {
+    if (state.step === "select") return el.selectStatus || el.statusbar;
+    if (state.step === "range") return el.rangeStatus || el.statusbar;
+    return el.statusbar;
+  }
+
   function status(message, tone) {
-    el.statusbar.textContent = message || "";
-    el.statusbar.dataset.tone = tone || "";
+    const node = statusNode();
+    node.textContent = message || "";
+    node.dataset.tone = tone || "";
   }
 
   // 校验失败优先显示字段级原因；通用文案只在没有具体字段时兜底。
@@ -257,9 +278,9 @@
     const labels = stepLabels();
     const links = el.tasknav.querySelectorAll("[data-step-link]");
     const order = state.recordMode ? ["select", "arena", "review"] : ["select", "range", "arena"];
+    // 选择与视频设置都属于“视频”阶段：设置页不能显示成已进入场地。
     let activeIndex = 0;
-    if (state.step === "range") activeIndex = 1;
-    else if (state.step === "arena") activeIndex = state.view === "detection" ? 2 : 1;
+    if (state.step === "arena") activeIndex = state.view === "detection" ? 2 : 1;
     else if (state.step === "review") activeIndex = 2;
     links.forEach((link, index) => {
       const step = order[index];
@@ -412,6 +433,10 @@
     renderSelected();
   }
 
+  function assetThumbPath(asset) {
+    return "/api/assets/" + asset.id + "/frame?index=0&orientation=0";
+  }
+
   function renderSelected() {
     const chosen = state.assets.filter((asset) => state.selected.has(asset.id));
     el.selectedList.innerHTML = "";
@@ -419,10 +444,32 @@
     el.selectedEmpty.hidden = chosen.length > 0;
     chosen.forEach((asset) => {
       const item = document.createElement("li");
-      item.className = "selected-row";
+      item.className = "chosen-row";
+      const thumb = document.createElement("span");
+      thumb.className = "thumb";
+      const image = document.createElement("img");
+      image.alt = "";
+      image.loading = "lazy";
+      image.src = assetThumbPath(asset);
+      // 缩略图读不到时留明确占位，不放破图。
+      image.addEventListener("error", () => {
+        image.remove();
+        const empty = document.createElement("span");
+        empty.className = "thumb-empty";
+        empty.textContent = "无缩略图";
+        thumb.append(empty);
+      });
+      thumb.append(image);
+      const body = document.createElement("span");
+      body.className = "chosen-body";
       const name = document.createElement("span");
-      name.className = "selected-name";
+      name.className = "chosen-name";
       name.textContent = asset.name;
+      name.title = asset.name;
+      const meta = document.createElement("span");
+      meta.className = "chosen-meta";
+      meta.textContent = metaText(asset) || "视频";
+      body.append(name, meta);
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "remove-button";
@@ -431,10 +478,13 @@
         state.selected.delete(asset.id);
         renderAssets();
       });
-      item.append(name, remove);
+      item.append(thumb, body, remove);
       el.selectedList.append(item);
     });
-    el.setup.disabled = chosen.length === 0 || state.mode === "project" && !state.projectId;
+    const reason = !chosen.length ? "先选择要分析的视频"
+      : (state.mode === "project" && !state.projectId ? "先选择项目" : "");
+    el.setup.disabled = Boolean(reason);
+    if (el.setupNote) el.setupNote.textContent = reason;
   }
 
   function showErrors(errors) {
@@ -550,15 +600,17 @@
       const name = document.createElement("span");
       name.className = "range-name";
       name.textContent = asset.name;
+      name.title = asset.name;
       const meta = document.createElement("span");
       meta.className = "range-meta";
-      meta.textContent = metaText(asset);
+      const count = (video.units || []).length;
+      meta.textContent = (count ? count + " 只小鼠" : "未设置小鼠") +
+        (metaText(asset) ? " · " + metaText(asset) : "");
       button.append(name, meta);
       button.addEventListener("click", () => {
         state.videoIndex = index;
         state.unitIndex = 0;
-        state.frame = 0;
-        state.shownFrame = 0;
+        state.rangeFrame = 0;
         renderRange();
       });
       el.rangeList.append(button);
@@ -571,20 +623,70 @@
     el.orientation.value = String(video.orientation || 0);
     el.fpsOverride.value = video.fps_override == null ? "" : video.fps_override;
     el.sampleFps.value = video.sample_fps == null ? "" : video.sample_fps;
-    loadRangeFrame(video);
+
+    const asset = assetById(video.asset_id) || { name: "", metadata: {} };
+    const meta = asset.metadata || {};
+    if (el.rangeVideoName) {
+      el.rangeVideoName.textContent = asset.name || "视频 " + (state.videoIndex + 1);
+      el.rangeVideoName.title = asset.name || "";
+    }
+    if (el.rangeFpsNote) {
+      const sourceFps = Number(meta.fps);
+      const parts = [];
+      parts.push(Number.isFinite(sourceFps) && sourceFps > 0
+        ? "源帧率 " + (Math.round(sourceFps * 100) / 100) + " FPS"
+        : "源帧率未知");
+      if (Number(meta.frame_count) > 0) parts.push(meta.frame_count + " 帧");
+      el.rangeFpsNote.textContent = parts.join(" · ");
+    }
+
+    const fps = video.fps_override || Number(meta.fps) || 25;
+    const frames = Number(meta.frame_count) ||
+      Math.floor((Number(meta.duration_s) || 0) * fps) || 0;
+    state.lastFrame = Math.max(0, Math.round(frames) - 1);
+    if (el.rangeSlide) {
+      el.rangeSlide.max = String(state.lastFrame);
+      el.rangeSlide.value = String(Math.min(state.lastFrame, state.rangeFrame || 0));
+    }
+    if (el.rangeIndex) {
+      el.rangeIndex.max = String(state.lastFrame);
+      el.rangeIndex.value = String(Math.min(state.lastFrame, state.rangeFrame || 0));
+    }
+    loadRangeFrame(video, state.rangeFrame);
   }
 
-  async function loadRangeFrame(video) {
+  async function loadRangeFrame(video, index) {
+    const token = ++state.rangeToken;
+    const target = Math.max(0, Math.min(state.lastFrame,
+      Number.isInteger(index) ? index : 0));
+    state.rangeFrame = target;
+    if (el.rangeSlide) el.rangeSlide.value = String(target);
+    if (el.rangeIndex) el.rangeIndex.value = String(target);
+    if (el.rangeTime) {
+      el.rangeTime.textContent = "第 — 帧 · --:--.--- / " +
+        timeText(videoDuration(), 1);
+    }
     el.rangeImage.removeAttribute("src");
     if (el.rangeEmpty) el.rangeEmpty.hidden = false;
     try {
-      const response = await fetch(framePath(video, 0));
-      if (!response.ok) return;
+      const response = await fetch(framePath(video, target), { cache: "no-store" });
+      if (!response.ok || token !== state.rangeToken) return;
+      const frame = Number(response.headers.get("X-Source-Frame"));
+      const time = Number(response.headers.get("X-Source-Time"));
       const blob = await response.blob();
+      if (token !== state.rangeToken) return;
       const url = URL.createObjectURL(blob);
       el.rangeImage.onload = () => {
         URL.revokeObjectURL(url);
+        if (token !== state.rangeToken) return;
         if (el.rangeEmpty) el.rangeEmpty.hidden = true;
+        if (el.rangeIndex && Number.isFinite(frame)) {
+          el.rangeIndex.value = String(frame);
+        }
+        if (el.rangeTime) {
+          el.rangeTime.textContent = "第 " + (Number.isFinite(frame) ? frame : target) +
+            " 帧 · " + timeText(time, 3) + " / " + timeText(videoDuration(), 1);
+        }
       };
       el.rangeImage.src = url;
     } catch (error) {
@@ -640,6 +742,8 @@
     video.sample_fps = sample;
     invalidatePreview();
     markDirty();
+    // 方向或解释帧率变化后，设置页的源帧要按新参数重读。
+    if (el.rangeSlide) loadRangeFrame(video, state.rangeFrame);
     return true;
   }
 
@@ -856,12 +960,6 @@
     window.BLCore.stepApply(state.assay, unit.geometry, key, shape);
   }
 
-  function norObjectShapes(unit) {
-    return ["object1", "object2", "explore1", "explore2"]
-      .map((key) => stepShape(unit, key))
-      .filter(Boolean);
-  }
-
   function selectStep(key) {
     const step = geometrySteps().find((item) => item.key === key);
     if (!step) return;
@@ -874,13 +972,32 @@
     draw();
   }
 
+  function syncToolTitle() {
+    if (!el.toolTitle) return;
+    if (state.recordMode) {
+      el.toolTitle.textContent = "";
+      return;
+    }
+    if (state.view === "detection") {
+      el.toolTitle.textContent = "检测";
+      return;
+    }
+    const step = currentSpec();
+    el.toolTitle.textContent = step ? "绘制：" + step.label : "";
+  }
+
   function syncTools() {
+    // 只有场地阶段能编辑几何：检测与人工阶段不摆可编辑工具。
+    const editable = !state.recordMode && state.view !== "detection";
     const unit = currentUnit();
     const hasGeometry = Boolean(stepShape(unit, state.stepKey));
     const hasPending = state.editor.points.length > 0;
-    el.toolFinish.hidden = !state.editor.canFinish();
+    el.toolUndo.hidden = !editable;
+    el.toolRedraw.hidden = !editable;
+    el.toolFinish.hidden = !editable || !state.editor.canFinish();
     el.toolUndo.disabled = !hasGeometry && !hasPending;
     el.toolRedraw.disabled = !hasGeometry && !hasPending;
+    syncToolTitle();
   }
 
   function refreshEditorSpec() {
@@ -1177,6 +1294,41 @@
     return [point[0] * view.scale + view.ox, point[1] * view.scale + view.oy];
   }
 
+  // 当前实验允许显示的已保存几何：LDB 关闭暗室可见时不画暗室，其余原样。
+  function unitGeometryShapes(unit) {
+    if (!unit) return [];
+    const spec = assaySpec();
+    let steps = spec ? spec.geometry || [] : [];
+    if (state.assay === "ldb" && effectiveOptions(unit).dark_box_visible === false) {
+      steps = steps.filter((step) => step.key !== "dark");
+    }
+    return steps
+      .map((step) => ({ step, shape: stepShape(unit, step.key) }))
+      .filter((item) => Boolean(item.shape));
+  }
+
+  function shapeAnchor(shape) {
+    if (!shape) return null;
+    if (shape.type === "ellipse" && shape.center) return shape.center;
+    if (shape.type === "holes") return null;
+    const points = shape.points || [];
+    if (!points.length) return null;
+    const sum = points.reduce((acc, point) => [acc[0] + point[0], acc[1] + point[1]],
+      [0, 0]);
+    return [sum[0] / points.length, sum[1] / points.length];
+  }
+
+  function drawStepLabel(step, shape) {
+    const anchor = shapeAnchor(shape);
+    if (!anchor || !step || !step.label) return;
+    const point = toCss(anchor);
+    ctx.save();
+    ctx.font = "11px 'Segoe UI', 'Microsoft YaHei', sans-serif";
+    ctx.fillStyle = "rgba(255, 210, 111, 0.9)";
+    ctx.fillText(step.label, point[0] + 8, point[1] - 6);
+    ctx.restore();
+  }
+
   function draw() {
     const rect = canvas.getBoundingClientRect();
     ctx.clearRect(0, 0, rect.width, rect.height);
@@ -1198,29 +1350,25 @@
 
     const video = currentVideo();
     if (!video) return;
+    // 其他动物只是只读参照。
     video.units.forEach((unit, index) => {
       if (index === state.unitIndex) return;
-      Object.values(unit.geometry || {}).forEach((shape) => drawShape(shape, "#8ed7c7", 1.2, false));
-      if (state.assay === "nor") {
-        norObjectShapes(unit).forEach((shape) => drawShape(shape, "#8ed7c7", 1.2, false));
-      }
+      unitGeometryShapes(unit).forEach((item) => {
+        drawShape(item.shape, "#8ed7c7", 1.2, false);
+      });
     });
     const unit = currentUnit();
     if (!unit) return;
-    if (state.assay === "nor") {
-      norObjectShapes(unit).forEach((shape) => drawShape(shape, "#8ed7c7", 1.4, false));
-    }
-    if (state.assay === "barnes") {
-      // 场地阶段同时看到圆盘外缘与按序编号的洞位，目标洞单独圈出。
-      ["arena", "holes"].forEach((key) => {
-        const context = stepShape(unit, key);
-        if (context) drawShape(context, "#8ed7c7", 1.4, false);
-      });
-      drawBarnesTarget(unit);
-    }
+    // 当前动物：其余已保存几何用同色细线，只有当前步骤带可编辑手柄。
+    unitGeometryShapes(unit).forEach((item) => {
+      if (item.step.key === state.stepKey) return;
+      drawShape(item.shape, "#ffd26f", 1.6, false);
+      if (item.step.type !== "holes") drawStepLabel(item.step, item.shape);
+    });
+    if (state.assay === "barnes") drawBarnesTarget(unit);
+    if (state.assay === "mwm") drawMwmGuides(unit);
     const shape = stepShape(unit, state.stepKey);
     if (shape) drawShape(shape, "#ffd26f", 2.8, true);
-    if (state.assay === "mwm") drawMwmGuides(unit);
     drawEditor();
   }
 
@@ -1456,6 +1604,7 @@
     body.innerHTML = "";
     // 人工记录/复核没有几何绘制，撤销与重画在这里不适用。
     if (el.toolhead) el.toolhead.hidden = Boolean(state.recordMode);
+    syncToolTitle();
     if (state.recordMode) {
       if (state.step === "review") renderReviewInspector(body, unit);
       else renderRecordInspector(body, unit);
@@ -1490,6 +1639,7 @@
       }
     });
     body.append(list);
+    appendModeControl(body);
     if (state.assay === "ymaze") {
       // 场地页选择记录方式：自动追踪 / 人工记录（人工切换需确认已有记录）。
       appendPathMode(body);
@@ -1501,13 +1651,15 @@
       summary.textContent = "可选区域";
       fold.append(summary);
       const inner = document.createElement("div");
-      inner.className = "step-list";
-      optional.forEach((step) => inner.append(stepRow(step, drawn(step))));
+      inner.className = "fold-body";
+      const innerList = document.createElement("div");
+      innerList.className = "step-list";
+      optional.forEach((step) => innerList.append(stepRow(step, drawn(step))));
+      inner.append(innerList);
       fold.append(inner);
       body.append(fold);
     }
     appendExperimentSettings(body, unit);
-    appendModeControl(body);
     const missing = required.filter((step) => !drawn(step));
     el.primary.textContent = "下一步：检测";
     el.secondary.hidden = true;
@@ -1593,12 +1745,25 @@
   }
 
   function renderDetectionInspector(body, unit) {
-    const title = document.createElement("h3");
-    title.textContent = "检测";
-    body.append(title, detectionFields(unit));
+    // 检测阶段只放检测方法、阈值、输出与设置；场地步骤不在这里出现。
+    const methods = document.createElement("div");
+    methods.className = "inspect-section";
+    methods.append(detectionFields(unit));
+    body.append(methods);
+
     appendPreviewModes(body);
+
+    const output = document.createElement("details");
+    output.className = "fold";
+    const outputSummary = document.createElement("summary");
+    outputSummary.textContent = "输出";
+    const outputBody = document.createElement("div");
+    outputBody.className = "fold-body";
+    appendAnnotationToggle(outputBody);
+    output.append(outputSummary, outputBody);
+    body.append(output);
+
     appendExperimentSettings(body, unit);
-    appendAnnotationToggle(body);
 
     const kind = state.previewKind === "behavior" ? "behavior" : "detection";
     const confirmed = state.previewGate.confirmed(previewConfig(kind));
@@ -1607,6 +1772,7 @@
     el.secondary.textContent = kind === "behavior" ? "更新行为预览" : "更新检测预览";
     el.secondary.hidden = !confirmed;
     el.preview.hidden = !confirmed && !state.previewAwaiting;
+    syncTools();
   }
 
   // 原始画面 / 检测预览 / 行为预览：三者切换同一画布上的叠画。
@@ -1955,7 +2121,7 @@
       const entry = manualText(unit);
       area.value = entry.text;
       const hint = document.createElement("p");
-      hint.className = "muted";
+      hint.className = "muted manual-hint";
       hint.textContent = entry.error || "每行一条；按输入顺序计分，不自动排序。";
       if (entry.error) hint.dataset.tone = "error";
       area.addEventListener("input", () => {
@@ -1985,8 +2151,9 @@
     }
 
     if (!probe) {
+      // 独立可空字段：label 独占一行，输入框不撑出检查器宽度。
       const escapeLabel = document.createElement("label");
-      escapeLabel.className = "field inline";
+      escapeLabel.className = "manual-field";
       const escapeCaption = document.createElement("span");
       escapeCaption.textContent = "确认入箱时间（视频秒）";
       const escapeInput = document.createElement("input");
@@ -2034,6 +2201,10 @@
     const inner = document.createElement("div");
     inner.className = "fold-body";
     inner.append(parameterFields(unit));
+    // 自动路径在这里给动物时间窗入口；人工 Y 用记录阶段那一份（只允许 global/exact）。
+    if (!(state.assay === "ymaze" && isManualMode())) {
+      inner.append(animalWindowField(unit, { allowRelative: true }));
+    }
     settings.append(summary, inner);
     body.append(settings);
     appendManualEvents(body, unit);
@@ -2045,8 +2216,61 @@
     const animalBody = document.createElement("div");
     animalBody.className = "fold-body";
     animalBody.append(nameField(unit));
+    const remove = unitDeleteField(unit);
+    if (remove) animalBody.append(remove);
     animal.append(animalSummary, animalBody);
     body.append(animal);
+  }
+
+  function unitDeleteField(unit) {
+    const video = currentVideo();
+    if (!video || (video.units || []).length < 2 || !unit) return null;
+    const wrap = document.createElement("div");
+    wrap.className = "unit-delete";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "button small danger";
+    button.textContent = "删除当前小鼠";
+    button.addEventListener("click", () => { deleteCurrentUnit(); });
+    const note = document.createElement("p");
+    note.textContent = "只从当前视频移除该小鼠的几何、参数与人工记录。";
+    wrap.append(button, note);
+    return wrap;
+  }
+
+  async function deleteCurrentUnit() {
+    const video = currentVideo();
+    if (!video || (video.units || []).length < 2) return;
+    const unit = currentUnit();
+    if (!unit) return;
+    const name = unit.name || "小鼠 " + (state.unitIndex + 1);
+    const remaining = video.units.length - 1;
+    if (!window.confirm("删除「" + name + "」？将移除该小鼠在当前视频的几何、参数和人工记录；"
+        + "视频、其他小鼠与已完成结果不受影响。剩余 " + remaining + " 只。")) {
+      return;
+    }
+    const plan = window.BLCore.removeUnit(video.units, video.units.indexOf(unit));
+    if (!plan) return;
+    video.units = plan.units;
+    if (unit.id) manualCache().delete(unit.id);
+    state.unitIndex = plan.index;
+    state.stepKey = null;
+    state.view = "geometry";
+    stopPlayback();
+    // 旧预览确认与在途画面属于已删除的小鼠。
+    invalidatePreview();
+    state.imageToken += 1;
+    markDirty();
+    ensureContext();
+    renderTasknav();
+    renderInspector();
+    draw();
+    const ok = await saveThen();
+    if (!ok) {
+      status(lastSaveText("删除未保存，请重试"), "error");
+      return;
+    }
+    status("已删除「" + name + "」", "ok");
   }
 
   function appendPathMode(body) {
@@ -2284,7 +2508,7 @@
   function playbackRow(options) {
     const opts = options || {};
     const wrap = document.createElement("div");
-    wrap.className = "mode-row";
+    wrap.className = "mode-row record-row";
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "button small";
@@ -2307,7 +2531,7 @@
 
   function armRow() {
     const wrap = document.createElement("div");
-    wrap.className = "mode-row";
+    wrap.className = "mode-row record-row";
     ["A", "B", "C"].forEach((arm) => {
       const button = document.createElement("button");
       button.type = "button";
@@ -2422,86 +2646,104 @@
     return label;
   }
 
-  function animalWindowField(unit) {
+  // 动物时间窗：跟随视频 / 指定时间 / 首次检测后。只写当前 unit.window，
+  // relative 的首次检测由服务端算，界面不复算也不写默认合法值。
+  function animalWindowField(unit, options) {
+    const opts = options || {};
+    const allowRelative = opts.allowRelative !== false;
     const video = currentVideo();
     const duration = videoDuration();
-    const window = unit.window && unit.window.mode === "exact" ? unit.window : null;
+    const current = unit.window && typeof unit.window === "object" ? unit.window : null;
+    const mode = current && (current.mode === "exact" ||
+      (current.mode === "relative" && allowRelative)) ? current.mode : "global";
+
     const wrap = document.createElement("div");
-    const modeLabel = document.createElement("label");
-    modeLabel.className = "field";
+    wrap.className = "field-stack window-field";
+    const selectLabel = document.createElement("label");
+    selectLabel.className = "field";
     const caption = document.createElement("span");
     caption.textContent = "动物时间窗";
     const select = document.createElement("select");
-    [["global", "跟随视频"], ["exact", "绝对窗口"]].forEach(([value, text]) => {
+    const choices = [["global", "跟随视频"], ["exact", "指定时间"]];
+    if (allowRelative) choices.push(["relative", "首次检测后"]);
+    choices.forEach(([value, text]) => {
       const option = document.createElement("option");
       option.value = value;
       option.textContent = text;
-      option.selected = (window ? "exact" : "global") === value;
+      option.selected = mode === value;
       select.append(option);
     });
-    modeLabel.append(caption, select);
-    wrap.append(modeLabel);
+    selectLabel.append(caption, select);
+    wrap.append(selectLabel);
 
-    const rows = document.createElement("div");
-    rows.className = "field-row";
-    rows.hidden = !window;
-    const startInput = document.createElement("input");
-    startInput.type = "number";
-    startInput.min = "0";
-    startInput.step = "any";
-    startInput.value = window ? String(window.start_s) : "0";
-    const endInput = document.createElement("input");
-    endInput.type = "number";
-    endInput.min = "0";
-    endInput.step = "any";
-    endInput.value = window && window.end_s != null
-      ? String(window.end_s) : String(duration);
-    const startLabel = document.createElement("label");
-    startLabel.className = "field";
-    const startCaption = document.createElement("span");
-    startCaption.textContent = "起点（秒）";
-    startLabel.append(startCaption, startInput);
-    const endLabel = document.createElement("label");
-    endLabel.className = "field";
-    const endCaption = document.createElement("span");
-    endCaption.textContent = "终点（秒）";
-    endLabel.append(endCaption, endInput);
-    rows.append(startLabel, endLabel);
-    wrap.append(rows);
+    const fieldRow = (labels) => {
+      const row = document.createElement("div");
+      row.className = "field-row";
+      labels.forEach(([text, input]) => {
+        const label = document.createElement("label");
+        label.className = "field";
+        const span = document.createElement("span");
+        span.textContent = text;
+        label.append(span, input);
+        row.append(label);
+      });
+      return row;
+    };
+    const numberInput = (value, minimum) => {
+      const input = document.createElement("input");
+      input.type = "number";
+      input.step = "any";
+      // 只有真正有下限的字段才设 min：相对偏移允许负值。
+      if (minimum != null) input.min = String(minimum);
+      input.value = value == null ? "" : String(value);
+      return input;
+    };
 
-    const applyWindow = () => {
+    const startInput = numberInput(
+      current && current.start_s != null ? current.start_s
+        : (video && video.window && video.window.start_s) || 0, 0);
+    const endInput = numberInput(
+      current && current.end_s != null ? current.end_s : duration, 0);
+    const offsetInput = numberInput(current && current.offset_s != null
+      ? current.offset_s : 0, null);
+    const spanInput = numberInput(current && current.duration_s != null
+      ? current.duration_s : 2, 0);
+
+    const exactRow = fieldRow([["起点（秒）", startInput], ["终点（秒）", endInput]]);
+    const relativeRow = fieldRow([["偏移（秒）", offsetInput], ["持续时间（秒）", spanInput]]);
+    wrap.append(exactRow, relativeRow);
+
+    const updateRows = () => {
+      exactRow.hidden = select.value !== "exact";
+      relativeRow.hidden = select.value !== "relative";
+    };
+    updateRows();
+
+    const apply = () => {
       const target = currentUnit();
-      if (!target) return;
-      if (select.value === "global") {
-        target.window = null;
-        rows.hidden = true;
-      } else {
-        const start = Number(startInput.value);
-        const end = Number(endInput.value);
-        if (!Number.isFinite(start) || start < 0) {
-          status("窗口起点必须是非负数", "error");
-          return;
-        }
-        if (!Number.isFinite(end) || end <= start) {
-          status("窗口终点必须大于起点", "error");
-          return;
-        }
-        target.window = { mode: "exact", start_s: start, end_s: end };
-        rows.hidden = false;
+      if (!target) return false;
+      const values = select.value === "exact"
+        ? { start_s: startInput.value, end_s: endInput.value }
+        : { offset_s: offsetInput.value, duration_s: spanInput.value };
+      const result = window.BLCore.assignWindow(target, select.value, values);
+      if (result.error) {
+        status(result.error, "error");
+        return false;
       }
       invalidatePreview();
       markDirty();
-      renderInspector();
+      updateRows();
+      return true;
     };
+
     select.addEventListener("change", () => {
-      if (select.value === "exact" && !window) {
-        startInput.value = String((video && video.window && video.window.start_s) || 0);
-        endInput.value = String(duration);
-      }
-      applyWindow();
+      // 校验失败时保留刚选的模式与已输入值，只报字段原因，不静默回退。
+      updateRows();
+      apply();
     });
-    startInput.addEventListener("change", applyWindow);
-    endInput.addEventListener("change", applyWindow);
+    [startInput, endInput, offsetInput, spanInput].forEach((input) => {
+      input.addEventListener("change", () => { apply(); });
+    });
     return wrap;
   }
 
@@ -2512,7 +2754,7 @@
     summary.textContent = "实验设置";
     const inner = document.createElement("div");
     inner.className = "fold-body";
-    inner.append(binSecondsField(unit), animalWindowField(unit));
+    inner.append(binSecondsField(unit), animalWindowField(unit, { allowRelative: false }));
     settings.append(summary, inner);
     body.append(settings);
 
@@ -2523,6 +2765,8 @@
     const animalBody = document.createElement("div");
     animalBody.className = "fold-body";
     animalBody.append(nameField(unit));
+    const remove = unitDeleteField(unit);
+    if (remove) animalBody.append(remove);
     animal.append(animalSummary, animalBody);
     body.append(animal);
   }
@@ -2943,6 +3187,34 @@
 
     el.applyAll.addEventListener("click", applyAll);
     el.confirmRange.addEventListener("click", confirmRange);
+    if (el.backToSelect) {
+      el.backToSelect.addEventListener("click", () => { goStep("select"); });
+    }
+    if (el.rangeSlide) {
+      el.rangeSlide.addEventListener("input", () => {
+        const video = currentVideo();
+        if (video) loadRangeFrame(video, Number(el.rangeSlide.value));
+      });
+    }
+    if (el.rangeIndex) {
+      const commitRangeFrame = () => {
+        const video = currentVideo();
+        if (!video) return;
+        const value = Number(el.rangeIndex.value);
+        if (!Number.isFinite(value)) {
+          el.rangeIndex.value = String(state.rangeFrame);
+          return;
+        }
+        loadRangeFrame(video, Math.round(value));
+      };
+      el.rangeIndex.addEventListener("change", commitRangeFrame);
+      el.rangeIndex.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        commitRangeFrame();
+        el.rangeIndex.blur();
+      });
+    }
 
     el.videoSelect.addEventListener("change", () => {
       stopPlayback();
@@ -3084,6 +3356,7 @@
         state.unitIndex = Number.isInteger(target.unit) ? target.unit : 0;
         state.frame = Number.isInteger(target.frame) ? target.frame : 0;
         state.shownFrame = state.frame;
+        state.rangeFrame = state.frame;
         state.view = target.arenaView === "detection" ? "detection" : "geometry";
         showPanel();
         renderTasknav();
@@ -3270,6 +3543,7 @@
       state.frame = Number.isInteger(entry.frame) ? entry.frame : 0;
       // 恢复阶段还没显示新帧前，历史就按这个目标帧继续。
       state.shownFrame = state.frame;
+      state.rangeFrame = state.frame;
       if (state.step === "arena") {
         state.view = entry.arenaView === "detection" ? "detection" : "geometry";
       }

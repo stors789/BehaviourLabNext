@@ -1000,6 +1000,66 @@
     return objects;
   }
 
+  // 动物时间窗：界面值转配置值。relative 的首次检测由服务端计算，这里只
+  // 校验“偏移可为负、持续时间必须为正”，不补默认值也不改窗口计算。
+  function normalizeWindow(mode, values) {
+    const source = values && typeof values === "object" ? values : {};
+    const read = (value) => {
+      if (value === null || value === undefined) return null;
+      if (typeof value === "string" && value.trim() === "") return null;
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    };
+    if (mode === "global") return { window: null, error: null };
+    if (mode === "exact") {
+      const start = read(source.start_s);
+      const end = read(source.end_s);
+      if (start === null || start < 0) {
+        return { window: null, error: "动物时间窗起点必须是非负秒数" };
+      }
+      if (end === null || end <= start) {
+        return { window: null, error: "动物时间窗终点必须大于起点" };
+      }
+      return { window: { mode: "exact", start_s: start, end_s: end }, error: null };
+    }
+    if (mode === "relative") {
+      const offset = read(source.offset_s);
+      const duration = read(source.duration_s);
+      if (offset === null) {
+        return { window: null, error: "首次检测后的偏移必须是数值（可为负）" };
+      }
+      if (duration === null || duration <= 0) {
+        return { window: null, error: "持续时间必须是大于 0 的数值" };
+      }
+      return {
+        window: { mode: "relative", offset_s: offset, duration_s: duration },
+        error: null,
+      };
+    }
+    return { window: null, error: "未知的动物时间窗模式" };
+  }
+
+  // 从当前视频的单位列表里移除一只：只剩一只时不允许删除。
+  // 返回新的列表与删除后的选中位置，调用方据此清理缓存与预览确认。
+  function removeUnit(units, index) {
+    if (!Array.isArray(units) || units.length < 2) return null;
+    if (!Number.isInteger(index) || index < 0 || index >= units.length) return null;
+    const rest = units.slice(0, index).concat(units.slice(index + 1));
+    return {
+      units: rest,
+      removed: units[index],
+      index: Math.min(index, rest.length - 1),
+    };
+  }
+
+  // 只写传入的这一个动物：换鼠后其他动物的窗口不受影响。
+  function assignWindow(unit, mode, values) {
+    const result = normalizeWindow(mode, values);
+    if (result.error) return result;
+    if (unit && typeof unit === "object") unit.window = result.window;
+    return result;
+  }
+
   return {
     TOOLBAR_HEIGHT,
     HANDLE_HIT_PX,
@@ -1015,6 +1075,9 @@
     setFieldLabels,
     saveThenPreview,
     stableStringify,
+    normalizeWindow,
+    assignWindow,
+    removeUnit,
     resolveStep,
     rotateGeometry,
     mergeEcho,

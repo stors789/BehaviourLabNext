@@ -1,45 +1,68 @@
 {% extends "base.html" %}
-{% block title %}分析 · {{ app_name }}{% endblock %}
+{% block title %}首页 · {{ app_name }}{% endblock %}
 
 {% block content %}
+<section class="intro">
+  <h1>行为视频分析</h1>
+  <p>选择分析方式，开始整理实验。</p>
+</section>
+
 <section class="entry-grid">
-  <a class="entry-card" href="/analyze?mode=project">
-    <h1>项目分析</h1>
-    <span class="entry-arrow" aria-hidden="true">→</span>
+  <a class="entry-card" href="/projects">
+    <span class="entry-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l1.8 2.2h9.2A1.5 1.5 0 0 1 21 9.7v8.8A1.5 1.5 0 0 1 19.5 20h-15A1.5 1.5 0 0 1 3 18.5z"></path>
+        <path d="M3 10.5h18"></path>
+      </svg>
+    </span>
+    <span class="entry-body">
+      <h2>项目管理</h2>
+      <p class="entry-note">按分组与动物组织视频，批量分析同一批实验。</p>
+      <span class="entry-action">进入项目</span>
+    </span>
   </a>
+
   <a class="entry-card" href="/analyze?mode=independent">
-    <h1>独立分析</h1>
-    <span class="entry-arrow" aria-hidden="true">→</span>
+    <span class="entry-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2.5" y="6" width="13" height="12" rx="2"></rect>
+        <path d="M15.5 11l6-3.2v8.4l-6-3.2z"></path>
+      </svg>
+    </span>
+    <span class="entry-body">
+      <h2>独立分析</h2>
+      <p class="entry-note">不建项目，直接选视频跑单次分析。</p>
+      <span class="entry-action">选择视频</span>
+    </span>
   </a>
 </section>
 
-{% if projects %}
 <section class="recent">
   <div class="section-head">
     <h2>最近项目</h2>
-    <a class="link" href="/projects">全部项目</a>
+    {% if projects %}<a class="link" href="/projects">全部项目</a>{% endif %}
   </div>
-  <ul class="project-list">
-    {% for project in projects %}
-    <li class="project-row">
-      <a href="/projects/{{ project.id }}">
-        <span class="project-name">{{ project.name }}</span>
-        <span class="project-meta">{{ project.group_count }} 组 · {{ project.animal_count }} 只</span>
-      </a>
-      <time datetime="{{ project.updated_at }}">{{ project.updated_at[:10] }}</time>
-    </li>
-    {% endfor %}
-  </ul>
+  {% if projects %}
+  <div class="panel">
+    <ul class="project-list">
+      {% for project in projects %}
+      <li class="project-row">
+        <a href="/projects/{{ project.id }}">
+          <span class="project-name">{{ project.name }}</span>
+          <span class="project-meta">{{ project.group_count }} 组 · {{ project.animal_count }} 只</span>
+        </a>
+        <span class="project-meta">{{ project.updated_at[:10] }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% else %}
+  <div class="panel">
+    <div class="empty-inline">
+      <p>还没有项目。</p>
+      <a class="button" href="/projects">新建项目</a>
+    </div>
+  </div>
+  {% endif %}
 </section>
-{% else %}
-<section class="recent">
-  <div class="section-head">
-    <h2>最近项目</h2>
-  </div>
-  <div class="empty-inline">
-    <p>还没有项目。</p>
-    <a class="button" href="/projects">新建项目</a>
-  </div>
-</section>
-{% endif %}
 {% endblock %}

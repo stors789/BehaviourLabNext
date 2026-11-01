@@ -9,8 +9,12 @@
 <body>
   <a class="skip" href="#main">跳到主要内容</a>
   <header class="topbar">
-    <a class="brand" href="/">
-      <span class="brand-mark" aria-hidden="true"></span>
+    <a class="brand" href="/" aria-label="{{ app_name }} 首页">
+      <svg class="brand-mark" viewBox="0 0 32 32" role="img" aria-hidden="true" focusable="false">
+        <rect x="1.5" y="1.5" width="29" height="29" rx="7" fill="none" stroke="#66d4cd" stroke-width="1.6"></rect>
+        <path d="M6 21.5 L11 15.5 L15.5 19 L21 10.5 L26 13" fill="none" stroke="#66d4cd" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"></path>
+        <circle cx="21" cy="10.5" r="2" fill="#66d4cd"></circle>
+      </svg>
       <span class="brand-text">{{ app_name }}</span>
     </a>
 
@@ -38,11 +42,11 @@
       </div>
     </div>
 
-    <div class="top-context">{% block topcenter %}{% endblock %}</div>
+    <div class="top-context">{% block topcenter %}{% set page_names = {'home': '首页', 'projects': '项目', 'tasks': '任务', 'settings': '设置', 'analyze': '分析', 'landmarks': '关键点'} %}<p class="page-context">{{ page_names.get(active, '') }}</p>{% endblock %}</div>
 
     <nav class="top-tools" aria-label="工具">
-      <a href="/tasks" aria-label="任务">任务</a>
-      <a href="/settings" aria-label="设置">设置</a>
+      <a href="/tasks" aria-label="任务" {{ 'aria-current=page' if active == 'tasks' else '' }}>任务</a>
+      <a href="/settings" aria-label="设置" {{ 'aria-current=page' if active == 'settings' else '' }}>设置</a>
     </nav>
   </header>
 

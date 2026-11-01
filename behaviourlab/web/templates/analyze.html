@@ -1,15 +1,22 @@
 {% extends "base.html" %}
-{% block title %}{{ '独立分析' if mode == 'independent' else '项目分析' }} · {{ app_name }}{% endblock %}
+{% block title %}{{ '独立分析' if mode == 'independent' else '添加项目分析' }} · {{ app_name }}{% endblock %}
 
 {% block topcenter %}
 {% if draft_id %}
-<nav class="tasknav" id="tasknav" aria-label="分析步骤">
-  <a href="#" data-step-link="select">视频</a>
-  <span class="tasknav-sep" aria-hidden="true">›</span>
-  <a href="#" data-step-link="range">场地</a>
-  <span class="tasknav-sep" aria-hidden="true">›</span>
-  <a href="#" data-step-link="arena">检测</a>
-</nav>
+{% set ns = namespace(label='') %}
+{% for item in catalog %}{% if item.key == assay %}{% set ns.label = item.label %}{% endif %}{% endfor %}
+<div class="top-task">
+  {% if ns.label %}<span class="top-assay">{{ ns.label }}</span>{% endif %}
+  <nav class="tasknav" id="tasknav" aria-label="分析步骤">
+    <a href="#" data-step-link="select">视频</a>
+    <span class="tasknav-sep" aria-hidden="true">›</span>
+    <a href="#" data-step-link="range">场地</a>
+    <span class="tasknav-sep" aria-hidden="true">›</span>
+    <a href="#" data-step-link="arena">检测</a>
+  </nav>
+</div>
+{% else %}
+<p class="page-context">{{ '独立分析' if mode == 'independent' else '添加项目分析' }}</p>
 {% endif %}
 {% endblock %}
 
@@ -20,98 +27,136 @@
      data-view="{{ view }}" data-assay="{{ assay or '' }}">
 
   <section class="view" data-panel="select">
-    <div class="select-head">
-      <label class="field inline">
-        <span>实验</span>
-        <select id="assay-select">
-          {% for item in catalog %}
-          <option value="{{ item.key }}" {{ 'selected' if item.key == (assay or 'tst') else '' }}>{{ item.label }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      {% if mode == 'project' %}
-      <label class="field inline">
-        <span>项目</span>
-        <select id="project-select">
-          <option value="">选择项目</option>
-          {% for project in projects %}
-          <option value="{{ project.id }}" {{ 'selected' if project.id == project_id else '' }}>{{ project.name }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      {% endif %}
+    <div class="view-head">
+      <div>
+        <h1>{{ '独立分析' if mode == 'independent' else '添加项目分析' }}</h1>
+        <p>选择实验，导入要分析的视频。</p>
+      </div>
     </div>
 
-    <section class="import-zone" id="dropzone">
-      <div class="import-actions">
-        <button class="button primary" type="button" id="pick-videos">选择视频</button>
-        <button class="button" type="button" id="pick-folder">选择文件夹</button>
+    <section class="import-panel">
+      <div class="select-head">
+        <label class="field">
+          <span>实验</span>
+          <select id="assay-select">
+            {% for item in catalog %}
+            <option value="{{ item.key }}" {{ 'selected' if item.key == (assay or 'tst') else '' }}>{{ item.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        {% if mode == 'project' %}
+        <label class="field">
+          <span>项目</span>
+          <select id="project-select">
+            <option value="">选择项目</option>
+            {% for project in projects %}
+            <option value="{{ project.id }}" {{ 'selected' if project.id == project_id else '' }}>{{ project.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        {% endif %}
       </div>
+
+      <section class="import-zone" id="dropzone">
+        <p class="drop-title">拖入视频文件</p>
+        <p class="drop-hint">可同时选择多个视频</p>
+        <div class="import-actions">
+          <button class="button" type="button" id="pick-videos">选择视频</button>
+          <button class="button" type="button" id="pick-folder">选择文件夹</button>
+        </div>
+      </section>
       <p class="import-status" id="import-status" hidden></p>
+      <ul class="error-list" id="import-errors" hidden></ul>
+      <p class="stage-status" id="select-status" role="status"></p>
+
+      <div class="section-head">
+        <h2>已选视频</h2>
+        <span class="meta" id="selected-count"></span>
+      </div>
+      <ul class="chosen-list" id="selected-list"></ul>
+      <div class="empty-inline" id="selected-empty"><p>还没有选择视频。</p></div>
+
+      <details class="fold asset-fold" id="asset-fold">
+        <summary>已有视频 <span class="meta" id="asset-count"></span></summary>
+        <div class="fold-body">
+          <ul class="asset-list" id="asset-list"></ul>
+          <div class="empty-inline" id="asset-empty"><p>还没有导入过视频。</p></div>
+        </div>
+      </details>
     </section>
 
-    <ul class="error-list" id="import-errors" hidden></ul>
-
-    <div class="select-grid">
-      <section class="panel">
-        <div class="section-head">
-          <h2>视频资产</h2>
-          <span class="meta" id="asset-count"></span>
-        </div>
-        <ul class="asset-list" id="asset-list"></ul>
-        <div class="empty-inline" id="asset-empty"><p>还没有视频。</p></div>
-      </section>
-
-      <section class="panel">
-        <div class="section-head">
-          <h2>已选视频</h2>
-          <span class="meta" id="selected-count"></span>
-        </div>
-        <ul class="selected-list" id="selected-list"></ul>
-        <div class="empty-inline" id="selected-empty"><p>未选择视频。</p></div>
-        <button class="button primary full" type="button" id="setup-videos" disabled>设置视频</button>
-      </section>
+    <div class="action-bar">
+      <div class="action-bar-inner">
+        <a class="button" href="/">返回</a>
+        <span class="spacer"></span>
+        <span class="action-note" id="setup-note"></span>
+        <button class="button primary" type="button" id="setup-videos" disabled>设置视频</button>
+      </div>
     </div>
   </section>
 
   <section class="view" data-panel="range" hidden>
+    <div class="view-head">
+      <div>
+        <h1>视频设置</h1>
+        <p>确认源帧范围、方向与帧率。</p>
+      </div>
+    </div>
+
     <div class="range-grid">
       <div class="range-list" id="range-list"></div>
+
       <div class="range-main">
-        <div class="range-frame"><img id="range-image" alt=""><p class="range-empty" id="range-empty">源帧不可读</p></div>
-        <form class="range-form" id="range-form" autocomplete="off">
-          <div class="field-row">
-            <label class="field"><span>开始时间（秒）</span>
-              <input type="number" id="window-start" min="0" step="0.01" value="0">
-            </label>
-            <label class="field"><span>结束时间（秒）</span>
-              <input type="number" id="window-end" min="0" step="0.01" placeholder="到片尾">
-            </label>
+        <div class="range-frame-card">
+          <div class="range-frame"><img id="range-image" alt=""><p class="range-empty" id="range-empty">源帧不可读</p></div>
+          <div class="frame-bar">
+            <input type="range" id="range-frame-range" min="0" max="0" value="0" step="1" aria-label="源帧">
+            <input type="number" id="range-frame-number" min="0" max="0" value="0" step="1" aria-label="源视频帧">
+            <span class="time-label" id="range-time-label"></span>
           </div>
-          <label class="field"><span>方向</span>
-            <select id="orientation">
-              <option value="0">0°</option>
-              <option value="90">90°</option>
-              <option value="180">180°</option>
-              <option value="270">270°</option>
-            </select>
+        </div>
+      </div>
+
+      <form class="settings-card" id="range-form" autocomplete="off">
+        <h2 id="range-video-name"></h2>
+        <div class="field-row">
+          <label class="field"><span>开始时间（秒）</span>
+            <input type="number" id="window-start" min="0" step="0.01" value="0">
           </label>
-          <details class="fold" id="fps-fold">
-            <summary>帧率设置</summary>
-            <div class="fold-body">
-              <label class="field"><span>解释帧率（FPS）</span>
-                <input type="number" id="fps-override" min="0" step="0.01" placeholder="源 PTS">
-              </label>
-              <label class="field"><span>采样帧率（FPS）</span>
-                <input type="number" id="sample-fps" min="0" step="0.01" placeholder="全部帧">
-              </label>
-            </div>
-          </details>
-          <div class="form-actions">
-            <button class="button" type="button" id="apply-all">应用到其他视频</button>
-            <button class="button primary" type="button" id="confirm-range">下一步：场地</button>
+          <label class="field"><span>结束时间（秒）</span>
+            <input type="number" id="window-end" min="0" step="0.01" placeholder="到片尾">
+          </label>
+        </div>
+        <label class="field"><span>方向</span>
+          <select id="orientation">
+            <option value="0">0°</option>
+            <option value="90">90°</option>
+            <option value="180">180°</option>
+            <option value="270">270°</option>
+          </select>
+        </label>
+        <p class="settings-note" id="range-fps-note"></p>
+        <details class="fold" id="fps-fold">
+          <summary>帧率设置</summary>
+          <div class="fold-body">
+            <label class="field"><span>解释帧率（FPS）</span>
+              <input type="number" id="fps-override" min="0" step="0.01" placeholder="源 PTS">
+            </label>
+            <label class="field"><span>采样帧率（FPS）</span>
+              <input type="number" id="sample-fps" min="0" step="0.01" placeholder="全部帧">
+            </label>
           </div>
-        </form>
+        </details>
+        <button class="button small" type="button" id="apply-all">将此视频设置应用到其他视频</button>
+        <p class="stage-status" id="range-status" role="status"></p>
+      </form>
+    </div>
+
+    <div class="action-bar">
+      <div class="action-bar-inner">
+        <button class="button" type="button" id="back-to-select">返回选择视频</button>
+        <span class="spacer"></span>
+        <button class="button primary" type="button" id="confirm-range">设置场地</button>
       </div>
     </div>
   </section>
@@ -132,9 +177,12 @@
     <div class="stage">
       <div class="videoarea">
         <div class="toolhead" id="toolhead">
-          <button class="tool" type="button" id="tool-undo">撤销</button>
-          <button class="tool" type="button" id="tool-redraw">重画</button>
-          <button class="tool is-primary" type="button" id="tool-finish" hidden>完成当前绘制</button>
+          <span class="toolhead-title" id="toolhead-title"></span>
+          <div class="toolhead-actions">
+            <button class="tool" type="button" id="tool-undo">撤销</button>
+            <button class="tool" type="button" id="tool-redraw">重画</button>
+            <button class="tool is-primary" type="button" id="tool-finish" hidden>完成</button>
+          </div>
         </div>
         <div class="canvaswrap" id="canvaswrap">
           <canvas id="stage-canvas" tabindex="0" aria-label="视频画布"></canvas>
