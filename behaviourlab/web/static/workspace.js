@@ -62,6 +62,8 @@
     // 状态栏里人工格式错误与窗口错误的归属，用于只清理自己那条旧提示。
     manualStatus: null,
     windowStatus: null,
+    // 选择集合还没成功落盘：失败后再次点“设置视频”必须真的重试。
+    selectionPending: false,
   };
 
   const el = {
@@ -264,6 +266,8 @@
       if (!ok && state.saver && state.saver.lastError) {
         status(issueText(state.saver.lastError, "保存失败"), "error");
       }
+      // 任何一次成功落盘都覆盖了当前选择集合。
+      if (ok) state.selectionPending = false;
       return ok && !isDirty();
     });
   }
@@ -695,17 +699,29 @@
         return;
       }
       if (!state.draftId) return;
+      state.selectionPending = false;
       ensureTopContext();
       renderTasknav();
     }
-    if (state.draft && syncDraftVideos()) {
+    const changed = state.draft ? syncDraftVideos() : false;
+    if (changed) {
+      state.selectionPending = true;
       markDirty();
-      const saved = await saveThen();
-      if (!saved) {
-        status(lastSaveText("保存失败，选择未更新"), "error");
-        return;
-      }
     }
+    // 能否继续只看草稿是否真的落盘：上次失败或仍有未保存选择都要重试，
+    // 不能因为“这次集合没有新差异”就跳过保存。
+    const persisted = await window.BLCore.persistSelection({
+      changed,
+      pending: state.selectionPending,
+      dirty: isDirty,
+      save: saveThen,
+    });
+    if (persisted.status === "failed") {
+      state.selectionPending = true;
+      status(lastSaveText("保存失败，选择未更新"), "error");
+      return;
+    }
+    if (persisted.status === "saved") state.selectionPending = false;
     ensureTopContext();
     renderTasknav();
     await goStep("range", { replace: true });
@@ -3206,19 +3222,46 @@
     status(extracting ? "提取运动特征中，状态待定"
       : (type === "behavior" ? "正在生成行为预览…" : "正在生成检测预览…"));
     let request = null;
-    // 页面上下文：离开这个页/视频/单位后，旧预览响应不能再确认或改新页状态。
-    const context = { page: pageKey(), edit: state.editCounter };
+    // 页面上下文：离开这个页/视频/单位、编辑代号变化或出现未解决窗口错误后，
+    // 这次预览流程都不再代表当前界面。
+    const context = {
+      page: pageKey(),
+      assetId: video.asset_id,
+      unitId: unit.id,
+      edit: state.editCounter,
+    };
+    const liveContext = () => {
+      const liveVideo = currentVideo();
+      const liveUnit = currentUnit();
+      return {
+        page: pageKey(),
+        assetId: liveVideo ? liveVideo.asset_id : "",
+        unitId: liveUnit ? liveUnit.id : "",
+        edit: state.editCounter,
+        blocked: Boolean(pendingWindowError()),
+        closed: state.pageClosed,
+      };
+    };
+    const stillCurrent = () =>
+      window.BLCore.previewContextAlive(context, liveContext());
+    // 丢弃这次流程：不确认、不挂图，保留非法输入与未确认状态。
+    const discardPreview = () => {
+      state.previewGate.invalidate();
+      state.previewAwaiting = false;
+      el.preview.hidden = true;
+      el.preview.removeAttribute("src");
+      const issue = pendingWindowError();
+      const reason = issue ? issue.message : "配置已改变，请重新预览";
+      setPreviewNote({ tone: issue ? "error" : "warn", text: reason });
+      status(reason, issue ? "error" : "warn");
+    };
     try {
       // 先落盘，再核对页面仍指向同一个视频/小鼠，最后才请求预览。
       const result = await window.BLCore.saveThenPreview({
         dirty: isDirty,
         save: saveThen,
-        alive: () => {
-          const live = currentVideo();
-          const liveUnit = currentUnit();
-          return Boolean(live && liveUnit && live.asset_id === video.asset_id &&
-            liveUnit.id === unit.id && pageAlive(context));
-        },
+        // 保存等待期间出现新编辑或未解决窗口错误，这次预览就不该再发。
+        alive: stillCurrent,
         config: () => previewConfig(type),
         send: (config) => {
           request = state.previewGate.begin(config);
@@ -3243,9 +3286,7 @@
         return;
       }
       if (result.status === "stale") {
-        state.previewGate.invalidate();
-        status("配置已改变，请重新预览", "warn");
-        setPreviewNote({ tone: "warn", text: "配置已改变，请重新预览。" });
+        discardPreview();
         return;
       }
       const data = result.data;
@@ -3253,6 +3294,11 @@
         // 已经离开或已销毁页面：旧响应不得确认，也不得把图挂到新页面。
         state.previewGate.invalidate();
         state.previewAwaiting = false;
+        el.preview.hidden = true;
+        return;
+      }
+      if (!stillCurrent()) {
+        discardPreview();
         return;
       }
       // 图片真正加载成功后才确认，加载失败不留下已确认状态。
@@ -3263,8 +3309,14 @@
           el.preview.hidden = true;
           return;
         }
+        // 图加载完成时再核一次：等待期间的新编辑/未解决错误不能恢复确认。
+        if (!stillCurrent()) {
+          discardPreview();
+          return;
+        }
         if (!state.previewGate.accept(request, data)) {
           el.preview.hidden = true;
+          el.preview.removeAttribute("src");
           return;
         }
         setPreviewNote(window.BLCore.previewNoteFor(data));
@@ -3513,6 +3565,7 @@
           state.draftId = "";
           state.draft = null;
           state.selected.clear();
+          state.selectionPending = false;
           history.replaceState({ step: "select" }, "", stepUrl("select"));
           status("已切换实验，需重新创建草稿", "warn");
         }

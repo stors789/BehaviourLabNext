@@ -13,6 +13,9 @@ const {
   normalizeWindow,
   assignWindow,
   reconcileVideos,
+  selectionNeedsSave,
+  persistSelection,
+  previewContextAlive,
   removeUnit,
 } = require("../../behaviourlab/web/static/editor-core.js");
 
@@ -584,6 +587,71 @@ function selectionSync() {
   assert.deepStrictEqual(reconcileVideos([videoA, videoB], [], assets, make), []);
 }
 
+// 保存失败后的重试：第二次点击即使没有新差异也要再保存一次，
+// 只有真的落盘（集合已是 A）才允许进入下一步。
+async function selectionRetryAndPreviewGuard() {
+  const draft = { videos: [{ asset_id: "a", units: [{ id: "u1" }] }] };
+  const attempts = [];
+  let fail = true;
+  let pending = true; // 第一次点击已把选择改为 A，但保存失败
+
+  const click = async () => {
+    const outcome = await persistSelection({
+      changed: false, // 第二次点击时集合已无新差异
+      pending,
+      dirty: () => true,
+      save: async () => {
+        attempts.push(draft.videos.map((video) => video.asset_id).join("+"));
+        return !fail;
+      },
+    });
+    if (outcome.status === "saved") pending = false;
+    return outcome.status;
+  };
+
+  // 连续两次失败：两次都尝试，且都不放行。
+  assert.strictEqual(await click(), "failed");
+  assert.strictEqual(await click(), "failed");
+  assert.strictEqual(attempts.length, 2, "第二次点击必须真的重试保存");
+  assert.deepStrictEqual(attempts, ["a", "a"], "每次保存的集合都是 A");
+
+  // 第一次失败、第二次成功：两次尝试，成功后放行。
+  attempts.length = 0;
+  fail = true;
+  pending = true;
+  assert.strictEqual(await click(), "failed");
+  fail = false;
+  assert.strictEqual(await click(), "saved");
+  assert.strictEqual(attempts.length, 2);
+  assert.strictEqual(pending, false, "成功后才清除未保存标记");
+
+  // 没有改动、也不脏：不必保存就能继续。
+  let calls = 0;
+  const clean = await persistSelection({
+    changed: false,
+    pending: false,
+    dirty: () => false,
+    save: async () => { calls += 1; return true; },
+  });
+  assert.strictEqual(clean.status, "clean");
+  assert.strictEqual(calls, 0);
+  assert.strictEqual(selectionNeedsSave(false, true, false), true);
+  assert.strictEqual(selectionNeedsSave(false, false, true), true);
+  assert.strictEqual(selectionNeedsSave(false, false, false), false);
+
+  // 预览有效期：等待保存/加载期间的新编辑或未解决错误都要作废旧流程。
+  const start = { page: "p", assetId: "a", unitId: "u", edit: 7 };
+  const same = { page: "p", assetId: "a", unitId: "u", edit: 7,
+                 blocked: false, closed: false };
+  assert.strictEqual(previewContextAlive(start, same), true);
+  assert.strictEqual(previewContextAlive(start, { ...same, edit: 8 }), false);
+  assert.strictEqual(previewContextAlive(start, { ...same, blocked: true }), false);
+  assert.strictEqual(previewContextAlive(start, { ...same, closed: true }), false);
+  assert.strictEqual(previewContextAlive(start, { ...same, assetId: "b" }), false);
+  assert.strictEqual(previewContextAlive(start, { ...same, unitId: "v" }), false);
+  assert.strictEqual(previewContextAlive(start, { ...same, page: "q" }), false);
+}
+
 // 删除当前小鼠：只去掉这一只，剩一只时没有删除入口，输入数组不被改写。
 function unitRemoval() {
   const units = [{ id: "a" }, { id: "b" }, { id: "c" }];
@@ -616,6 +684,7 @@ function unitRemoval() {
   manualVisitsParsing();
   animalWindowValues();
   selectionSync();
+  await selectionRetryAndPreviewGuard();
   unitRemoval();
   previewActionContract();
   await saveFailureCarriesFieldReason();

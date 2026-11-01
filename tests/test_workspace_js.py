@@ -182,7 +182,13 @@ def test_analysis_submission_freezes_context_before_first_await():
     # 旧预览响应不能在新页面确认。
     preview = source.split("async function runPreview(kind)", 1)[1].split(
         "\n  async function primaryAction", 1)[0]
-    assert "const context = { page: pageKey(), edit: state.editCounter };" in preview
+    # 预览上下文冻结页面、视频、动物与编辑代号：旧响应不能确认到新界面。
+    assert "const context = {" in preview
+    assert "page: pageKey()," in preview
+    assert "assetId: video.asset_id," in preview
+    assert "unitId: unit.id," in preview
+    assert "edit: state.editCounter," in preview
+    assert preview.index("const context = {") < preview.index("saveThenPreview(")
     assert preview.count("pageAlive(context)") >= 3
 
 

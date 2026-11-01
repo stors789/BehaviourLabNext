@@ -353,7 +353,7 @@ def test_selection_syncs_into_current_draft():
     assert "syncDraftVideos()" in setup
     # 保存失败停在选择页，显示实际原因，不谎称成功。
     assert "保存失败，选择未更新" in setup
-    assert setup.index("saveThen()") < setup.index('goStep("range"')
+    assert setup.index("persistSelection(") < setup.index('goStep("range"')
     # 新建草稿后立即换成实验名 + 任务导航，不等整页刷新。
     assert "ensureTopContext();" in setup
     assert "renderTasknav();" in setup
@@ -464,3 +464,46 @@ def test_manual_y_keeps_raw_frame_and_review_uses_workspace_height():
     assert "height: calc(100vh - 60px)" in review
     assert "min-height: 620px" in review
     assert "padding: 14px 20px 18px" in review
+
+
+def test_selection_save_failure_is_retried():
+    """失败后第二次点击必须真的再保存一次，成功后才允许进入下一步。"""
+
+    setup = body_of("async function setupVideos()")
+    assert "window.BLCore.persistSelection(" in setup
+    assert '"failed"' in setup
+    assert "state.selectionPending = true;" in setup
+    # 失败直接留在选择页；进入视频设置在保存之后。
+    assert setup.index('persisted.status === "failed"') < setup.index('goStep("range"')
+    assert 'persisted.status === "saved"' in setup
+    # 不再以“本次是否有差异”作为唯一保存条件。
+    assert "if (state.draft && syncDraftVideos()) {" not in setup
+
+    flush = body_of("function flushSave()")
+    assert "if (ok) state.selectionPending = false;" in flush
+
+
+def test_preview_discards_when_edit_or_window_error_appears():
+    """等待保存/加载期间的新编辑或未解决错误，旧预览不得重新确认。"""
+
+    preview = body_of("async function runPreview(kind)")
+    assert "previewContextAlive" in preview
+    assert "alive: stillCurrent," in preview
+    assert "blocked: Boolean(pendingWindowError())" in preview
+    assert "edit: state.editCounter" in preview
+
+    # stale、响应返回后、图片 onload 都会丢弃旧流程。
+    assert preview.count("discardPreview();") >= 3
+    onload = preview.split("el.preview.onload = () => {", 1)[1].split("};", 1)[0]
+    assert "if (!stillCurrent())" in onload
+    assert onload.index("stillCurrent") < onload.index("previewGate.accept")
+
+    stale = preview.split('if (result.status === "stale")', 1)[1].split("}", 1)[0]
+    assert "discardPreview();" in stale
+
+    discard = preview.split("const discardPreview = () => {", 1)[1].split("};", 1)[0]
+    assert "state.previewGate.invalidate();" in discard
+    assert "pendingWindowError()" in discard
+    # 只清预览与提示，不动用户正在编辑的输入。
+    for forbidden in ("startInput", "textarea", "renderInspector"):
+        assert forbidden not in discard, forbidden

@@ -1064,6 +1064,34 @@
     return kept.concat(added);
   }
 
+  // 保存取舍：本次是否改变了选择、上次是否没存上、草稿是否还脏。
+  // 只看“这次有没有差异”会让失败后的第二次点击跳过重试。
+  function selectionNeedsSave(changed, pending, dirty) {
+    return Boolean(changed || pending || dirty);
+  }
+
+  // 选择持久化：需要时保存并等待结果。失败返回 failed，调用方必须留在选择页。
+  async function persistSelection(task) {
+    const job = task || {};
+    const dirty = typeof job.dirty === "function" ? job.dirty() : Boolean(job.dirty);
+    if (!selectionNeedsSave(Boolean(job.changed), Boolean(job.pending), dirty)) {
+      return { status: "clean" };
+    }
+    const ok = await job.save();
+    return ok ? { status: "saved" } : { status: "failed" };
+  }
+
+  // 预览流程是否仍对应当前界面：页面/视频/动物一致、编辑代号没变、
+  // 没有未解决的窗口错误、页面未销毁。
+  function previewContextAlive(expected, actual) {
+    if (!expected || !actual) return false;
+    if (actual.closed || actual.blocked) return false;
+    return expected.page === actual.page &&
+      expected.assetId === actual.assetId &&
+      expected.unitId === actual.unitId &&
+      expected.edit === actual.edit;
+  }
+
   // 从当前视频的单位列表里移除一只：只剩一只时不允许删除。
   // 返回新的列表与删除后的选中位置，调用方据此清理缓存与预览确认。
   function removeUnit(units, index) {
@@ -1103,6 +1131,9 @@
     normalizeWindow,
     assignWindow,
     reconcileVideos,
+    selectionNeedsSave,
+    persistSelection,
+    previewContextAlive,
     removeUnit,
     resolveStep,
     rotateGeometry,
