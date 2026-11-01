@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
 
-from behaviourlab import experiments, media, preview
+from behaviourlab import detection, experiments, figures, media, outputs, preview
 from behaviourlab.experiments import ymaze
 from behaviourlab.media import FrameInfo
 from behaviourlab.schema import AnalysisContext
@@ -110,7 +112,7 @@ def run(pattern, *, values: dict | None = None, monkeypatch=None):
 
 # -- 1. 固定序列夹具 ---------------------------------------------------
 
-def test_y_fixture_sequence_and_numbers(monkeypatch):
+def test_y_fixture_sequence_and_numbers(monkeypatch, tmp_path):
     result = run(FIXTURE, monkeypatch=monkeypatch)
     summary = result.summary[0]
 
@@ -159,6 +161,16 @@ def test_y_fixture_sequence_and_numbers(monkeypatch):
     assert metadata["coordinate_unit"] == "cm_estimated"
     assert metadata["cm_per_px_est"] == pytest.approx(summary["cm_per_px_est"],
                                                       abs=TOL)
+
+    # 序列图数据来自同一 events：四次进入、重复 A 不合并、时刻与确认时刻一致。
+    points = figures.ymaze_sequence_points(result.events)
+    assert [(item["entry_index"], item["arm"], item["time_s"],
+             item["confirmed_s"]) for item in points] == [
+        (1, "A", 0.0, 0.2), (2, "A", 0.6, 0.8),
+        (3, "B", 1.2, 1.4), (4, "C", 1.8, 2.0)]
+    png = tmp_path / "sequence.png"
+    assert figures.ymaze_sequence_png(png, result.events)
+    assert png.read_bytes()[:8] == bytes.fromhex("89504e470d0a1a0a")
 
     # 注册顺序与模板键（界面概览取前六项）。
     entry = [item for item in experiments.catalog()
@@ -251,7 +263,7 @@ def test_y_sequence_rules_and_candidate_link(monkeypatch):
 # -- 3. 行为预览与结果页 -----------------------------------------------
 
 class PreviewSource:
-    """内存解码头：小鼠停在 A 臂内。"""
+    """内存解码头：小鼠停在 B 臂内。"""
 
     def __init__(self, path, *, start_s=0.0, end_s=None, **kwargs):
         from behaviourlab.schema import Frame
@@ -264,7 +276,7 @@ class PreviewSource:
         for index in range(count):
             moment = round(begin + index * step, 6)
             image = np.full((240, 240, 3), 255, dtype=np.uint8)
-            cv2.ellipse(image, (100, 40), (10, 22), 0, 0, 360, (0, 0, 0), -1)
+            cv2.ellipse(image, (150, 105), (20, 9), 0, 0, 360, (0, 0, 0), -1)
             self._frames.append(Frame(
                 image=image, index=index, time_s=moment, dt_s=step,
                 elapsed_s=moment - begin, analysis_fps=1.0 / step,
@@ -311,7 +323,7 @@ def test_y_preview_and_result_page(client, store, tmp_path, monkeypatch):
     core = data["summary"]["behavior"]
     assert core["mode"] == "ymaze"
     assert core["total_arm_entries"] == 1
-    assert core["arm_A_entries"] == 1
+    assert core["arm_B_entries"] == 1
     assert core["alternation_percent"] is None
 
     started = client.post(f"/api/drafts/{draft['id']}/analyze")
@@ -321,20 +333,134 @@ def test_y_preview_and_result_page(client, store, tmp_path, monkeypatch):
     assert job["status"] == "done"
     summary = job["manifest"]["units"][0]["summary"]
     assert summary["total_arm_entries"] == 1
-    assert summary["arm_A_entries"] == 1
+    assert summary["arm_B_entries"] == 1
+    assert summary["arm_A_entries"] == 0
     assert summary["alternation_opportunities"] == 0
     assert summary["alternation_percent"] is None
-    figures = job["manifest"]["units"][0]["figures"]
+
+    unit_figures = job["manifest"]["units"][0]["figures"]
+    assert unit_figures["sequence"], "一次 B 入臂也要有序列图"
     assert not [key for key in ("trajectory", "heatmap", "activity", "zones")
-                if figures.get(key)]
+                if unit_figures.get(key)]
+    run_dir = Path(store.paths.runs) / payload["run_id"] / job["job_id"]
+    sequence = unit_figures["sequence"]
+    assert sequence in job["manifest"]["files"]
+    stored = (run_dir / sequence).read_bytes()
+    assert stored[:8] == bytes.fromhex("89504e470d0a1a0a")
+
+    inline = client.get(
+        f"/runs/{payload['run_id']}/{job['job_id']}/{sequence}")
+    assert inline.status_code == 200
+    assert inline.mimetype == "image/png"
+    assert inline.data == stored
+    download = client.get(
+        f"/runs/{payload['run_id']}/{job['job_id']}/{sequence}?download=1")
+    assert download.status_code == 200
+    assert "attachment" in download.headers.get("Content-Disposition", "")
+    assert download.data == stored
+
+    report = (run_dir / "report.md").read_text("utf-8")
+    assert "入臂序列图" in report
+    assert f"]({sequence})" in report
+    assert "不生成图形" not in report
 
     page = client.get(f"/results/{payload['run_id']}").get_data(as_text=True)
     for label in ("总入臂次数", "交替次数", "交替机会数", "自发交替率",
-                  "中心区时间", "A 臂时间", "自动追踪", "最近序列",
-                  "候选（"):
+                  "中心区时间", "A 臂时间", "区域时间", "自动追踪",
+                  "最近序列", "候选（", "入臂序列（"):
         assert label in page, label
+    assert "B 4.000" in page, "B 臂时间来自同一汇总"
+    assert f'src="/runs/{payload["run_id"]}/{job["job_id"]}/{sequence}"' in page
     # 机会 0 时交替率是 —，不是 0%；有确认事件时不写空态。
     assert "自发交替率 — %" in page
     assert "没有确认的入臂事件" not in page
     assert "未生成图形" not in page
     assert "没有可用的场地尺寸" not in page
+
+    # 零进入：不写序列图，只给真实空态原因。
+    empty = outputs._unit_figures(tmp_path, {"unit_name": "Y 鼠",
+                                             "mode": "ymaze"}, [], "unit-empty",
+                                  {}, events=[])
+    assert empty["sequence"] is None
+    assert "序列图" in empty["note"]
+    assert not (tmp_path / "unit-empty_sequence.png").exists()
+
+
+def tiny_source(count: int):
+    """16×16 内存帧；10 Hz、每条曝光 .1 秒。"""
+
+    from behaviourlab.schema import Frame
+
+    class TinySource:
+        def __init__(self, path=None, *, start_s=0.0, end_s=None, **kwargs):
+            self._frames = [
+                Frame(image=np.zeros((16, 16, 3), dtype=np.uint8), index=index,
+                      time_s=round(0.1 * index, 6), dt_s=0.1,
+                      elapsed_s=round(0.1 * index, 6), analysis_fps=10.0,
+                      interval_start_s=round(0.1 * index, 6),
+                      interval_end_s=round(0.1 * (index + 1), 6))
+                for index in range(count)]
+
+        def iter_frames(self):
+            return iter(self._frames)
+
+    return TinySource
+
+
+def capture_facts(monkeypatch, source, values: dict | None = None) -> dict:
+    """真实 capture 路径：解码用内存帧，候选由替身直接给定。"""
+
+    unit_value = unit(values)
+    monkeypatch.setattr(media, "VideoSource", source)
+    job = {"assay": "ymaze", "run_id": "c" * 32, "job_id": "d" * 32,
+           "asset": {"id": "asset", "name": "y.mp4", "path": "memory",
+                     "metadata": {"duration_s": 1.0}},
+           "window": {"start_s": 0.0, "end_s": 1.0}, "orientation": 0,
+           "fps_override": None, "sample_fps": None,
+           "units": [unit_value], "style": {}}
+    return ymaze.capture(AnalysisContext(job=job), [unit_value])[UNIT_ID]
+
+
+def test_y_association_failure_reason(monkeypatch):
+    """自动 Y 的关联失败统一报 no_candidate_within_gate，底层原因另存。"""
+
+    settings = dict(detection.common_detection_defaults(),
+                    erosion_iter=0, dilation_iter=0)
+    empty_foreground = np.zeros((16, 16), dtype=np.uint8)
+    roi = np.full((16, 16), 255, dtype=np.uint8)
+    candidates, reason = detection.find_candidates(empty_foreground, roi,
+                                                   settings)
+    assert candidates == [] and reason == "no_candidate", "固定反例的前提"
+
+    monkeypatch.setattr(detection, "find_candidates",
+                        lambda *args, **kwargs: (list(candidates), reason))
+    facts = capture_facts(monkeypatch, tiny_source(1))
+    row = facts["rows"][0]
+    assert row["detected"] is False
+    assert row["missing_reason"] == "no_candidate_within_gate"
+    assert row["detection_reason"] == "no_candidate"
+    assert row["x_px"] is None and row["nose_x_px"] is None
+    assert facts["candidates"] == []
+
+    # 有候选但被预测门限拒绝：同样是关联失败原因，候选与 selected 证据仍在。
+    pool = [([{"center": (8.0, 8.0), "area": 200.0, "quality": 1.0,
+               "contour": [], "mask": None, "bbox": [6.0, 6.0, 4.0, 4.0]}], None),
+            ([{"center": (15.5, 15.5), "area": 200.0, "quality": 1.0,
+               "contour": [], "mask": None, "bbox": [14.0, 14.0, 3.0, 3.0]}],
+             None)]
+    calls = {"count": 0}
+
+    def fake_find(*args, **kwargs):
+        index = min(calls["count"], len(pool) - 1)
+        calls["count"] += 1
+        return pool[index]
+
+    monkeypatch.setattr(detection, "find_candidates", fake_find)
+    facts = capture_facts(monkeypatch, tiny_source(2),
+                          options(max_jump_cm=0.001))
+    rows = facts["rows"]
+    assert rows[0]["detected"] is True
+    assert rows[1]["detected"] is False
+    assert rows[1]["missing_reason"] == "no_candidate_within_gate"
+    assert rows[1]["x_px"] is None and rows[1]["nose_x_px"] is None
+    assert [item["selected"] for item in facts["candidates"]] == [True, False]

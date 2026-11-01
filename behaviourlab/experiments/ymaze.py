@@ -929,8 +929,10 @@ def process_unit(unit: Mapping[str, Any],
                         "observations; missing aborts the center timer",
         "alternation": "entry index >= 3 with three distinct arms in the "
                        "recent sequence",
-        "missing_rule": "missing exposure is counted as missing only; no held "
-                        "position is written",
+        "missing_rule": "missing exposure is counted as missing only and no "
+                        "held position is written; every association failure "
+                        "reports no_candidate_within_gate, the raw detector "
+                        "reason stays in the row field detection_reason",
     }
     warning = None
     if not window.known:
@@ -1039,11 +1041,14 @@ def capture(context: Any, units: Sequence[Mapping[str, Any]]) -> dict:
                 )
             else:
                 link.miss()
-                # 没有通过门限/面积证据的候选即缺失；不保持、不外推位置。
+                # 自动 Y 没有接受候选就统一报关联失败；底层检测原因只作诊断，
+                # 不覆盖这一对外枚举，也不保持、不外推位置。
                 result = Detection(center=None, quality=0.0, contour=[],
-                                   mask=None, missing_reason=reason or MISSING_GATE,
+                                   mask=None, missing_reason=MISSING_GATE,
                                    candidates=candidates)
-            entry["rows"].append(observation_row(unit, frame, result))
+            row = observation_row(unit, frame, result)
+            row["detection_reason"] = reason
+            entry["rows"].append(row)
         context.progress(min(0.9, 0.1 + 0.8 * max(0.0, float(frame.time_s)) /
                              max(1e-9, progress_span or 1.0)))
     return captured

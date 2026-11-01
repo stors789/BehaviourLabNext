@@ -84,6 +84,7 @@ def _report_metrics(assay: Any) -> list[dict]:
 # 报告图形按清单里真实存在的每动物图形生成，名称与结果页一致。
 FIGURE_LABELS = (
     ("zones", "区域时长图"),
+    ("sequence", "入臂序列图"),
     ("trajectory", "轨迹图"),
     ("heatmap", "热图"),
     ("objects", "物体探索图"),
@@ -178,13 +179,15 @@ def _fmt(value: Any) -> str:
 
 def _unit_figures(target: Path, summary: Mapping[str, Any],
                   rows: Sequence[Mapping[str, Any]], stem: str,
-                  style: Mapping[str, Any] | None) -> dict:
+                  style: Mapping[str, Any] | None, *,
+                  events: Sequence[Mapping[str, Any]] | None = None) -> dict:
     """每动物可用图形：活动曲线不依赖场地宽高，轨迹/热图才需要。"""
 
     missing_size_note = False
     figures_info: dict[str, Any] = {"stem": stem, "trajectory": None,
                                     "heatmap": None, "activity": None,
-                                    "objects": None, "zones": None}
+                                    "objects": None, "zones": None,
+                                    "sequence": None}
     name = str(summary.get("unit_name") or summary.get("unit_id") or "")
     notes: list[str] = []
 
@@ -285,12 +288,22 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
         except (OSError, ValueError) as error:
             notes.append(f"区域时长图生成失败：{error}")
 
+    if str(summary.get("mode")) == "ymaze":
+        # 序列图直接读最终 arm_entries/events，不重跑检测也不重算交替。
+        sequence_figure = f"{stem}_sequence.png"
+        try:
+            if figures.ymaze_sequence_png(target / sequence_figure, events,
+                                          title=name, style=style):
+                figures_info["sequence"] = sequence_figure
+            else:
+                notes.append("没有确认的入臂事件，未生成序列图")
+        except (OSError, ValueError) as error:
+            notes.append(f"入臂序列图生成失败：{error}")
+
     if missing_size_note and not any(
-            figures_info.get(key) for key in ("zones", "objects")):
-        if str(summary.get("mode")) == "ymaze":
-            # Y 迷宫本来没有场地宽高；序列与候选表在结果页，不写成缺尺寸。
-            notes.append("本实验不生成图形，序列、候选与入臂事件见结果页表格")
-        else:
+            figures_info.get(key) for key in ("zones", "objects", "sequence")):
+        # Y 迷宫没有场地宽高，是否出图由序列图自己说明，不写成缺尺寸。
+        if str(summary.get("mode")) != "ymaze":
             notes.append("没有可用的场地尺寸，未生成图形")
 
     if isinstance(summary.get("objects"), list) and summary["objects"]:
@@ -340,10 +353,12 @@ def export_result(directory: str | Path, job: Mapping[str, Any],
         unit_id = row.get("unit_id")
         rows = [item for item in result.observations
                 if item.get("unit_id") == unit_id]
+        events = [item for item in result.events
+                  if item.get("unit_id") == unit_id]
         stem = figure_stem(row, used)
-        info = _unit_figures(target, row, rows, stem, style)
+        info = _unit_figures(target, row, rows, stem, style, events=events)
         for key in ("trajectory", "heatmap", "activity", "objects",
-                    "zones"):
+                    "zones", "sequence"):
             if info.get(key):
                 files.append(info[key])
         units.append({"unit_id": unit_id, "unit_name": row.get("unit_name"),

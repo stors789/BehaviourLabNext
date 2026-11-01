@@ -355,7 +355,77 @@ def epm_zones_png(path: str | Path, summary: Mapping[str, Any], *,
     return True
 
 
+YMAZE_ARMS = ("A", "B", "C")
+
+
+def ymaze_sequence_points(events: Iterable[Mapping[str, Any]]) -> list[dict]:
+    """序列图数据：按最终事件顺序，重复臂全部保留，不重算交替。"""
+
+    points: list[dict] = []
+    for item in events or ():
+        if not isinstance(item, Mapping):
+            continue
+        arm = item.get("target")
+        if arm not in YMAZE_ARMS:
+            continue
+        moment = _finite(item.get("time_s"))
+        if moment is None:
+            continue
+        index = item.get("entry_index")
+        points.append({
+            "entry_index": (int(index)
+                            if isinstance(index, int)
+                            and not isinstance(index, bool) and index > 0
+                            else len(points) + 1),
+            "arm": arm,
+            "time_s": moment,
+            "confirmed_s": _finite(item.get("confirmed_s")),
+        })
+    return points
+
+
+def ymaze_sequence_png(path: str | Path,
+                       events: Iterable[Mapping[str, Any]], *,
+                       title: str = "",
+                       style: Mapping[str, Any] | None = None) -> bool:
+    """Y 迷宫入臂序列（臂 A/B/C × 秒）；没有确认事件就不出图。"""
+
+    points = ymaze_sequence_points(events)
+    if not points:
+        return False
+    color, _, width, dpi = _style(style)
+    figure = Figure(figsize=(4.6, 2.6))
+    FigureCanvasAgg(figure)
+    axes = figure.add_subplot(111)
+    rows = {arm: index for index, arm in enumerate(YMAZE_ARMS)}
+    xs = [item["time_s"] for item in points]
+    ys = [rows[item["arm"]] for item in points]
+    axes.plot(xs, ys, color=color, linewidth=max(1.0, width * 0.7),
+              marker="o", markersize=4, zorder=2)
+    for item, x, y in zip(points, xs, ys):
+        axes.annotate(f"{item['entry_index']} {item['arm']}", (x, y),
+                      textcoords="offset points", xytext=(0, 7), ha="center",
+                      fontsize=7, color="#333333")
+    axes.set_yticks(range(len(YMAZE_ARMS)))
+    axes.set_yticklabels(list(YMAZE_ARMS), fontsize=8)
+    axes.set_ylim(len(YMAZE_ARMS) - 0.4, -0.6)
+    low, high = min(xs), max(xs)
+    padding = max(0.1, (high - low) * 0.08)
+    axes.set_xlim(low - padding, high + padding)
+    axes.set_xlabel("s", fontsize=8)
+    axes.tick_params(labelsize=8)
+    axes.spines["top"].set_visible(False)
+    axes.spines["right"].set_visible(False)
+    if title:
+        axes.set_title(title, fontsize=9, color="#333333")
+    figure.tight_layout()
+    figure.savefig(path, format="png", dpi=dpi)
+    return True
+
+
 def center_rect_for(summary: Mapping[str, Any]) -> tuple[float, float, float, float] | None:
+    """场地中心矩形；只由保存的宽高与比例推得。"""
+
     width = _finite(summary.get("arena_width_cm"))
     height = _finite(summary.get("arena_height_cm"))
     rx = _finite(summary.get("center_ratio_x"))

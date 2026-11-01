@@ -707,6 +707,17 @@
       </tbody>
     </table>
 
+    {% if unit.figures.sequence %}
+    <div class="figure-row">
+      <figure>
+        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.sequence }}" alt="入臂序列">
+        <figcaption>入臂序列（按确认顺序，A/B/C；横轴为入臂起点，秒）</figcaption>
+      </figure>
+    </div>
+    {% elif unit.figures.note %}
+    <p class="muted">{{ unit.figures.note }}</p>
+    {% endif %}
+
     {% if unit_candidates %}
     <details class="fold">
       <summary>候选（{{ unit_candidates | length }}）</summary>
