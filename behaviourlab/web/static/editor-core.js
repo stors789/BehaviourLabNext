@@ -502,6 +502,7 @@
     no_candidate: "无候选",
     inconsistent_candidate_size: "候选尺寸与已接受体型不一致",
     no_nearby_candidate: "附近没有符合位置门限的候选",
+    no_candidate_within_gate: "门限内没有符合的候选",
   };
 
   function previewNoteFor(data) {
@@ -569,6 +570,19 @@
           + value(behavior.center_time_s) + " s · 入臂 "
           + count(behavior.total_arm_entries) + " 次（开放 "
           + count(behavior.open_entries) + "）");
+      } else if (behavior.mode === "ymaze") {
+        const count = (number) => (typeof number === "number" && isFinite(number)
+          ? String(number) : "—");
+        const percent = (number) => (typeof number === "number" && isFinite(number)
+          ? number.toFixed(0) + "%" : "—");
+        lines.push("行为 " + value(behavior.total_time_s) + " s：入臂 "
+          + count(behavior.total_arm_entries) + " 次（A "
+          + count(behavior.arm_A_entries) + " / B "
+          + count(behavior.arm_B_entries) + " / C "
+          + count(behavior.arm_C_entries) + "）· 交替 "
+          + count(behavior.alternation_count) + " / "
+          + count(behavior.alternation_opportunities) + "（"
+          + percent(behavior.alternation_percent) + "）");
       } else {
         lines.push("行为 " + value(behavior.total_time_s) + " s：非挣扎 "
           + value(behavior.immobility_time_s) + " / 挣扎 "
@@ -780,9 +794,11 @@
     return objects;
   }
 
-  // EPM 的五区存成 geometry.zones.<key>；画布步骤键与区域键同名。
+  // EPM 的五个区与 Y 迷宫的中心/三臂都存成 geometry.zones.<key>；画布步骤键与
+  // 区域键同名，保存时不另造平行字段。
   const NESTED_ZONE_STEPS = {
     epm: ["center", "open_1", "open_2", "closed_1", "closed_2"],
+    ymaze: ["center", "A", "B", "C"],
   };
 
   function stepShape(assay, geometry, key) {

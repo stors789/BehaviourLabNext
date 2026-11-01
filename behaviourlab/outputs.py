@@ -287,7 +287,11 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
 
     if missing_size_note and not any(
             figures_info.get(key) for key in ("zones", "objects")):
-        notes.append("没有可用的场地尺寸，未生成图形")
+        if str(summary.get("mode")) == "ymaze":
+            # Y 迷宫本来没有场地宽高；序列与候选表在结果页，不写成缺尺寸。
+            notes.append("本实验不生成图形，序列、候选与入臂事件见结果页表格")
+        else:
+            notes.append("没有可用的场地尺寸，未生成图形")
 
     if isinstance(summary.get("objects"), list) and summary["objects"]:
         objects_figure = f"{stem}_objects.png"

@@ -1578,7 +1578,7 @@
       ? "manual" : "auto";
     const wrap = document.createElement("div");
     wrap.className = "mode-row";
-    [["auto", "自动几何"], ["manual", "人工记录"]].forEach(([value, label]) => {
+    [["auto", "自动追踪"], ["manual", "人工记录"]].forEach(([value, label]) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "mode-button" + (current === value ? " is-current" : "");

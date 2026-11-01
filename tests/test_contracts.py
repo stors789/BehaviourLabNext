@@ -100,10 +100,10 @@ def test_health_reports_explicit_data_root_and_no_owner(tmp_path):
 
 
 def test_unfinished_experiment_reports_not_implemented():
-    # TST、FST、MWM、NOR 与 EPM 已接入；用仍未实现的 Y 迷宫守住“未实现”契约。
-    context = AnalysisContext(job={"assay": "ymaze"})
+    # TST、FST、MWM、NOR、EPM 与 Y 迷宫已接入；用仍未实现的明暗箱守住契约。
+    context = AnalysisContext(job={"assay": "ldb"})
     with pytest.raises(ExperimentNotImplemented) as captured:
-        experiments.get("ymaze").analyze(context)
+        experiments.get("ldb").analyze(context)
     assert "尚未实现" in str(captured.value)
 
 

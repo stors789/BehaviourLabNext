@@ -28,14 +28,31 @@ def _thickness(width: int, height: int) -> int:
     return max(2, int(round(min(width, height) / 240)))
 
 
+def _selected_index(result) -> int | None:
+    """已关联候选在列表中的位置；缺失帧没有选中，不按面积最大冒认。"""
+
+    center = result.center
+    if not center:
+        return None
+    for index, candidate in enumerate(result.candidates):
+        item = candidate.get("center")
+        if not item:
+            continue
+        if (abs(float(item[0]) - float(center[0])) <= 1e-6
+                and abs(float(item[1]) - float(center[1])) <= 1e-6):
+            return index
+    return None
+
+
 def _draw_candidates(canvas, result, thickness: int) -> None:
-    """画出真实候选轮廓；最佳候选与其他候选分色，不改动源帧。"""
+    """画出真实候选轮廓；已关联候选与其他候选分色，不改动源帧。"""
 
     import cv2
     import numpy as np
 
+    chosen = _selected_index(result)
     for index, candidate in enumerate(result.candidates):
-        color = _bgr("#ff6e46") if index == 0 else _bgr("#8ed7c7")
+        color = _bgr("#ff6e46") if index == chosen else _bgr("#8ed7c7")
         points = np.array(
             [[int(round(point[0])), int(round(point[1]))]
              for point in candidate.get("contour") or []],
