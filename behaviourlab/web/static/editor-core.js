@@ -510,6 +510,29 @@
     no_candidate_within_gate: "门限内没有符合的候选",
   };
 
+  // 主按钮文字与下一次请求的 kind 同源，避免失败/修正后文字和行为不一致。
+  function previewActionLabel(kind) {
+    return kind === "behavior" ? "行为预览" : "检测预览";
+  }
+
+  // 整份草稿的人工输入检查：任一动物有未解析错误就阻止提交。
+  function manualFormatIssue(units, lookup) {
+    for (const unit of units || []) {
+      if (!unit || !unit.manual || !Array.isArray(unit.manual.hole_visits)) {
+        continue;
+      }
+      const cached = lookup ? lookup(unit) : null;
+      if (cached && cached.error) {
+        return {
+          unitId: unit.id || null,
+          unitName: unit.name || unit.id || "",
+          error: cached.error,
+        };
+      }
+    }
+    return null;
+  }
+
   // Barnes 人工洞序列：一行“视频秒, 洞号”，兼容中文逗号；保留输入顺序。
   function parseManualVisits(text) {
     const lines = String(text == null ? "" : text).split(/\r?\n/);
@@ -986,6 +1009,8 @@
     previewSignature,
     previewNoteFor,
     parseManualVisits,
+    previewActionLabel,
+    manualFormatIssue,
     issueText,
     setFieldLabels,
     saveThenPreview,

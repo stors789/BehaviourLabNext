@@ -278,17 +278,18 @@ def test_manual_input_structure_validation():
 
 # -- 夹具 2：完整配置窗预览与保存前后一致性 -----------------------------
 
-def seed(store, tmp_path, manual):
+def seed(store, tmp_path, manual, *, window=None, duration=4.0):
+    window = window or {"start_s": 0.0, "end_s": duration}
     source = tmp_path / "barnes.mp4"
     source.write_bytes(b"placeholder")
     asset = store.create_asset(
         name="barnes.mp4", path=str(source), project_id=None,
-        metadata={"width": 200, "height": 200, "duration_s": 4.0,
-                  "fps": 5.0, "frame_count": 20})
+        metadata={"width": 200, "height": 200, "duration_s": duration,
+                  "fps": 5.0, "frame_count": int(duration * 5)})
     merged = dict(barnes.DEFAULTS, hole_count=3, target_hole="1")
     draft = store.create_draft("barnes", videos=[{
         "asset_id": asset["id"],
-        "window": {"start_s": 0.0, "end_s": 4.0},
+        "window": dict(window),
         "orientation": 0, "fps_override": None, "sample_fps": None,
         "units": [{"id": UNIT, "name": "小鼠 1", "animal_id": None,
                    "window": None,
@@ -308,9 +309,12 @@ def patch_preview(monkeypatch):
 
     class Frames:
         def __init__(self, path=None, *, start_s=0.0, end_s=None, **kwargs):
+            begin = float(start_s or 0.0)
+            stop = float(end_s if end_s is not None else begin + 4.0)
+            count = max(1, int(round((stop - begin) / 0.2)))
             self._frames = []
-            for index in range(20):
-                moment = round(0.2 * index, 10)
+            for index in range(count):
+                moment = round(begin + 0.2 * index, 10)
                 self._frames.append(Frame(
                     image=np.full((200, 200), 240, dtype=np.uint8),
                     index=index, time_s=moment, dt_s=0.2, elapsed_s=moment,
@@ -474,3 +478,121 @@ def test_manual_result_page_marks_confirmed_entry(client, store):
     assert "计入" in page
     assert "未计入" not in page
     assert "暂无图表" in page
+    # 来源说明跟随单位模式：人工主访问不再声称来自鼻尖证据。
+    assert "主洞访问来自人工记录" in page
+    assert "主洞访问来自鼻尖进入洞半径的自动证据" not in page
+
+
+def test_automatic_result_page_keeps_nose_evidence(client, store):
+    import json
+    from pathlib import Path
+
+    facts = process(unit(manual=None),
+                    steady_rows(count=6, step=0.2, nose=(160.0, 100.0)),
+                    window=(0.0, 1.2))
+    run_id = "e" * 32
+    job_dir = Path(store.paths.runs) / run_id / ("f" * 32)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    summary = dict(facts["summary"], mode="barnes")
+    result = {"assay": "barnes", "summary": [summary],
+              "events": facts["events"], "bins": facts["bins"],
+              "observations": [], "tables": facts["tables"],
+              "warnings": [facts["warning"]] if facts["warning"] else [],
+              "metadata": {"assay": "barnes", "coordinate_unit": "cm",
+                           "units": {}, "warnings": []}}
+    (job_dir / "results.json").write_text(json.dumps(result),
+                                          encoding="utf-8")
+    manifest = {"units": [{"unit_id": UNIT, "unit_name": "小鼠 1",
+                           "summary": summary, "figures": {"stem": "u"}}],
+                "files": ["results.json"]}
+    (job_dir / "result_manifest.json").write_text(json.dumps(manifest),
+                                                  encoding="utf-8")
+
+    page = client.get(f"/results/{run_id}").get_data(as_text=True)
+    assert "主洞访问来自鼻尖进入洞半径的自动证据" in page
+    assert "主洞访问来自人工记录" not in page
+    assert "未确认入箱不产生总逃避潜伏期" in page
+
+
+# -- 三组修正：窗口时长、派生时刻与预览校验 -----------------------------
+
+def test_zero_duration_window_cannot_confirm_entry():
+    rows = steady_rows()
+    zero_window = {"mode": "relative", "offset_s": 4.0, "duration_s": 1.0}
+    payload = unit(manual={"hole_visits": [], "escape_time_s": 4.0},
+                   window=zero_window)
+    with pytest.raises(ValidationError) as captured:
+        barnes.process_unit(payload, rows, timeline.Window(0.0, 4.0), 0.0)
+    assert captured.value.field == "manual.escape_time_s"
+
+    # [] + null 仍表示零访问：零时长窗也不生成确认事件或总逃避指标。
+    quiet = barnes.process_unit(
+        unit(manual={"hole_visits": []}, window=zero_window),
+        rows, timeline.Window(0.0, 4.0), 0.0)
+    assert quiet["summary"]["visits"] == 0
+    assert not [item for item in quiet["events"]
+                if item["kind"] == "escape_confirmed"]
+
+
+def test_manual_confirmed_time_derives_from_time():
+    manual = {"hole_visits": [{"time_s": 0.4, "hole_id": "1",
+                               "confirmed_s": 2.0}],
+              "escape_time_s": 1.0}
+    facts = process(unit(manual=manual), steady_rows())
+    visits = [item for item in facts["events"] if item["kind"] == "hole_visit"]
+    assert [(item["time_s"], item["confirmed_s"], item["scored"])
+            for item in visits] == [(0.4, 0.4, True)]
+    summary = facts["summary"]
+    assert summary["visits"] == 1
+    assert summary["primary_latency_s"] == pytest.approx(0.4, abs=1e-8)
+
+    # 自动访问仍保留真实的后续确认时刻，不跟着起点一起改。
+    auto = process(unit(manual=None),
+                   steady_rows(count=6, step=0.2, nose=(160.0, 100.0)),
+                   window=(0.0, 1.2))
+    auto_visit = [item for item in auto["events"]
+                  if item["kind"] == "hole_visit"][0]
+    assert auto_visit["time_s"] == 0.0
+    assert auto_visit["confirmed_s"] == pytest.approx(0.2, abs=1e-8)
+
+
+def test_preview_rejects_persisted_unordered_manual(client, store, tmp_path,
+                                                    monkeypatch):
+    patch_preview(monkeypatch)
+    asset, draft = seed(
+        store, tmp_path,
+        {"hole_visits": [{"time_s": 6.2, "hole_id": "2"},
+                         {"time_s": 5.4, "hole_id": "1"}]},
+        window={"start_s": 5.0, "end_s": 10.0}, duration=10.0)
+    before = client.get(f"/api/drafts/{draft['id']}").get_json()["data"]["draft"]
+
+    response = preview(client, asset, draft)
+    assert response.status_code == 400, response.get_json()
+    issues = response.get_json()["error"]["fields"]
+    assert any(item["field"].endswith("manual.hole_visits[1].time_s")
+               for item in issues), issues
+    assert all(item.get("unit_id") == UNIT for item in issues), issues
+
+    after = client.get(f"/api/drafts/{draft['id']}").get_json()["data"]["draft"]
+    assert after["videos"][0]["units"][0]["manual"] == \
+        before["videos"][0]["units"][0]["manual"], "预览不得排序修复或写回"
+
+
+def test_preview_reports_manual_entry_with_automatic_visits(client, store,
+                                                            tmp_path,
+                                                            monkeypatch):
+    patch_preview(monkeypatch)
+    asset, draft = seed(store, tmp_path, {"escape_time_s": 8.2},
+                        window={"start_s": 5.0, "end_s": 10.0}, duration=10.0)
+    response = preview(client, asset, draft)
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()["data"]
+    behavior = data["summary"]["behavior"]
+    assert data["preview_scope"]["mode"] == "configured"
+    assert behavior["visit_source"] == "automatic"
+    assert behavior["total_latency_s"] == pytest.approx(3.2, abs=1e-8)
+    assert behavior["manual_entry_time_s"] == pytest.approx(8.2, abs=1e-8)
+    warnings = data["warnings"]
+    assert any("入箱端点由人工确认" in text for text in warnings), warnings
+    assert any("动物窗" in text for text in warnings), warnings
+    assert not any("人工洞访问" in text for text in warnings), warnings

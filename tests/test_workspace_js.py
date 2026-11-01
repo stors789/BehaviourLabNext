@@ -298,3 +298,19 @@ def test_barnes_manual_events_wiring():
 
     # 非法格式与保存失败都不得进入预览或提交。
     assert source.count("manualFormatError()") >= 3
+
+
+def test_preview_action_label_follows_kind():
+    """主按钮文字必须来自同一个 kind 来源，不能写死成检测预览。"""
+
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    invalidate = source.split("function invalidatePreview()", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "previewActionLabel(state.previewKind)" in invalidate
+    assert 'textContent = "检测预览"' not in invalidate
+
+    inspector = source.split("function renderDetectionInspector", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "previewActionLabel(kind)" in inspector
+    assert 'kind === "behavior" ? "行为预览" : "检测预览"' not in inspector

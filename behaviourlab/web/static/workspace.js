@@ -193,8 +193,13 @@
       el.preview.removeAttribute("src");
     }
     if (el.secondary) el.secondary.hidden = true;
-    if (el.primary && state.view === "detection") el.primary.textContent = "检测预览";
-    if (state.step === "review" && el.primary) el.primary.textContent = "行为预览";
+    if (el.primary && state.view === "detection") {
+      // 文字必须跟随下一次真正会请求的 kind，不能回落到检测。
+      el.primary.textContent = window.BLCore.previewActionLabel(state.previewKind);
+    }
+    if (state.step === "review" && el.primary) {
+      el.primary.textContent = window.BLCore.previewActionLabel("behavior");
+    }
     setPreviewNote(null);
   }
 
@@ -1598,7 +1603,7 @@
     const kind = state.previewKind === "behavior" ? "behavior" : "detection";
     const confirmed = state.previewGate.confirmed(previewConfig(kind));
     el.primary.textContent = confirmed
-      ? "检查并开始分析" : (kind === "behavior" ? "行为预览" : "检测预览");
+      ? "检查并开始分析" : window.BLCore.previewActionLabel(kind);
     el.secondary.textContent = kind === "behavior" ? "更新行为预览" : "更新检测预览";
     el.secondary.hidden = !confirmed;
     el.preview.hidden = !confirmed && !state.previewAwaiting;
@@ -1880,14 +1885,18 @@
   }
 
   function manualFormatError() {
-    const video = currentVideo();
-    if (!video) return null;
-    for (const unit of video.units || []) {
-      if (!unit || !unit.manual || !Array.isArray(unit.manual.hole_visits)) continue;
-      const cached = unit.id ? manualCache().get(unit.id) : null;
-      if (cached && cached.error) return cached.error;
-    }
-    return null;
+    // 提交的是整批视频/动物：任一动物的人工缓存有未解析错误都要拦下。
+    const units = [];
+    ((state.draft && state.draft.videos) || []).forEach((video) => {
+      (video.units || []).forEach((unit) => {
+        if (unit) units.push(unit);
+      });
+    });
+    const issue = window.BLCore.manualFormatIssue(units, (unit) =>
+      (unit.id ? manualCache().get(unit.id) : null));
+    if (!issue) return null;
+    const who = issue.unitName ? "「" + issue.unitName + "」" : "其他动物";
+    return who + issue.error + "；请回到该动物修正，或关闭其人工洞序列";
   }
 
   function pruneManualCache() {

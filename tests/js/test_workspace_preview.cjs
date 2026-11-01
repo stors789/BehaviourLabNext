@@ -5,6 +5,8 @@ const {
   saveThenPreview,
   previewNoteFor,
   parseManualVisits,
+  previewActionLabel,
+  manualFormatIssue,
   issueText,
   setFieldLabels,
   mwmLines,
@@ -468,6 +470,32 @@ function manualVisitsParsing() {
     "解析保留输入顺序，排序留给最终校验");
 }
 
+// 主按钮文字与 kind 同源；人工格式检查覆盖整份草稿的所有动物。
+function previewActionContract() {
+  assert.strictEqual(previewActionLabel("behavior"), "行为预览");
+  assert.strictEqual(previewActionLabel("detection"), "检测预览");
+  assert.strictEqual(previewActionLabel(undefined), "检测预览");
+
+  const units = [
+    { id: "a", name: "A 鼠", manual: { hole_visits: [] } },
+    { id: "b", name: "B 鼠", manual: null },
+    { id: "c", name: "C 鼠", manual: { hole_visits: null } },
+  ];
+  const cache = new Map([["a", { text: "0.4,", error: "第 1 行应为“视频秒,洞号”" }]]);
+  const issue = manualFormatIssue(units, (unit) => cache.get(unit.id));
+  assert.ok(issue, "任一动物有格式错误都要拦下整批提交");
+  assert.strictEqual(issue.unitId, "a");
+  assert.ok(issue.error.includes("第 1 行"), issue.error);
+  assert.strictEqual(issue.unitName, "A 鼠");
+
+  // 关闭人工模式（hole_visits=null）后不再阻止，缓存错误不复活。
+  assert.strictEqual(manualFormatIssue(
+    [{ id: "a", name: "A 鼠", manual: { hole_visits: null } }],
+    () => ({ error: "旧错误" })), null);
+  assert.strictEqual(manualFormatIssue(units, () => null), null);
+  assert.strictEqual(manualFormatIssue([], () => null), null);
+}
+
 (async () => {
   await saveRunsFirst();
   await saveFailureStopsPreview();
@@ -480,6 +508,7 @@ function manualVisitsParsing() {
   mwmQuadrantGuides();
   barnesScopeNotes();
   manualVisitsParsing();
+  previewActionContract();
   await saveFailureCarriesFieldReason();
   console.log("workspace-preview OK");
 })().catch((error) => {

@@ -1002,20 +1002,17 @@ def process_unit(unit: Mapping[str, Any], captured: Sequence[Mapping[str, Any]],
 
 
 def _manual_visits(entries: Any) -> list[dict]:
-    """人工覆盖记录：按给定顺序取洞号与时刻；缺时刻的条目不参与评分。"""
+    """人工覆盖记录：确认时刻一律由输入时刻派生，额外字段不改变评分。"""
 
     visits: list[dict] = []
     for item in entries if isinstance(entries, list) else []:
         if isinstance(item, str):
-            hole_id, moment, confirmed = item, None, None
+            hole_id, moment = item, None
         elif isinstance(item, Mapping):
             raw_id = item.get("hole_id", item.get("id", item.get("target")))
             hole_id = (None if isinstance(raw_id, bool) or raw_id is None
                        else str(raw_id).strip() or None)
             moment = _finite(item.get("time_s"))
-            confirmed = _finite(item.get("confirmed_s"))
-            if confirmed is None:
-                confirmed = moment
         else:
             continue
         if hole_id is None:
@@ -1025,7 +1022,8 @@ def _manual_visits(entries: Any) -> list[dict]:
             "hole_id": hole_id,
             "target": hole_id,
             "time_s": moment,
-            "confirmed_s": confirmed,
+            # 人工事件的确认时刻就是输入时刻；调用方传入的 confirmed_s 不采信。
+            "confirmed_s": moment,
             "source": "manual",
             "frame": None,
         })
@@ -1039,7 +1037,8 @@ def check_manual_window(visits: Sequence[Mapping[str, Any]],
 
     if not visits and escape is None:
         return
-    if not window.known:
+    if not window.known or window.duration_s <= 0:
+        # 零时长窗不能确认任何人工时刻：不延窗、不裁记录、不清 null。
         field = ("manual.escape_time_s" if escape is not None
                  else "manual.hole_visits")
         raise ValidationError("没有有效动物窗，无法校验人工记录的时刻", field)
@@ -1176,6 +1175,12 @@ def analyze(context: Any) -> AnalysisResult:
                                unit.get("geometry") or {}, complete=True)
         if issues:
             raise ValidationError(issues[0]["message"], issues[0]["field"])
+        # 冻结配置也可能带着未经过本次保存的人工输入：运行前再校验一次结构。
+        manual_issues = validate_unit_manual(
+            unit, options=unit.get("options") or {}, complete=True)
+        if manual_issues:
+            raise ValidationError(manual_issues[0]["message"],
+                                  manual_issues[0]["field"])
 
     asset = job.get("asset") or {}
     metadata = asset.get("metadata") or {}
@@ -1252,6 +1257,11 @@ def preview_analysis(*, asset: Mapping[str, Any], video: Mapping[str, Any],
     issues = validate_unit(options, unit.get("geometry") or {}, complete=True)
     if issues:
         raise ValidationError(issues[0]["message"], issues[0]["field"])
+    # 预览不假设持久草稿里的输入都经过本次保存：先校验结构与顺序再捕获。
+    manual_issues = validate_unit_manual(unit, options=options, complete=True)
+    if manual_issues:
+        raise ValidationError(manual_issues[0]["message"],
+                              manual_issues[0]["field"])
 
     metadata = asset.get("metadata") or {}
     window = {"start_s": float(start_s), "end_s": float(end_s)}
@@ -1296,6 +1306,7 @@ def preview_analysis(*, asset: Mapping[str, Any], video: Mapping[str, Any],
         "missing_time_s": summary["missing_time_s"],
         "trial_type": summary["trial_type"],
         "visit_source": summary["visit_source"],
+        "manual_entry_time_s": facts["metadata"].get("manual_entry_endpoint_s"),
         "target_hole": summary["target_hole"],
         "visits": summary["visits"],
         "unscored_visits": summary["unscored_visits"],

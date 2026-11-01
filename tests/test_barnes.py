@@ -419,7 +419,7 @@ def test_barnes_job_exports_and_result_page(client, store, tmp_path,
 
     page = client.get(f"/results/{run_id}").get_data(as_text=True)
     for label in ("洞访问", "首次目标潜伏期", "目标扇区", "自动访问",
-                  "暂无图表", "洞访问来自鼻尖进入洞半径的证据"):
+                  "暂无图表", "洞访问来自鼻尖进入洞半径的自动证据"):
         assert label in page, label
     assert "没有可用的场地尺寸" not in page
     assert 'src=""' not in page

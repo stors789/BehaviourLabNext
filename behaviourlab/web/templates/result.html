@@ -1094,7 +1094,11 @@
     {% else %}
     <p class="muted" data-empty="figures">暂无图表（本次运行未生成本单位的图形，见下方文件列表）。</p>
     {% endif %}
-    <p class="muted">洞访问来自鼻尖进入洞半径的证据；质量分数是证据指标，不是准确概率。未确认入箱不产生总逃避潜伏期。</p>
+    {% if s.visit_source == "manual" %}
+    <p class="muted">主洞访问来自人工记录（本次评分序列）；身体/鼻尖覆盖与自动访问审计仍来自检测{% if s.total_latency_s is not none %}；入箱端点由人工确认{% endif %}。质量分数是证据指标，不是准确概率。</p>
+    {% else %}
+    <p class="muted">主洞访问来自鼻尖进入洞半径的自动证据{% if s.total_latency_s is not none %}；入箱端点由人工确认{% else %}；未确认入箱不产生总逃避潜伏期{% endif %}。质量分数是证据指标，不是准确概率。</p>
+    {% endif %}
 
     {% else %}
     <div class="metric-grid">

@@ -502,14 +502,21 @@ def create_preview(
     if missing:
         warnings.append("尚未绘制：" + "、".join(missing))
 
-    if behavior is not None and behavior.get("visit_source") == "manual":
+    if behavior is not None:
         # 人工序列只决定洞访问与入箱评分；身体/鼻尖覆盖仍来自本次真实捕获。
         start = behavior.get("window_start_s")
         end = behavior.get("window_end_s")
         span = (f"{float(start):.3f}–{float(end):.3f} s"
                 if start is not None and end is not None else "未确定")
-        warnings.append("行为预览保留人工洞访问与入箱评分，统计范围为动物窗 "
-                        + span + "；覆盖与路径仍来自本次真实捕获。")
+        source = behavior.get("visit_source")
+        entry = behavior.get("manual_entry_time_s")
+        if source == "manual":
+            warnings.append("行为预览保留人工洞访问与入箱评分，统计范围为动物窗 "
+                            + span + "；覆盖与路径仍来自本次真实捕获。")
+        elif entry is not None:
+            # 只有入箱是人工端点：洞访问仍自动，不能写成人工访问序列。
+            warnings.append("洞访问仍为自动，入箱端点由人工确认；统计保留完整"
+                            "动物窗 " + span + "，覆盖与路径来自本次真实捕获。")
 
     manual_behavior = bool(behavior) and behavior.get("manual") is True
     if manual_behavior and behavior.get("events") == 0:
