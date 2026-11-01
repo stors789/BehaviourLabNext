@@ -89,9 +89,9 @@ def test_manual_bins_expose_original_keys(client, store, tmp_path,
                       "fps": 10.0, "frame_count": 10})
     draft = seed(client, store, tmp_path)
     started = client.post("/api/jobs", json={"draft_id": draft["id"]})
-    assert started.status_code == 201, started.get_json()
+    assert started.status_code == 202, started.get_json()
     job = started.get_json()["data"]["jobs"][0]
-    assert job["status"] == "done", job
+    assert job["status"] == "completed", job
     run_id = started.get_json()["data"]["run_id"]
 
     stored = client.get(
@@ -135,13 +135,13 @@ def test_annotated_video_is_generated_and_downloadable(client, store, tmp_path,
     started = client.post("/api/jobs", json={"draft_id": draft["id"]})
     payload = started.get_json()["data"]
     job = payload["jobs"][0]
-    assert job["status"] == "done", job
+    assert job["status"] == "completed", job
     unit = job["manifest"]["units"][0]
     name = unit["annotated_video"]
     assert name and name.endswith("_annotated.mp4")
     assert name in job["manifest"]["files"]
 
-    run_dir = store.paths.runs / payload["run_id"] / job["job_id"]
+    run_dir = store.paths.runs / payload["run_id"]
     target = run_dir / name
     assert target.is_file() and target.stat().st_size > 0
 
@@ -187,8 +187,8 @@ def test_annotated_video_off_changes_nothing_else(client, store, tmp_path,
 
     first = client.post("/api/jobs", json={"draft_id": on["id"]}).get_json()["data"]
     second = client.post("/api/jobs", json={"draft_id": off["id"]}).get_json()["data"]
-    assert first["jobs"][0]["status"] == "done"
-    assert second["jobs"][0]["status"] == "done"
+    assert first["jobs"][0]["status"] == "completed"
+    assert second["jobs"][0]["status"] == "completed"
 
     unit = second["jobs"][0]["manifest"]["units"][0]
     assert unit["annotated_video"] is None
@@ -259,10 +259,10 @@ def test_encoding_failure_marks_job_error(client, store, tmp_path, monkeypatch):
     draft = seed(client, store, tmp_path)
     payload = client.post("/api/jobs", json={"draft_id": draft["id"]}).get_json()["data"]
     job = payload["jobs"][0]
-    assert job["status"] == "error"
+    assert job["status"] == "failed"
     assert "标注视频" in str(job.get("error")), job
     assert "manifest" not in job
-    run_dir = store.paths.runs / payload["run_id"] / job["job_id"]
+    run_dir = store.paths.runs / job["run_id"]
     assert not (run_dir / "result_manifest.json").exists()
 
 
@@ -447,9 +447,9 @@ def test_write_failure_marks_job_error(client, store, tmp_path, monkeypatch):
     payload = client.post("/api/jobs",
                           json={"draft_id": draft["id"]}).get_json()["data"]
     job = payload["jobs"][0]
-    assert job["status"] == "error", job
+    assert job["status"] == "failed", job
     assert "标注视频" in str(job.get("error")), job
     assert "manifest" not in job
-    run_dir = store.paths.runs / payload["run_id"] / job["job_id"]
+    run_dir = store.paths.runs / job["run_id"]
     assert not (run_dir / "result_manifest.json").exists()
     assert not list(run_dir.glob("*_annotated.mp4"))

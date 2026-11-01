@@ -86,10 +86,11 @@ def test_tst_result_page_order_and_labels(client, store, tmp_path, monkeypatch):
         "behaviourlab.engine.media.probe_video",
         lambda path: {"width": 200, "height": 200, "duration_s": 1.0,
                       "fps": 10.0, "frame_count": 10})
-    monkeypatch.setattr(worker, "run_frozen_job", lambda job: fake_result())
+    monkeypatch.setattr(worker, "run_frozen_job",
+                        lambda job, **kwargs: fake_result())
 
     response = client.post(f"/api/drafts/{draft['id']}/analyze")
-    assert response.status_code == 201, response.get_json()
+    assert response.status_code == 202, response.get_json()
     run_id = response.get_json()["data"]["run_id"]
     page = client.get(f"/results/{run_id}").get_data(as_text=True)
 
@@ -144,9 +145,9 @@ def test_tst_analyze_requires_geometry_and_classic_mode(client, store, tmp_path,
         lambda path: {"width": 200, "height": 200, "duration_s": 1.0,
                       "fps": 10.0, "frame_count": 10})
     started = client.post(f"/api/drafts/{draft2['id']}/analyze")
-    assert started.status_code == 201, started.get_json()
+    assert started.status_code == 202, started.get_json()
     data = started.get_json()["data"]
-    assert data["jobs"] and data["jobs"][0]["status"] == "done"
+    assert data["jobs"] and data["jobs"][0]["status"] == "completed"
     manifest = data["jobs"][0]["manifest"]
     assert manifest["metadata"]["units"]["e" * 32]["mode"] == "lis"
 

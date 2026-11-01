@@ -302,7 +302,7 @@ def test_ldb_preview_and_result_page(client, store, tmp_path, monkeypatch):
     payload = client.post("/api/jobs",
                           json={"draft_id": draft["id"]}).get_json()["data"]
     job = payload["jobs"][0]
-    assert job["status"] == "done", job
+    assert job["status"] == "completed", job
     summary = job["manifest"]["units"][0]["summary"]
     assert summary["light_time_s"] == pytest.approx(2.0, abs=1e-9)
     assert summary["dark_time_s"] == pytest.approx(2.0, abs=1e-9)

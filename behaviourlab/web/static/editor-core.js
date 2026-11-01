@@ -454,8 +454,12 @@
         geometry.objects[1].role = roles[0] === "familiar" ? "novel" : "familiar";
       }
     }
-    const options = Object.assign({},
-      clone((unit && unit.options) || {}));
+    // 旧版本把几何塞进 options：这些键不能随模板回到动物身上。
+    const legacyGeometry = ["arena", "body_line", "diameter_line", "zones",
+      "objects", "platform"];
+    const currentOptions = clone((unit && unit.options) || {});
+    legacyGeometry.forEach((key) => { delete currentOptions[key]; });
+    const options = Object.assign({}, currentOptions);
     const templateOptions = template && template.options &&
       typeof template.options === "object" ? template.options : {};
     allowed.forEach((key) => {

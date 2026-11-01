@@ -1,0 +1,62 @@
+{% set STATUS_LABELS = {
+  "queued": "等待中", "running": "分析中", "completed": "已完成",
+  "failed": "失败", "cancelled": "已停止", "interrupted": "已中断",
+  "not_started": "未开始",
+  "done": "已完成", "error": "失败",
+} %}
+
+{% macro batch_row(batch) %}
+{% set status = batch.status %}
+{% set fraction = (batch.progress or {}).get("fraction") or 0 %}
+{% set percent = (fraction * 100) | round(0, "floor") | int %}
+<li class="batch" id="job-{{ batch.id }}" data-batch="{{ batch.id }}" data-status="{{ status }}">
+  <div class="batch-head">
+    <div class="batch-title">
+      <span class="batch-assay">{{ batch.assay_label or batch.assay }}</span>
+      <span class="batch-videos">
+        {% for video in batch.videos %}{{ video.name or '视频' }}{% if not loop.last %} · {% endif %}{% endfor %}
+      </span>
+    </div>
+    <div class="batch-meta">
+      <span class="status-pill" data-status>{{ STATUS_LABELS.get(status, status) }}</span>
+      <span class="meta">{{ (batch.updated_at or "")[:16] | replace("T", " ") }}</span>
+    </div>
+  </div>
+
+  <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+       aria-valuenow="{{ percent }}">
+    <span data-bar style="width: {{ percent }}%"></span>
+  </div>
+  <p class="batch-message" data-message>{{ (batch.progress or {}).get("message") or '' }}</p>
+  {% if batch.error and status not in ("completed",) %}
+  <p class="batch-error" data-error>{{ batch.error }}</p>
+  {% endif %}
+
+  <ol class="video-list">
+    {% for video in batch.videos %}
+    <li class="video-row" data-video="{{ video.run_id or loop.index }}"
+        data-status="{{ video.status }}">
+      <span class="video-name">{{ video.name or '视频' }}</span>
+      <span class="video-status" data-status>{{ STATUS_LABELS.get(video.status, video.status) }}</span>
+      {% if video.progress is not none and video.status == "running" %}
+      <span class="meta">{{ ((video.progress or 0) * 100) | round(0, "floor") | int }}%</span>
+      {% endif %}
+      {% if video.error %}<span class="video-error" data-error>{{ video.error }}</span>{% endif %}
+      {% if video.status == "completed" and video.run_id %}
+      <a class="link" href="/results/{{ video.run_id }}">查看结果</a>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+
+  <div class="batch-actions">
+    {% if status in ("queued", "running") %}
+    <button class="button small" type="button" data-action="cancel">停止</button>
+    {% else %}
+    <button class="button small" type="button" data-action="replay">按原配置重新分析</button>
+    <button class="button small danger" type="button" data-action="delete">删除</button>
+    {% endif %}
+    <span class="form-error" role="alert" data-batch-error></span>
+  </div>
+</li>
+{% endmacro %}

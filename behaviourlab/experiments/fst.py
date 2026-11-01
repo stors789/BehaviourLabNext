@@ -61,15 +61,15 @@ SPEC = {
     "short": "FST",
     "parameters": [
         parameter("cylinder_diameter_cm", "圆筒实际内径", "number", 10.0,
-                  unit="cm", minimum=0.01, step=0.1),
+                  unit="cm", minimum=0.01, step="any"),
         parameter("auto_threshold", "自动估计不动阈值", "checkbox", True,
                   section="实验参数"),
         parameter("threshold_sensitivity", "自动阈值灵敏度", "number", 0.0,
                   minimum=-3, maximum=3, step=0.1, section="实验参数"),
         parameter("immobility_threshold", "不动低阈值", "number", 0.08,
-                  minimum=0.001, step=0.01, section="实验参数"),
+                  minimum=0.001, step="any", section="实验参数"),
         parameter("active_threshold", "活动高阈值", "number", 0.108,
-                  minimum=0.001, step=0.01, section="实验参数"),
+                  minimum=0.001, step="any", section="实验参数"),
         parameter("smoothing_window_s", "运动评分平滑时间", "number", 0.5,
                   unit="s", minimum=0, step=0.1, section="实验参数"),
         parameter("min_immobility_duration_s", "最短不动时长", "number", 1.0,
@@ -79,7 +79,7 @@ SPEC = {
         parameter("gap_merge_s", "合并不动片段间的活动间隙", "number", 0.5,
                   unit="s", minimum=0, step=0.1, section="实验参数"),
         parameter("bin_seconds", "时间分箱长度", "number", 60.0, unit="s",
-                  minimum=0.01, step=1, section="实验参数"),
+                  minimum=0.01, step="any", section="实验参数"),
     ],
     "geometry": [
         geometry_field("arena", "圆筒区域", "polygon", min_points=3),
@@ -97,7 +97,7 @@ SPEC = {
         metric("latency_to_immobility_s", "首次不动潜伏期", "s"),
         metric("detected_rate_percent", "检测时间比例", "%"),
     ],
-    "template_keys": ["arena", "diameter_line", "cylinder_diameter_cm"],
+    "template_keys": ["cylinder_diameter_cm"],
 }
 
 CANCEL_STRIDE = 512

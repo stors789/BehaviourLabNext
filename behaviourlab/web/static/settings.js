@@ -15,6 +15,14 @@
   const previewNote = document.querySelector("#style-preview-note");
   let previewStale = false;
   let previewDpi = null;
+  // 每次输入让该表单的版本 +1；异步回调只能确认它提交时的那一版。
+  const versions = new Map();
+  function version(form) {
+    return versions.get(form) || 0;
+  }
+  function bump(form) {
+    versions.set(form, version(form) + 1);
+  }
 
   function note(form) {
     return form.querySelector(".form-note");
@@ -50,6 +58,9 @@
       if (input.max !== "" && number > Number(input.max)) {
         return { error: "不能大于 " + input.max };
       }
+      if (input.getAttribute("step") === "1" && !Number.isInteger(number)) {
+        return { error: "必须是整数" };
+      }
       return { value: number };
     }
     if (input.type === "text") {
@@ -76,6 +87,10 @@
       }
       if (nested) {
         const assay = input.dataset.assay;
+        if (!assay) {
+          // 字段缺少实验归属时不能静默塞进 undefined 分区。
+          return { error: param + "：字段没有实验归属", input };
+        }
         if (!value[assay]) value[assay] = {};
         value[assay][param] = result.value;
       } else {
@@ -95,6 +110,8 @@
       if (collected.input) collected.input.focus();
       return false;
     }
+    // 冻结本次提交的快照版本：期间的编辑不属于这次请求。
+    const stamp = version(form);
     if (button) button.disabled = true;
     setNote(form, "保存中…");
     try {
@@ -102,6 +119,11 @@
         method: "PUT",
         body: JSON.stringify({ value: collected.value }),
       });
+      if (version(form) !== stamp) {
+        setDirty(form, true);
+        setNote(form, "已保存早先的修改；当前输入仍未保存");
+        return false;
+      }
       setDirty(form, false);
       setNote(form, "已保存");
       return true;
@@ -138,6 +160,8 @@
       if (box) box.textContent = "样式字段必须先填写合法值";
       return;
     }
+    // 预览同样只对发起时的样式版本负责。
+    const stamp = version(form);
     previewButton.disabled = true;
     previewBox.hidden = false;
     previewBox.dataset.state = "loading";
@@ -148,7 +172,16 @@
         body: JSON.stringify({ value }),
       });
       previewDpi = data.style ? data.style.dpi : null;
+      const stale = () => {
+        previewStale = true;
+        previewBox.dataset.state = "stale";
+        if (previewNote) previewNote.textContent = "样式已改变，请重新预览";
+      };
       previewImage.onload = () => {
+        if (version(form) !== stamp) {
+          stale();
+          return;
+        }
         previewStale = false;
         previewBox.dataset.state = "ready";
         if (previewNote) {
@@ -156,6 +189,10 @@
         }
       };
       previewImage.onerror = () => {
+        if (version(form) !== stamp) {
+          stale();
+          return;
+        }
         previewBox.dataset.state = "error";
         if (previewNote) previewNote.textContent = "预览图加载失败";
       };
@@ -175,11 +212,13 @@
       save(form);
     });
     form.addEventListener("input", () => {
+      bump(form);
       setDirty(form, true);
       setNote(form, "未保存的修改");
       if (form.dataset.settingsSection === "style") markStale();
     });
     form.addEventListener("change", () => {
+      bump(form);
       setDirty(form, true);
       setNote(form, "未保存的修改");
       if (form.dataset.settingsSection === "style") markStale();

@@ -122,7 +122,7 @@ SPEC = {
         metric("quadrant_se_time_s", "东南象限时间", "s"),
         metric("search_strategy", "探索性搜索策略"),
     ],
-    "template_keys": ["arena", "pool_diameter_cm", "platform_radius_cm"],
+    "template_keys": ["pool_diameter_cm", "platform_radius_cm"],
 }
 
 

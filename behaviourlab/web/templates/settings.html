@@ -22,14 +22,15 @@
   <input type="color" data-scope="{{ scope }}" data-param="{{ key }}"
          value="{{ value or '#B86245' }}">
   {% elif param.type == "text" %}
-  <input type="text" data-scope="{{ scope }}" data-param="{{ key }}"
+  <input type="text" data-scope="{{ scope }}"
+         {% if assay %}data-assay="{{ assay }}"{% endif %} data-param="{{ key }}"
          value="{{ value if value is not none else '' }}">
   {% else %}
   <input type="number" data-scope="{{ scope }}"
          {% if assay %}data-assay="{{ assay }}"{% endif %} data-param="{{ key }}"
          {% if param.min is defined and param.min is not none %}min="{{ param.min }}"{% endif %}
          {% if param.max is defined and param.max is not none %}max="{{ param.max }}"{% endif %}
-         step="{% if param.step is defined and param.step is not none %}{{ param.step }}{% else %}any{% endif %}"
+         step="{% if param.integer is defined and param.integer %}1{% elif param.step is defined and param.step is not none %}{{ param.step }}{% else %}any{% endif %}"
          value="{{ value if value is not none else '' }}">
   {% endif %}
 </label>

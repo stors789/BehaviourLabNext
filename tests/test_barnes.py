@@ -396,7 +396,7 @@ def test_barnes_job_exports_and_result_page(client, store, tmp_path,
     payload = client.post("/api/jobs",
                           json={"draft_id": draft["id"]}).get_json()["data"]
     job = payload["jobs"][0]
-    assert job["status"] == "done", job
+    assert job["status"] == "completed", job
     summary = job["manifest"]["units"][0]["summary"]
     assert summary["visits"] == 2
     assert summary["primary_latency_s"] == pytest.approx(0.0, abs=1e-8)

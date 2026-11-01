@@ -3769,20 +3769,29 @@
       }
       // 校验返回后、提交前再核对一次，旧校验不能当新配置通过。
       if (abort()) return;
-      status("正在分析…");
+      status("正在排队…");
       const data = await send("POST", "/api/jobs", { draft_id: context.draftId });
-      const failed = (data.jobs || []).find((job) => job.status !== "done");
+      const batch = data.batch || data;
+      const failed = (batch.videos || []).find((video) => video.status === "failed");
       if (failed) {
-        status(failed.error || "分析失败", "error");
+        status(failed.error || batch.error || "分析失败", "error");
         return;
       }
-      status("分析完成", "ok");
+      const done = (batch.videos || []).find(
+        (video) => video.status === "completed" && video.run_id);
       if (submission() !== "ok") {
-        // 已离开或已改配置：保留用户当前页面，只提示任务已开始。
+        // 已离开或已改配置：保留当前页面，只提示任务已开始。
         status("任务已开始，可在任务页查看", "ok");
         return;
       }
-      window.location.href = "/results/" + data.run_id;
+      if (batch.status === "completed" && done) {
+        status("分析完成", "ok");
+        window.location.href = "/results/" + done.run_id;
+        return;
+      }
+      // 后台还在排队或分析：不宣称完成，也不强行留人。
+      status("已加入队列，可在任务页查看", "ok");
+      window.location.href = "/tasks?job=" + encodeURIComponent(batch.id);
     } catch (error) {
       // 校验失败时给出可定位原因，而不是只显示“草稿未通过校验”。
       status(issueText(error, "分析失败"), "error");

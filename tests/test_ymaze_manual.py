@@ -274,10 +274,10 @@ def test_manual_preview_full_window_and_validation(client, store, tmp_path,
         lambda path: {"width": 128, "height": 96, "duration_s": 4.0,
                       "fps": 10.0, "frame_count": 40})
     started = client.post("/api/jobs", json={"draft_id": draft["id"]})
-    assert started.status_code == 201, started.get_json()
+    assert started.status_code == 202, started.get_json()
     run = started.get_json()["data"]
     job = run["jobs"][0]
-    assert job["status"] == "done", job
+    assert job["status"] == "completed", job
     summary = job["manifest"]["units"][0]["summary"]
     assert summary["total_arm_entries"] == 4
     assert summary["alternation_percent"] == pytest.approx(50.0, abs=1e-9)

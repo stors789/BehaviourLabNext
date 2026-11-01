@@ -344,13 +344,18 @@ def test_analysis_writes_zones_table_and_unit_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr(engine, "require_identity", lambda asset: None)
     source_file = tmp_path / "ezm.mp4"
     source_file.write_bytes(b"placeholder")
+    stat = source_file.stat()
     job = {
-        "schema_version": "1",
+        "schema_version": 1,
         "run_id": "r" * 32,
         "job_id": "j" * 32,
         "assay": "ezm",
         "asset": {"id": "a" * 32, "name": "ezm.mp4",
                   "path": str(source_file),
+                  "identity": {"path": str(source_file.resolve()),
+                               "size": int(stat.st_size),
+                               "mtime": float(stat.st_mtime),
+                               "mtime_ns": int(stat.st_mtime_ns)},
                   "metadata": {"duration_s": 4.0, "fps": 1.0}},
         "window": {"start_s": 0.0, "end_s": None},
         "orientation": 0,
@@ -472,10 +477,10 @@ def test_workspace_flow_writes_ezm_results(client, store, tmp_path, monkeypatch)
         assert key in core
 
     started = client.post(f"/api/drafts/{draft['id']}/analyze")
-    assert started.status_code == 201, started.get_json()
+    assert started.status_code == 202, started.get_json()
     payload = started.get_json()["data"]
     job = payload["jobs"][0]
-    assert job["status"] == "done"
+    assert job["status"] == "completed"
     summary = job["manifest"]["units"][0]["summary"]
     assert summary["total_time_s"] == pytest.approx(2.0, abs=1e-6)
     assert summary["observed_time_s"] > 0
@@ -485,7 +490,7 @@ def test_workspace_flow_writes_ezm_results(client, store, tmp_path, monkeypatch)
     assert figures["trajectory"]
     assert figures["heatmap"]
 
-    run_dir = Path(store.paths.runs) / payload["run_id"] / job["job_id"]
+    run_dir = Path(store.paths.runs) / payload["run_id"]
     zones_file = run_dir / "zones.csv"
     assert zones_file.is_file()
     with zones_file.open(encoding="utf-8-sig") as handle:

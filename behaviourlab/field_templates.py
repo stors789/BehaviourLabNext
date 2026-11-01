@@ -22,6 +22,11 @@ FORBIDDEN_KEYS = frozenset({
 # 应用模板时仍需保留的当前几何键：平台是当次试验的目标，模板里没有它。
 PRESERVED_GEOMETRY_KEYS = ("platform",)
 
+# 旧版本把几何写进 options；这些键不是尺寸参数，不能随模板回到动物身上。
+LEGACY_GEOMETRY_OPTIONS = frozenset({
+    "arena", "body_line", "diameter_line", "zones", "objects", "platform",
+})
+
 
 def strip_forbidden(value: Any) -> Any:
     """递归去掉禁止键；只处理对象与数组，其他值原样深拷贝。"""
@@ -123,7 +128,11 @@ def apply_template(assay: str, template: Mapping[str, Any],
             geometry[key] = deepcopy(current[key])
     _restore_nor_roles(assay, geometry, current)
 
-    options = deepcopy(dict(unit.get("options") or {}))
+    options = {
+        key: deepcopy(value)
+        for key, value in dict(unit.get("options") or {}).items()
+        if key not in LEGACY_GEOMETRY_OPTIONS
+    }
     options.update(allowed_options(assay, template.get("options")))
     return {"geometry": geometry, "options": options}
 

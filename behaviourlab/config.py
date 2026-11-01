@@ -20,7 +20,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
 DATABASE_FILENAME = "behaviourlab.sqlite3"
-SUBDIRECTORIES = ("videos", "backgrounds", "previews", "runs", "logs")
+SUBDIRECTORIES = ("videos", "backgrounds", "previews", "runs", "logs", "tasks")
 
 # 指定依赖契约，不是“最新版本”声明。
 PINNED_DEPENDENCIES = {
@@ -88,6 +88,10 @@ class DataPaths:
     def logs(self) -> Path:
         return self.root / "logs"
 
+    @property
+    def tasks(self) -> Path:
+        return self.root / "tasks"
+
     def ensure(self) -> "DataPaths":
         self.root.mkdir(parents=True, exist_ok=True)
         for name in SUBDIRECTORIES:
@@ -103,4 +107,5 @@ class DataPaths:
             "previews": str(self.previews),
             "runs": str(self.runs),
             "logs": str(self.logs),
+            "tasks": str(self.tasks),
         }

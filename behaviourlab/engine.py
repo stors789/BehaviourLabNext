@@ -9,7 +9,7 @@ import os
 import re
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from . import experiments, media
 from .config import ALGORITHM_VERSION, SCHEMA_VERSION
@@ -76,10 +76,11 @@ SETTING_SECTIONS = ("defaults", "detection", "output", "style")
 
 def setting_layer(settings: Mapping[str, Any] | None, assay: str,
                   section: str) -> dict | None:
-    """取该实验的 section 层。
+    """取当前实验的 section 层。
 
-    ``defaults``/``detection`` 在设置里按实验键保存，解析时必须只取该实验的
-    子对象，不能把整个实验映射当作参数；``output``/``style`` 是单对象。
+    Store 里 ``settings.defaults``/``settings.detection`` 按实验键保存，但
+    通用解析拿到的是**服务已经取出的当前实验对象**：这里不再按实验名二次
+    取值，否则合法的检测覆盖会被静默丢弃。
     """
 
     if not isinstance(settings, Mapping):
@@ -87,9 +88,6 @@ def setting_layer(settings: Mapping[str, Any] | None, assay: str,
     value = settings.get(section)
     if not isinstance(value, Mapping):
         return None
-    if section in ("defaults", "detection"):
-        sub = value.get(assay)
-        return deepcopy(dict(sub)) if isinstance(sub, Mapping) else None
     return deepcopy(dict(value))
 
 
@@ -241,32 +239,39 @@ def snapshot_draft(
 
 
 def validate_style(style: Mapping[str, Any]) -> list[dict]:
+    """已提供的样式字段必须是合法值；显式 null 不是“用默认值”。"""
+
     issues: list[dict] = []
     if not isinstance(style, Mapping):
         return [{"field": "style", "message": "必须是对象"}]
 
-    color = style.get("color")
-    if color is not None and (not isinstance(color, str) or not HEX_COLOR.fullmatch(color)):
-        issues.append({"field": "style.color", "message": "必须是六位十六进制颜色"})
+    if "color" in style:
+        color = style.get("color")
+        if not isinstance(color, str) or not HEX_COLOR.fullmatch(color):
+            issues.append({"field": "style.color",
+                           "message": "必须是六位十六进制颜色"})
 
-    line_width = style.get("line_width")
-    if line_width is not None:
+    if "line_width" in style:
+        line_width = style.get("line_width")
         if not is_number(line_width) or not 0.5 <= float(line_width) <= 10:
-            issues.append({"field": "style.line_width", "message": "线宽必须在 0.5–10 之间"})
+            issues.append({"field": "style.line_width",
+                           "message": "线宽必须在 0.5–10 之间"})
 
-    dpi = style.get("dpi")
-    if dpi is not None:
+    if "dpi" in style:
+        dpi = style.get("dpi")
         if not is_number(dpi) or not 72 <= float(dpi) <= 600:
-            issues.append({"field": "style.dpi", "message": "DPI 必须在 72–600 之间"})
+            issues.append({"field": "style.dpi",
+                           "message": "DPI 必须在 72–600 之间"})
 
-    colormap = style.get("colormap")
-    if colormap is not None:
+    if "colormap" in style:
+        colormap = style.get("colormap")
         try:
             import matplotlib
 
             matplotlib.colormaps[str(colormap)]
-        except (KeyError, ValueError):
-            issues.append({"field": "style.colormap", "message": "绘图库中没有该色图"})
+        except (KeyError, TypeError, ValueError):
+            issues.append({"field": "style.colormap",
+                           "message": "绘图库中没有该色图"})
 
     try:
         check_json_value(style, "style")
@@ -479,12 +484,21 @@ def validate_draft(draft: Mapping[str, Any], *,
                 issues.append({"field": f"{unit_prefix}.name", "message": "名称不能为空"})
             animal_id = unit.get("animal_id")
             if animal_id is not None and not is_valid_id(animal_id):
-                issues.append({"field": f"{unit_prefix}.animal_id", "message": "动物 ID 无效"})
+                issues.append({"field": f"{unit_prefix}.animal_id",
+                               "message": "动物 ID 无效", "animal_id": animal_id})
             elif animal_id is not None and allowed_animals is not None \
                     and animal_id not in allowed_animals:
                 # 项目绑定：动物必须属于当前项目，跨项目绑定不能开始任务。
                 issues.append({"field": f"{unit_prefix}.animal_id",
-                               "message": "动物不属于当前项目"})
+                               "message": "动物不属于当前项目",
+                               "animal_id": animal_id})
+            elif animal_id is None and allowed_animals is not None \
+                    and complete:
+                # 项目模式的最终校验：未绑定（含已删除）动物不能开始任务；
+                # 保存阶段不受影响，可以先存草稿再回项目补动物。
+                issues.append({"field": f"{unit_prefix}.animal_id",
+                               "message": "项目分析必须为每只小鼠绑定动物",
+                               "animal_id": None})
             issues.extend(_window_issues(unit.get("window"), f"{unit_prefix}.window",
                                          video_window=False))
             unit_window = unit.get("window")
@@ -738,11 +752,199 @@ def require_identity(asset: Mapping[str, Any]) -> None:
         raise ValidationError(first["message"], first["field"])
 
 
-def execute(resolved: Mapping[str, Any]) -> Any:
-    """执行一个冻结任务；实验模块自己完成一次捕获与统计。"""
+def _job_draft(resolved: Mapping[str, Any]) -> dict:
+    """把冻结任务还原成校验器认得的单视频草稿结构。
+
+    各层都用同一份完整解析值，重复合并是幂等的；这样保存、提交与执行阶段
+    共用一套字段规则，不需要第二条校验分支。
+    """
+
+    asset = resolved.get("asset") or {}
+    return {
+        "assay": resolved.get("assay"),
+        "project_id": resolved.get("project_id"),
+        "options": {},
+        "detection": resolved.get("detection") or {},
+        "output": deepcopy(resolved.get("output") or {}),
+        "style": deepcopy(resolved.get("style") or {}),
+        "videos": [{
+            "asset_id": asset.get("id"),
+            "window": deepcopy(resolved.get("window")),
+            "orientation": resolved.get("orientation", 0),
+            "fps_override": resolved.get("fps_override"),
+            "sample_fps": resolved.get("sample_fps"),
+            "options": deepcopy(resolved.get("options") or {}),
+            "detection": deepcopy(resolved.get("detection") or {}),
+            "units": deepcopy(resolved.get("units") or []),
+        }],
+    }
+
+
+def _job_field(field: Any, units: Sequence[Mapping[str, Any]]) -> tuple[str, str | None]:
+    """把 videos[0].units[2].x 变成 unit.x，并给出对应单位 ID。"""
+
+    text = str(field or "")
+    if text.startswith("videos[0]."):
+        text = text[len("videos[0]."):]
+    unit_key = None
+    if text.startswith("units[") and units:
+        head, _, tail = text.partition("]")
+        try:
+            index = int(head[len("units["):])
+        except ValueError:
+            index = -1
+        if 0 <= index < len(units):
+            unit_key = units[index].get("id")
+        text = "unit" + tail
+    return text, unit_key
+
+
+def validate_job(resolved: Mapping[str, Any], *,
+                 animals: Iterable[str] | None = None) -> list[dict]:
+    """冻结任务在提交与执行前都要通过的完整校验。
+
+    问题带 ``asset_id``/``unit_id``/``field``/``message``；身份、路径与解码
+    问题归到该视频，不让异常掩盖其他字段。
+    """
+
+    if not isinstance(resolved, Mapping):
+        return [{"field": "job", "message": "任务必须是对象"}]
+    issues: list[dict] = []
+    assay = resolved.get("assay")
+    if not experiments.exists(assay):
+        issues.append({"field": "assay", "message": "未知实验"})
+        return issues
+    asset = resolved.get("asset")
+    if not isinstance(asset, Mapping):
+        return [{"field": "asset", "message": "缺少素材信息"}]
+    asset_key = asset.get("id") if is_valid_id(asset.get("id")) else None
+
+    if resolved.get("schema_version") != SCHEMA_VERSION:
+        issues.append({"field": "schema_version",
+                       "message": f"任务版本必须是 {SCHEMA_VERSION}"})
+    for issue in verify_identity(asset):
+        issues.append(dict(issue))
+    path = asset.get("path")
+    if not isinstance(path, str) or not path:
+        issues.append({"field": "asset.path", "message": "缺少源视频路径"})
+    # 媒体事实在冻结/重跑解析时已经重新探测并存进 asset.metadata；执行前只
+    # 核对身份与参数，解码问题由 VideoSource 在真正读帧时报出。
+
+    units = resolved.get("units")
+    if not isinstance(units, list) or not units:
+        issues.append({"field": "units", "message": "至少需要一个单位"})
+        units = units if isinstance(units, list) else []
+
+    issues.extend(validate_draft(_job_draft(resolved), complete=True,
+                                 animals=animals))
+
+    normalized: list[dict] = []
+    for issue in issues:
+        entry = dict(issue)
+        field, unit_key = _job_field(issue.get("field"), units)
+        entry["field"] = field
+        if asset_key:
+            entry.setdefault("asset_id", asset_key)
+        if unit_key:
+            entry.setdefault("unit_id", unit_key)
+        normalized.append(entry)
+    return normalized
+
+
+def _coverage_issues(source: Any, window: Mapping[str, Any],
+                     metadata: Mapping[str, Any]) -> list[dict]:
+    """实际覆盖必须盖住请求的半开窗；元数据时长不能掩盖提前结束。
+
+    只有真实 ``VideoSource`` 才带 ``coverage``；替身源没有这一事实时不猜。
+    """
+
+    coverage = getattr(source, "coverage", None)
+    if not isinstance(coverage, Mapping):
+        return []
+    if not coverage.get("frame_count"):
+        return [{"field": "window", "message": "窗口内没有可解码的有效曝光"}]
+    start = float(window.get("start_s") or 0.0)
+    declared = window.get("end_s")
+    target_end = float(declared) if is_number(declared) else None
+    if target_end is None:
+        duration = metadata.get("duration_s")
+        if is_number(duration) and float(duration) > start:
+            target_end = float(duration)
+    issues: list[dict] = []
+    if coverage.get("start_s") is None or abs(
+            float(coverage["start_s"]) - start) > 1e-6:
+        issues.append({"field": "window.start_s",
+                       "message": "源覆盖没有从请求起点开始"})
+    if target_end is not None:
+        if coverage.get("end_s") is None or float(coverage["end_s"]) < target_end - 1e-6:
+            issues.append({"field": "window.end_s",
+                           "message": "源覆盖没有到达请求终点就结束了"})
+    return issues
+
+
+def run_job(resolved: Mapping[str, Any], *,
+            progress: Callable[[float, str], None] | None = None,
+            cancel: Callable[[], bool] | None = None) -> Any:
+    """执行一个冻结任务：再验证、建源、捕获评分，并补入真实覆盖。
+
+    捕获进度只占 0…0.75，导出由调用方接着报到 .99。
+    """
+
+    issues = validate_job(resolved)
+    if issues:
+        first = issues[0]
+        raise ValidationError(first["message"], first["field"])
 
     module = _module(resolved.get("assay"))
     asset = resolved.get("asset") or {}
     require_identity(asset)
-    context = AnalysisContext(job=resolved)
-    return module.analyze(context)
+    metadata = asset.get("metadata") or {}
+    window = resolved.get("window") or {}
+    source = media.VideoSource(
+        asset.get("path"),
+        start_s=float(window.get("start_s") or 0.0),
+        end_s=window.get("end_s"),
+        orientation=resolved.get("orientation", 0),
+        fps_override=resolved.get("fps_override"),
+        sample_fps=resolved.get("sample_fps"),
+        source_fps=metadata.get("fps"),
+        metadata=dict(metadata) if isinstance(metadata, Mapping) else None,
+        decode_images=True,
+    )
+
+    def report(fraction: float, message: str = "") -> None:
+        if progress is not None:
+            progress(min(0.75, max(0.0, 0.75 * float(fraction))), message)
+
+    context = AnalysisContext(job=resolved, source=source,
+                              cancel_check=cancel, progress_callback=report)
+    result = module.analyze(context)
+
+    gaps = _coverage_issues(source, window,
+                            metadata if isinstance(metadata, Mapping) else {})
+    if gaps:
+        raise ValidationError(gaps[0]["message"], gaps[0]["field"])
+
+    merged = dict(result.metadata or {})
+    coverage = getattr(source, "coverage", None)
+    if isinstance(coverage, Mapping):
+        merged["coverage"] = dict(coverage)
+    merged["video"] = {
+        "name": asset.get("name"),
+        "fps": (float(source.source_fps)
+                if is_number(getattr(source, "source_fps", None)) else None),
+        "analysis_fps": getattr(source, "analysis_fps", None),
+        "orientation": getattr(source, "orientation", None),
+    }
+    merged["algorithm_version"] = ALGORITHM_VERSION
+    merged.setdefault("assay", resolved.get("assay"))
+    result.metadata = merged
+    if progress is not None:
+        progress(0.75, "正在导出结果")
+    return result
+
+
+def execute(resolved: Mapping[str, Any]) -> Any:
+    """执行一个冻结任务；实验模块自己完成一次捕获与统计。"""
+
+    return run_job(resolved)

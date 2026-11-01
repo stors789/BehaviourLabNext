@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_batch.html" as batches_tpl %}
 {% block title %}{{ project.name }} · {{ app_name }}{% endblock %}
 
 {% block content %}
@@ -186,22 +187,11 @@
     <span class="meta">{{ jobs | length }}</span>
   </div>
   {% if jobs %}
-  <table class="simple-table">
-    <thead>
-      <tr><th>实验</th><th>视频</th><th>状态</th><th>创建时间</th><th></th></tr>
-    </thead>
-    <tbody>
-      {% for job in jobs %}
-      <tr>
-        <td>{{ job.assay }}</td>
-        <td>{{ job.asset_name or '—' }}</td>
-        <td>{{ job.status }}</td>
-        <td>{{ job.created_at[:16] | replace("T", " ") }}</td>
-        <td>{% if job.status == "done" %}<a class="link" href="/results/{{ job.run_id }}">查看结果</a>{% else %}—{% endif %}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <ul class="batch-list" id="task-list" data-selected="">
+    {% for batch in jobs %}
+    {{ batches_tpl.batch_row(batch) }}
+    {% endfor %}
+  </ul>
   {% else %}
   <p class="muted">本项目还没有分析批次。</p>
   {% endif %}
@@ -209,7 +199,9 @@
 {% endblock %}
 
 {% block scripts %}
+<script id="task-seed" type="application/json">{{ jobs | tojson }}</script>
 <script src="{{ url_for('static', filename='pickers.js') }}" defer></script>
 <script src="{{ url_for('static', filename='editor-core.js') }}" defer></script>
 <script src="{{ url_for('static', filename='project.js') }}" defer></script>
+<script src="{{ url_for('static', filename='tasks.js') }}" defer></script>
 {% endblock %}

@@ -166,10 +166,10 @@ def test_result_page_shows_figures_and_downloads(client, store, tmp_path,
         lambda path: {"width": 200, "height": 200, "duration_s": 1.0,
                       "fps": 5.0, "frame_count": 5})
     monkeypatch.setattr(worker, "run_frozen_job",
-                        lambda job: result_two_units())
+                        lambda job, **kwargs: result_two_units())
 
     response = client.post(f"/api/drafts/{draft['id']}/analyze")
-    assert response.status_code == 201, response.get_json()
+    assert response.status_code == 202, response.get_json()
     data = response.get_json()["data"]
     run_id = data["run_id"]
     job_id = data["jobs"][0]["job_id"]

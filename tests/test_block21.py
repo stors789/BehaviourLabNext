@@ -321,9 +321,17 @@ def test_style_defaults_and_preview_do_not_touch_formal_style(sandbox):
 
 
 def test_settings_value_rules(sandbox):
+    from behaviourlab import experiments
+
     store, client = sandbox
-    assert client.get("/api/settings/defaults").get_json()["data"] == {
-        "key": "defaults", "value": {}}
+    empty = client.get("/api/settings/defaults").get_json()["data"]
+    assert empty["key"] == "defaults"
+    # 没有保存值时给的是工厂值，不是空对象。
+    assert set(empty["value"]) == {entry["key"] for entry in experiments.catalog()}
+    assert empty["value"]["oft"] == experiments.get("oft").DEFAULTS
+    detection_empty = client.get("/api/settings/detection").get_json()["data"]
+    assert detection_empty["value"]["oft"]["gray_threshold"] == 127
+
     unknown = client.get("/api/settings/nope")
     assert unknown.status_code == 404
     not_object = client.put("/api/settings/defaults", json={"value": [1, 2]})
@@ -334,10 +342,15 @@ def test_settings_value_rules(sandbox):
                json={"value": {"oft": {"quality_threshold": 0.7}}})
     client.put("/api/settings/defaults",
                json={"value": {"oft": {"quality_threshold": 0.2}}})
-    assert client.get("/api/settings/detection").get_json()["data"]["value"] == {
-        "oft": {"quality_threshold": 0.7}}
-    assert client.get("/api/settings/defaults").get_json()["data"]["value"] == {
-        "oft": {"quality_threshold": 0.2}}
+    saved_detection = client.get("/api/settings/detection").get_json()["data"][
+        "value"]["oft"]
+    assert saved_detection["quality_threshold"] == 0.7
+    assert saved_detection["gray_threshold"] == 127, "保存一个字段不清掉其他工厂值"
+    saved_defaults = client.get("/api/settings/defaults").get_json()["data"][
+        "value"]["oft"]
+    assert saved_defaults["quality_threshold"] == 0.2
+    assert saved_defaults["arena_width_cm"] == experiments.get(
+        "oft").DEFAULTS["arena_width_cm"]
 
 
 def test_draft_defaults_to_oft_and_accepts_partial_fields(sandbox):

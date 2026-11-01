@@ -84,7 +84,7 @@ SPEC = {
         metric("total_distance_cm", "估计总距离", "cm"),
         metric("mean_speed_cm_s", "估计平均速度", "cm/s"),
     ],
-    "template_keys": ["zones", "center_size_cm", "open_arm_length_cm",
+    "template_keys": ["center_size_cm", "open_arm_length_cm",
                       "closed_arm_length_cm"],
 }
 

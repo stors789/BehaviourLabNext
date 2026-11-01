@@ -8,7 +8,7 @@ from __future__ import annotations
 import csv
 import re
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from . import annotated, figures
 from .schema import sanitize_json
@@ -400,13 +400,19 @@ def _annotated_video(target: Path, job: Mapping[str, Any], result: Any,
 
 
 def export_result(directory: str | Path, job: Mapping[str, Any],
-                  result: Any) -> dict:
+                  result: Any, *,
+                  progress: Callable[[float, str], None] | None = None) -> dict:
     """把一份 AnalysisResult 写成清单里的文件，返回 manifest。
 
     每动物另出轨迹/热图 PNG 并登记映射；没有有效位置时省图并说明。
-    CSV 的 null 写成空单元格。
+    CSV 的 null 写成空单元格。``progress`` 只报导出阶段（.75…​.99）。
     """
 
+    def report(fraction: float, message: str = "") -> None:
+        if progress is not None:
+            progress(min(0.99, max(0.75, float(fraction))), message)
+
+    report(0.75, "正在写出结果文件")
     target = Path(directory)
     target.mkdir(parents=True, exist_ok=True)
     files: list[str] = []
@@ -455,6 +461,8 @@ def export_result(directory: str | Path, job: Mapping[str, Any],
             entry["annotated_video_duration_s"] = round(video[1], 6)
             entry["annotated_video_time_base"] = annotated.TIMEBASE_LABEL
         units.append(entry)
+        total = max(1, len(result.summary))
+        report(0.75 + 0.24 * len(units) / total, "正在导出结果")
 
     manifest = {
         "run_id": job.get("run_id"),

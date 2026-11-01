@@ -94,15 +94,26 @@ def _unlock_handle(handle) -> None:
 
 
 class JobOwnerRegistry:
-    """以操作系统文件锁持续持有的所有权；只有持有者可释放记录。"""
+    """以操作系统文件锁持续持有的所有权；只有持有者可释放记录。
 
-    def __init__(self, paths: DataPaths) -> None:
+    锁文件放在数据根（``worker.lock``），持有记录放在日志目录；两者都由
+    同一个实例持有与释放，调度器和本地服务共享这一份生命周期。
+    """
+
+    def __init__(self, paths: DataPaths, *, lock_name: str = "worker.lock",
+                 record_name: str = OWNER_FILENAME) -> None:
         self.paths = paths
-        self.path = Path(paths.logs) / OWNER_FILENAME
-        self.lock_path = Path(paths.logs) / OWNER_LOCK_FILENAME
+        self.path = Path(paths.logs) / record_name
+        self.lock_path = Path(paths.root) / lock_name
         self._lock_key = os.path.normcase(str(self.lock_path.resolve()))
         self._handle = None
         self._token: str | None = None
+
+    @property
+    def held(self) -> bool:
+        """本对象当前是否持有这把锁（不判断记录内容）。"""
+
+        return self._handle is not None
 
     def read(self) -> dict | None:
         try:

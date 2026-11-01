@@ -335,10 +335,10 @@ def test_fst_registration_preview_and_result_page(client, store, tmp_path,
     assert "短段阈值估计" in behavior["threshold_note"]
 
     started = client.post(f"/api/drafts/{draft['id']}/analyze")
-    assert started.status_code == 201, started.get_json()
+    assert started.status_code == 202, started.get_json()
     payload = started.get_json()["data"]
     job = payload["jobs"][0]
-    assert job["status"] == "done"
+    assert job["status"] == "completed"
     manifest = job["manifest"]
     summary = manifest["units"][0]["summary"]
     assert summary["mode"] == "fst"

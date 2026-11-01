@@ -145,10 +145,10 @@ def test_lis_pipeline_smoke(client, store, tmp_path, monkeypatch):
                       "fps": 10.0, "frame_count": 10})
 
     response = client.post(f"/api/drafts/{draft['id']}/analyze")
-    assert response.status_code == 201, response.get_json()
+    assert response.status_code == 202, response.get_json()
     payload = response.get_json()["data"]
     job = payload["jobs"][0]
-    assert job["status"] == "done"
+    assert job["status"] == "completed"
     manifest = job["manifest"]
     unit_meta = manifest["metadata"]["units"]["f" * 32]
     assert unit_meta["mode"] == "lis"

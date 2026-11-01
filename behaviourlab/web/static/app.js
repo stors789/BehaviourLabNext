@@ -11,10 +11,14 @@
   }
 
   async function request(path, options = {}) {
-    const init = {
-      ...options,
-      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    };
+    // FormData 必须让浏览器自己带上 multipart 边界；手写 JSON 头会让后端
+    // 解析不到任何文件字段。JSON 请求仍显式声明 application/json。
+    const isForm = typeof FormData !== "undefined" && options.body instanceof FormData;
+    const headers = { ...(options.headers || {}) };
+    if (!isForm && !headers["Content-Type"]) {
+      headers["Content-Type"] = "application/json";
+    }
+    const init = { ...options, headers };
     const response = await fetch(path, init);
     let payload = null;
     try {

@@ -74,13 +74,13 @@ SPEC = {
                   "number", 0.0, minimum=-3, maximum=3, step=0.1,
                   section="实验参数"),
         parameter("flow_thr_hi", "经典光流高阈值", "number", 50.0,
-                  unit="mm/s", minimum=0.001, step=1, section="实验参数"),
+                  unit="mm/s", minimum=0.001, step="any", section="实验参数"),
         parameter("flow_thr_lo", "经典光流低阈值", "number", 35.0,
-                  unit="mm/s", minimum=0.001, step=1, section="实验参数"),
+                  unit="mm/s", minimum=0.001, step="any", section="实验参数"),
         parameter("speed_std_thr_hi", "经典速度波动高阈值", "number", 40.0,
-                  unit="mm/s", minimum=0.001, step=1, section="实验参数"),
+                  unit="mm/s", minimum=0.001, step="any", section="实验参数"),
         parameter("speed_std_thr_lo", "经典速度波动低阈值", "number", 20.0,
-                  unit="mm/s", minimum=0.001, step=1, section="实验参数"),
+                  unit="mm/s", minimum=0.001, step="any", section="实验参数"),
         parameter("lis_rotate_align", "残差旋转对齐", "checkbox", False,
                   section="实验参数"),
         parameter("lis_rescue_enabled", "启用局部微动补救", "checkbox", True,
@@ -113,7 +113,7 @@ SPEC = {
         metric("latency_to_immobility_s", "首次挣扎转非挣扎潜伏期（经典）", "s"),
         metric("detected_rate_percent", "检测时间比例", "%"),
     ],
-    "template_keys": ["arena", "body_line"],
+    "template_keys": [],
 }
 
 

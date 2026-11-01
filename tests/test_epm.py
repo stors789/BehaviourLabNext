@@ -177,7 +177,7 @@ def test_registration_validation_preview_and_page(client, store, tmp_path,
         "封闭臂 2 四角", "检测遮罩"]
     assert [bool(item["required"]) for item in entry["geometry"]] == [
         True, True, True, True, True, False]
-    assert entry["template_keys"] == ["zones", "center_size_cm",
+    assert entry["template_keys"] == ["center_size_cm",
                                       "open_arm_length_cm",
                                       "closed_arm_length_cm"]
     assert set(entry["defaults"]) == set(epm.DEFAULTS)
@@ -258,10 +258,10 @@ def test_registration_validation_preview_and_page(client, store, tmp_path,
     assert behavior_summary["total_arm_entries"] >= 1
 
     started = client.post(f"/api/drafts/{draft['id']}/analyze")
-    assert started.status_code == 201, started.get_json()
+    assert started.status_code == 202, started.get_json()
     payload = started.get_json()["data"]
     job = payload["jobs"][0]
-    assert job["status"] == "done"
+    assert job["status"] == "completed"
     summary = job["manifest"]["units"][0]["summary"]
     assert summary["total_time_s"] == pytest.approx(4.0, abs=1e-9)
     assert summary["open_entries"] >= 1
@@ -272,7 +272,7 @@ def test_registration_validation_preview_and_page(client, store, tmp_path,
 
     from behaviourlab import outputs  # noqa: F401  保证导出层已加载
 
-    run_dir = Path(store.paths.runs) / payload["run_id"] / job["job_id"]
+    run_dir = Path(store.paths.runs) / payload["run_id"]
     stored = (run_dir / figures["zones"]).read_bytes()
     inline = client.get(
         f"/runs/{payload['run_id']}/{job['job_id']}/{figures['zones']}")
@@ -404,7 +404,7 @@ def test_editor_bridge_writes_nested_zones(client, store, tmp_path,
             time_s=1.5, pts=None, time_base=None, clock_source="pts"))
 
     started = client.post(f"/api/drafts/{draft['id']}/analyze")
-    assert started.status_code == 201, started.get_json()
+    assert started.status_code == 202, started.get_json()
     job = started.get_json()["data"]["jobs"][0]
     summary = job["manifest"]["units"][0]["summary"]
     assert summary["total_time_s"] == pytest.approx(4.0, abs=1e-9)

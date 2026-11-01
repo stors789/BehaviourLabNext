@@ -110,6 +110,25 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS idx_jobs_draft ON jobs(draft_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_run ON jobs(run_id);
 
+CREATE TABLE IF NOT EXISTS job_batches (
+    id TEXT PRIMARY KEY,
+    draft_id TEXT REFERENCES drafts(id) ON DELETE SET NULL,
+    project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    assay TEXT NOT NULL,
+    status TEXT NOT NULL,
+    videos TEXT NOT NULL DEFAULT '[]',
+    progress TEXT NOT NULL DEFAULT '{}',
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    owned_run_ids TEXT NOT NULL DEFAULT '[]',
+    error TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_batches_project ON job_batches(project_id);
+CREATE INDEX IF NOT EXISTS idx_batches_status ON job_batches(status);
+
 CREATE TABLE IF NOT EXISTS templates (
     id TEXT PRIMARY KEY,
     key TEXT NOT NULL,
@@ -141,6 +160,8 @@ MIGRATION_COLUMNS = (
     ("animals", "code", "TEXT"),
     ("templates", "geometry", "TEXT NOT NULL DEFAULT '{}'"),
     ("templates", "options", "TEXT NOT NULL DEFAULT '{}'"),
+    # 旧 jobs 记录没有批次归属：留空即表示第 22 块之前的单任务记录。
+    ("jobs", "batch_id", "TEXT"),
 )
 
 
@@ -190,30 +211,62 @@ def _row_or_none(row: sqlite3.Row | None, json_fields: Sequence[str] = ()) -> di
     return None if row is None else _decode_row(row, json_fields)
 
 
-def storage_log_path(paths: DataPaths) -> Path:
-    """存储失败日志的实际可写位置；主日志目录不可写时回退到临时目录。"""
+def _normalize_batch(record: dict) -> dict:
+    """批次读回：布尔与嵌套字段按 JSON 语义规范化，不改记录本身。"""
 
-    candidate = Path(paths.logs) / "storage.log"
+    record["cancel_requested"] = bool(record.get("cancel_requested"))
+    if not isinstance(record.get("videos"), list):
+        record["videos"] = []
+    if not isinstance(record.get("progress"), dict):
+        record["progress"] = {}
+    if not isinstance(record.get("owned_run_ids"), list):
+        record["owned_run_ids"] = []
+    return record
+
+
+def _storage_log_candidates(paths: DataPaths) -> tuple[Path, Path]:
+    """主日志与独立回退日志：两份都可写时优先主目录。"""
+
+    primary = Path(paths.logs) / "storage.log"
+    fallback = Path(tempfile.gettempdir()) / APP_NAME / "logs" / "storage.log"
+    return primary, fallback
+
+
+def _storage_log_candidates(paths: DataPaths) -> tuple[Path, Path]:
+    """主日志与独立回退日志：两份都可写时优先主目录。"""
+
+    primary = Path(paths.logs) / "storage.log"
+    fallback = Path(tempfile.gettempdir()) / APP_NAME / "logs" / "storage.log"
+    return primary, fallback
+
+
+def storage_log_path(paths: DataPaths) -> Path:
+    """存储失败日志的位置；主目录不可创建/打开时给出回退路径。"""
+
+    primary, fallback = _storage_log_candidates(paths)
     try:
-        candidate.parent.mkdir(parents=True, exist_ok=True)
-        with candidate.open("a", encoding="utf-8"):
+        primary.parent.mkdir(parents=True, exist_ok=True)
+        with primary.open("a", encoding="utf-8"):
             pass
-        return candidate
+        return primary
     except OSError:
-        fallback = Path(tempfile.gettempdir()) / APP_NAME / "logs"
-        fallback.mkdir(parents=True, exist_ok=True)
-        return fallback / "storage.log"
+        try:
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return fallback
 
 
 def log_storage_failure(paths: DataPaths, phase: str, error: BaseException,
                         *, operation: str = "",
                         database: str | None = None) -> Path:
-    """把存储失败写到独立于数据库的日志；返回实际使用的路径。
+    """把存储失败写到独立于数据库的日志；返回**真正写入**的路径。
 
-    记录真实数据库路径、阶段、操作与异常堆栈，以及可用的 SQLite 扩展错误码。
+    打开成功但写入失败（Windows 共享冲突、磁盘错误）同样要落到回退日志；
+    仅能打开的空文件不算已保存。回退也失败时保留原异常并留下可见诊断。
     """
 
-    target = storage_log_path(paths)
+    primary, fallback = _storage_log_candidates(paths)
     details = []
     if database:
         details.append(f"database={database}")
@@ -233,16 +286,33 @@ def log_storage_failure(paths: DataPaths, phase: str, error: BaseException,
                                              error.__traceback__))
         + "\n"
     )
-    try:
-        with target.open("a", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except OSError:
-        STORAGE_LOGGER.error("存储失败（日志写入也失败）：%s", text)
-    else:
-        STORAGE_LOGGER.error("存储失败已记录：%s", target)
-    return target
+
+    written: Path | None = None
+    failures: list[str] = []
+    for target in (primary, fallback):
+        if written is not None and target == written:
+            continue
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("a", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # 写进去才算数：只打开过的空文件不能冒充已保存日志。
+            if target.stat().st_size <= 0:
+                raise OSError("日志写入后仍为空")
+        except OSError as write_error:
+            failures.append(f"{target}: {write_error}")
+            continue
+        written = target
+        break
+
+    if written is None:
+        STORAGE_LOGGER.error("存储失败（主日志与回退日志都不可写）：%s；%s",
+                             text, "；".join(failures))
+        return primary
+    STORAGE_LOGGER.error("存储失败已记录：%s", written)
+    return written
 
 
 def atomic_write_json(path: str | os.PathLike[str], payload: Any, *,
@@ -254,8 +324,17 @@ def atomic_write_json(path: str | os.PathLike[str], payload: Any, *,
     """
 
     target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    # 原始输入必须严格可编码：NaN/Infinity 不能被静默换成 null 后覆盖旧文件。
+    # 计算结果导出走 sanitize_json 预处理，语义不变。
+    try:
+        check_json_value(payload, "")
+    except ValidationError as error:
+        if error.message.startswith("不支持的值类型"):
+            # 与 json.dumps 的既有契约一致：非 JSON 类型抛 TypeError。
+            raise TypeError(f"无法写入非 JSON 值：{error.message}") from error
+        raise
     text = dumps_strict(payload, indent=indent)
+    target.parent.mkdir(parents=True, exist_ok=True)
     last_error: BaseException | None = None
     for attempt in range(ATOMIC_REPLACE_ATTEMPTS):
         fd, temp_name = tempfile.mkstemp(
@@ -315,9 +394,17 @@ class Store:
             self.db_path, timeout=30.0, isolation_level=None,
             check_same_thread=not shared,
         )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 30000")
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 30000")
+        except BaseException:
+            # 配置失败时不能把已经取得的连接留在外面。
+            try:
+                connection.close()
+            except sqlite3.Error:
+                pass
+            raise
         return connection
 
     def keeper(self) -> sqlite3.Connection:
@@ -358,22 +445,40 @@ class Store:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
+        """BEGIN IMMEDIATE 事务；原始异常、堆栈与 SQLite 码始终保留。
+
+        BEGIN 可能根本没成功（例如被别的连接占着写锁），此时 ROLLBACK 会再
+        抛 “no transaction is active”。回滚、日志与关闭都只做尽力尝试，任何
+        次生异常都不能替换调用方看到的原始失败。
+        """
+
         connection = self.connect()
+        began = False
         try:
             connection.execute("BEGIN IMMEDIATE")
+            began = True
             yield connection
             connection.execute("COMMIT")
+            began = False
         except BaseException as error:
+            if began:
+                try:
+                    connection.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                began = False
             try:
-                connection.execute("ROLLBACK")
-            finally:
-                connection.close()
-            if isinstance(error, sqlite3.Error):
-                log_storage_failure(self.paths, "transaction", error,
-                                    database=str(self.db_path))
+                if isinstance(error, sqlite3.Error):
+                    log_storage_failure(self.paths, "transaction", error,
+                                        database=str(self.db_path))
+            except BaseException:
+                pass
             raise
-        else:
-            connection.close()
+        finally:
+            try:
+                connection.close()
+            except sqlite3.Error:
+                pass
 
     @contextmanager
     def mutate(self) -> Iterator[sqlite3.Connection]:
@@ -1126,6 +1231,7 @@ class Store:
         project_id: str | None = None,
         status: str = "queued",
         config: Mapping[str, Any] | None = None,
+        batch_id: str | None = None,
     ) -> dict:
         job_id = job_id or new_id()
         run_id = run_id or new_id()
@@ -1135,8 +1241,8 @@ class Store:
         with self.transaction() as connection:
             connection.execute(
                 "INSERT INTO jobs(id, run_id, draft_id, project_id, assay, status,"
-                " config, created_at, updated_at)"
-                " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " config, batch_id, created_at, updated_at)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id,
                     run_id,
@@ -1145,6 +1251,7 @@ class Store:
                     _text(assay, "assay", max_length=40),
                     _text(status, "status", max_length=32),
                     _json_text(dict(config or {}), "config"),
+                    batch_id,
                     now,
                     now,
                 ),
@@ -1195,6 +1302,239 @@ class Store:
                 "SELECT * FROM jobs WHERE project_id = ?"
                 " ORDER BY created_at DESC",
                 (project_id,),
+            ).fetchall()
+        return [_decode_row(row, ("config",)) for row in rows]
+
+    # -- 批次 -----------------------------------------------------------
+    BATCH_JSON_FIELDS = ("videos", "progress", "owned_run_ids")
+
+    def create_batch(
+        self,
+        *,
+        assay: str,
+        videos: Sequence[Mapping[str, Any]],
+        draft_id: str | None = None,
+        project_id: str | None = None,
+        batch_id: str | None = None,
+        status: str = "queued",
+        progress: Mapping[str, Any] | None = None,
+        owned_run_ids: Sequence[str] | None = None,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict:
+        """插入一条批次记录；传入连接时并入调用方事务，不另开事务。"""
+
+        batch_id = batch_id or new_id()
+        require_id(batch_id, "batch_id")
+        if draft_id is not None:
+            require_id(draft_id, "draft_id")
+        if project_id is not None:
+            require_id(project_id, "project_id")
+        items = [dict(item) for item in videos]
+        total = len(items)
+        progress_payload = dict(progress or {
+            "fraction": 0.0, "current": 0, "total": total, "message": "排队中",
+        })
+        run_ids = list(owned_run_ids or [item.get("run_id") for item in items
+                                         if item.get("run_id")])
+        for run_id in run_ids:
+            require_id(run_id, "run_id")
+        now = utc_now()
+
+        def _insert(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                "INSERT INTO job_batches(id, draft_id, project_id, assay, status,"
+                " videos, progress, cancel_requested, owned_run_ids, error,"
+                " created_at, updated_at)"
+                " VALUES(?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?)",
+                (
+                    batch_id,
+                    draft_id,
+                    project_id,
+                    _text(assay, "assay", max_length=40),
+                    _text(status, "status", max_length=32),
+                    _json_text(items, "videos"),
+                    _json_text(progress_payload, "progress"),
+                    _json_text(run_ids, "owned_run_ids"),
+                    now,
+                    now,
+                ),
+            )
+
+        if connection is not None:
+            _insert(connection)
+            return self.batch_in(connection, batch_id)  # type: ignore[return-value]
+        with self.transaction() as connection:
+            _insert(connection)
+        record = self.get_batch(batch_id)
+        assert record is not None
+        return record
+
+    def batch_in(self, connection: sqlite3.Connection,
+                 batch_id: str) -> dict | None:
+        """在调用方连接/事务内读批次；不另开事务。"""
+
+        require_id(batch_id, "batch_id")
+        row = connection.execute(
+            "SELECT * FROM job_batches WHERE id = ?", (batch_id,)
+        ).fetchone()
+        record = _row_or_none(row, self.BATCH_JSON_FIELDS)
+        return _normalize_batch(record) if record else None
+
+    def patch_batch(self, connection: sqlite3.Connection, batch_id: str,
+                    changes: Mapping[str, Any]) -> dict:
+        """在调用方事务内做批次顶层 patch，并返回读回记录。"""
+
+        assignments, values = self._batch_patch_sql(changes)
+        assignments.append("updated_at = ?")
+        values.append(utc_now())
+        values.append(batch_id)
+        cursor = connection.execute(
+            f"UPDATE job_batches SET {', '.join(assignments)} WHERE id = ?",
+            values,
+        )
+        if cursor.rowcount == 0:
+            raise NotFoundError("任务不存在")
+        record = self.batch_in(connection, batch_id)
+        assert record is not None
+        return record
+
+    def get_batch(self, batch_id: str) -> dict | None:
+        require_id(batch_id, "batch_id")
+        with self.read() as connection:
+            record = self.batch_in(connection, batch_id)
+        return _normalize_batch(record) if record else None
+
+    def list_batches(self, project_id: str | None = None) -> list[dict]:
+        with self.read() as connection:
+            if project_id is None:
+                rows = connection.execute(
+                    "SELECT * FROM job_batches ORDER BY created_at DESC"
+                ).fetchall()
+            else:
+                require_id(project_id, "project_id")
+                rows = connection.execute(
+                    "SELECT * FROM job_batches WHERE project_id = ?"
+                    " ORDER BY created_at DESC",
+                    (project_id,),
+                ).fetchall()
+        return [_normalize_batch(_decode_row(row, self.BATCH_JSON_FIELDS))
+                for row in rows]
+
+    def _batch_patch_sql(self, changes: Mapping[str, Any]
+                         ) -> tuple[list[str], list[Any]]:
+        """把批次顶层 patch 变成赋值片段；未提供的字段一律保持。"""
+
+        if not isinstance(changes, Mapping):
+            raise ValidationError("更新内容必须是对象", "")
+        allowed = {"status", "videos", "progress", "cancel_requested", "error",
+                   "started_at", "finished_at", "owned_run_ids", "draft_id",
+                   "project_id"}
+        for key in changes:
+            if key in ("id", "created_at", "updated_at"):
+                raise ValidationError("不允许修改该字段", key)
+            if key not in allowed:
+                raise ValidationError(f"不支持的字段：{key}", key)
+        if not changes:
+            raise ValidationError("没有可更新的字段", "")
+
+        assignments: list[str] = []
+        values: list[Any] = []
+        for field in ("status", "error", "started_at", "finished_at"):
+            if field in changes:
+                value = changes[field]
+                if value is not None and field == "status":
+                    value = _text(value, field, max_length=32)
+                if value is not None and field in ("started_at", "finished_at"):
+                    value = _text(value, field, max_length=64)
+                assignments.append(f"{field} = ?")
+                values.append(value)
+        if "videos" in changes:
+            items = changes["videos"]
+            if not isinstance(items, (list, tuple)):
+                raise ValidationError("videos 必须是数组", "videos")
+            assignments.append("videos = ?")
+            values.append(_json_text([dict(item) for item in items], "videos"))
+        if "progress" in changes:
+            value = changes["progress"]
+            if not isinstance(value, Mapping):
+                raise ValidationError("progress 必须是对象", "progress")
+            assignments.append("progress = ?")
+            values.append(_json_text(dict(value), "progress"))
+        if "owned_run_ids" in changes:
+            value = changes["owned_run_ids"]
+            if not isinstance(value, (list, tuple)):
+                raise ValidationError("owned_run_ids 必须是数组", "owned_run_ids")
+            for item in value:
+                require_id(item, "owned_run_ids")
+            assignments.append("owned_run_ids = ?")
+            values.append(_json_text(list(value), "owned_run_ids"))
+        if "cancel_requested" in changes:
+            assignments.append("cancel_requested = ?")
+            values.append(1 if changes["cancel_requested"] else 0)
+        for field in ("draft_id", "project_id"):
+            if field in changes:
+                value = changes[field]
+                if value is not None:
+                    require_id(value, field)
+                assignments.append(f"{field} = ?")
+                values.append(value)
+        return assignments, values
+
+    def update_batch(self, batch_id: str, changes: Mapping[str, Any]) -> dict:
+        """批次顶层 patch：只写提供的字段，其余保持。"""
+
+        require_id(batch_id, "batch_id")
+        self._batch_patch_sql(changes)
+        with self.transaction() as connection:
+            self.patch_batch(connection, batch_id, changes)
+        record = self.get_batch(batch_id)
+        assert record is not None
+        return record
+
+    def claim_next_batch(self) -> dict | None:
+        """取最早的排队批次并置为 running；同一事务内完成，别人拿不到。"""
+
+        now = utc_now()
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM job_batches WHERE status = 'queued'"
+                " ORDER BY created_at, id LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            batch_id = row["id"]
+            connection.execute(
+                "UPDATE job_batches SET status = 'running', started_at = ?,"
+                " updated_at = ? WHERE id = ? AND status = 'queued'",
+                (now, now, batch_id),
+            )
+            record = self.batch_in(connection, batch_id)
+        return _normalize_batch(record) if record else None
+
+    def delete_batch_record(self, batch_id: str,
+                            connection: sqlite3.Connection) -> None:
+        """在调用方事务内删除批次及其逐视频记录。"""
+
+        require_id(batch_id, "batch_id")
+        connection.execute("DELETE FROM job_batches WHERE id = ?", (batch_id,))
+        connection.execute("DELETE FROM jobs WHERE batch_id = ?", (batch_id,))
+
+    def list_jobs_for_batch(self, batch_id: str) -> list[dict]:
+        require_id(batch_id, "batch_id")
+        with self.read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM jobs WHERE batch_id = ? ORDER BY created_at",
+                (batch_id,),
+            ).fetchall()
+        return [_decode_row(row, ("config",)) for row in rows]
+
+    def list_legacy_jobs(self) -> list[dict]:
+        """第 22 块之前的单任务记录：没有批次归属。"""
+
+        with self.read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM jobs WHERE batch_id IS NULL"
+                " ORDER BY created_at DESC"
             ).fetchall()
         return [_decode_row(row, ("config",)) for row in rows]
 

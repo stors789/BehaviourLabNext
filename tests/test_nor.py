@@ -221,7 +221,7 @@ def test_registration_validation_preview_and_page(client, store, tmp_path,
         "物体 1 探索范围", "物体 2 探索范围", "检测遮罩"]
     assert [bool(item["required"]) for item in entry["geometry"]] == [
         True, True, True, False, False, False]
-    assert entry["template_keys"] == ["arena", "arena_width_cm",
+    assert entry["template_keys"] == ["arena_width_cm",
                                       "arena_height_cm"]
     assert set(entry["defaults"]) == set(nor.DEFAULTS)
 
@@ -323,10 +323,10 @@ def test_registration_validation_preview_and_page(client, store, tmp_path,
     assert behavior["rows"] > 0
 
     started = client.post(f"/api/drafts/{draft['id']}/analyze")
-    assert started.status_code == 201, started.get_json()
+    assert started.status_code == 202, started.get_json()
     payload = started.get_json()["data"]
     job = payload["jobs"][0]
-    assert job["status"] == "done"
+    assert job["status"] == "completed"
     summary = job["manifest"]["units"][0]["summary"]
     assert summary["total_time_s"] == pytest.approx(4.0, abs=1e-9)
     assert summary["object_2_exploration_s"] > 0
@@ -338,7 +338,7 @@ def test_registration_validation_preview_and_page(client, store, tmp_path,
     # objects 图必须能内联显示与附件下载，且与本次生成文件逐字节相同。
     from pathlib import Path as _Path
 
-    run_dir = _Path(store.paths.runs) / payload["run_id"] / job["job_id"]
+    run_dir = _Path(store.paths.runs) / payload["run_id"]
     stored = (run_dir / figures["objects"]).read_bytes()
     inline = client.get(
         f"/runs/{payload['run_id']}/{job['job_id']}/{figures['objects']}")
@@ -578,7 +578,7 @@ def test_editor_output_saves_previews_and_analyzes(client, store, tmp_path,
     assert not any("尚未绘制" in text for text in behavior_data["warnings"])
 
     started = client.post(f"/api/drafts/{draft['id']}/analyze")
-    assert started.status_code == 201, started.get_json()
+    assert started.status_code == 202, started.get_json()
     payload = started.get_json()["data"]
     job = payload["jobs"][0]
     summary = job["manifest"]["units"][0]["summary"]

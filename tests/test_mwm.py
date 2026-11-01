@@ -167,7 +167,7 @@ def test_registration_validation_preview_and_page(client, store, tmp_path,
     assert entry["label"] == "Morris 水迷宫 / MWM"
     assert [item["label"] for item in entry["geometry"]] == [
         "泳池边界（椭圆或至少五点）", "平台中心或平台椭圆", "检测遮罩"]
-    assert entry["template_keys"] == ["arena", "pool_diameter_cm",
+    assert entry["template_keys"] == ["pool_diameter_cm",
                                       "platform_radius_cm"]
     assert set(entry["defaults"]) == set(mwm.DEFAULTS)
 
@@ -269,10 +269,10 @@ def test_registration_validation_preview_and_page(client, store, tmp_path,
     assert behavior["preview_note"].startswith("行为预览")
 
     started = client.post(f"/api/drafts/{draft['id']}/analyze")
-    assert started.status_code == 201, started.get_json()
+    assert started.status_code == 202, started.get_json()
     payload = started.get_json()["data"]
     job = payload["jobs"][0]
-    assert job["status"] == "done"
+    assert job["status"] == "completed"
     summary = job["manifest"]["units"][0]["summary"]
     assert summary["total_time_s"] == pytest.approx(5.0, abs=1e-9)
     assert summary["platform_entries"] >= 1

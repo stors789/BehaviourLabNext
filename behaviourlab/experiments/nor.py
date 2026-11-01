@@ -141,7 +141,7 @@ SPEC = {
         metric("head_confident_rate_percent", "头向合格率", "%"),
         metric("meets_min_exploration", "达到最少探索时间"),
     ],
-    "template_keys": ["arena", "arena_width_cm", "arena_height_cm"],
+    "template_keys": ["arena_width_cm", "arena_height_cm"],
 }
 
 

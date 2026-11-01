@@ -52,13 +52,14 @@ def test_analyze_endpoint_writes_results(client, store, tmp_path, monkeypatch):
         "behaviourlab.engine.media.probe_video",
         lambda path: {"width": 200, "height": 200, "duration_s": 1.0,
                       "fps": 5.0, "frame_count": 5})
-    monkeypatch.setattr(worker, "run_frozen_job", lambda job: fake_result())
+    monkeypatch.setattr(worker, "run_frozen_job",
+                        lambda job, **kwargs: fake_result())
 
     response = client.post(f"/api/drafts/{draft['id']}/analyze")
-    assert response.status_code == 201, response.get_json()
+    assert response.status_code == 202, response.get_json()
     data = response.get_json()["data"]
     run_id = data["run_id"]
-    assert data["jobs"] and data["jobs"][0]["status"] == "done"
+    assert data["jobs"] and data["jobs"][0]["status"] == "completed"
     job_id = data["jobs"][0]["job_id"]
 
     page = client.get(f"/results/{run_id}")

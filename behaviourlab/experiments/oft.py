@@ -63,7 +63,7 @@ SPEC = {
         metric("mean_speed_cm_s", "平均速度", "cm/s"),
         metric("center_entries", "中心进入", "次"),
     ],
-    "template_keys": ["arena", "arena_width_cm", "arena_height_cm"],
+    "template_keys": ["arena_width_cm", "arena_height_cm"],
 }
 
 

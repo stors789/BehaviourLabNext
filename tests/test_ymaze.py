@@ -183,7 +183,7 @@ def test_y_fixture_sequence_and_numbers(monkeypatch, tmp_path):
         "alternation_opportunities", "alternation_percent",
         "center_time_s", "arm_A_time_s", "arm_B_time_s", "arm_C_time_s",
         "total_distance_cm", "mean_speed_cm_s"]
-    assert entry["template_keys"] == ["zones", "arm_length_cm", "arm_width_cm"]
+    assert entry["template_keys"] == ["arm_length_cm", "arm_width_cm"]
 
 
 # -- 2. 短序列、重复臂、中心要求与候选关联 -----------------------------
@@ -327,10 +327,10 @@ def test_y_preview_and_result_page(client, store, tmp_path, monkeypatch):
     assert core["alternation_percent"] is None
 
     started = client.post(f"/api/drafts/{draft['id']}/analyze")
-    assert started.status_code == 201, started.get_json()
+    assert started.status_code == 202, started.get_json()
     payload = started.get_json()["data"]
     job = payload["jobs"][0]
-    assert job["status"] == "done"
+    assert job["status"] == "completed"
     summary = job["manifest"]["units"][0]["summary"]
     assert summary["total_arm_entries"] == 1
     assert summary["arm_B_entries"] == 1
@@ -342,7 +342,7 @@ def test_y_preview_and_result_page(client, store, tmp_path, monkeypatch):
     assert unit_figures["sequence"], "一次 B 入臂也要有序列图"
     assert not [key for key in ("trajectory", "heatmap", "activity", "zones")
                 if unit_figures.get(key)]
-    run_dir = Path(store.paths.runs) / payload["run_id"] / job["job_id"]
+    run_dir = Path(store.paths.runs) / payload["run_id"]
     sequence = unit_figures["sequence"]
     assert sequence in job["manifest"]["files"]
     stored = (run_dir / sequence).read_bytes()

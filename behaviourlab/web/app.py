@@ -29,11 +29,28 @@ from ..engine import (
     validate_settings_value,
     validate_style,
 )
-from ..jobs import JobScheduler
+from ..jobs import (
+    ACTIVE,
+    CANCELLED,
+    COMPLETED,
+    FAILED,
+    INTERRUPTED,
+    NOT_STARTED,
+    QUEUED,
+    RUNNING,
+    JobConflict,
+    JobError,
+    JobScheduler,
+)
 from .. import outputs as output_service
 from ..processes import JobOwnerRegistry
 from ..schema import ValidationError, is_number, is_valid_id, new_id
-from ..store import NotFoundError, Store, storage_log_path
+from ..store import (
+    NotFoundError,
+    Store,
+    read_json_file,
+    storage_log_path,
+)
 from . import descriptors as web_descriptors
 
 LOGGER = logging.getLogger(__name__)
@@ -173,91 +190,153 @@ def _filled_setting(store: Store, section: str, factory: Mapping[str, Any]) -> d
     return merged
 
 
-def _settings_snapshot(store: Store) -> dict:
-    """四个分区一次取出；defaults/detection 仍是按实验键的对象。"""
+def _settings_snapshot(store: Store, assay: str | None) -> dict:
+    """服务取出的当前实验设置对象：defaults/detection 已按实验键拆开。
+
+    Store 里两个分区按实验名保存；通用解析入口只接受当前实验的参数，所以
+    这里负责取出那一层，草稿创建、预览与最终校验都用同一份结果。
+    """
 
     defaults = store.get_setting("settings.defaults", default={})
     detection = store.get_setting("settings.detection", default={})
+    defaults = defaults if isinstance(defaults, Mapping) else {}
+    detection = detection if isinstance(detection, Mapping) else {}
+    saved_defaults = defaults.get(assay) if assay else None
+    saved_detection = detection.get(assay) if assay else None
     return {
-        "defaults": defaults if isinstance(defaults, Mapping) else {},
-        "detection": detection if isinstance(detection, Mapping) else {},
+        "defaults": deepcopy(dict(saved_defaults))
+        if isinstance(saved_defaults, Mapping) else {},
+        "detection": deepcopy(dict(saved_detection))
+        if isinstance(saved_detection, Mapping) else {},
         "output": _filled_setting(store, "output", COMMON_OUTPUT_DEFAULTS),
         "style": _filled_setting(store, "style", COMMON_STYLE_DEFAULTS),
     }
 
 
+def _assay_defaults_factory() -> dict:
+    """每个实验的工厂默认参数；设置页与 API 缺省值都从这里取。"""
+
+    return {entry["key"]: deepcopy(entry["defaults"])
+            for entry in experiments.catalog()}
+
+
+def _assay_detection_factory() -> dict:
+    """每个实验的完整检测默认（公共默认 + 实验覆盖）。"""
+
+    factory = {}
+    for entry in experiments.catalog():
+        values = deepcopy(entry["detection_defaults"])
+        saved = entry.get("detection_overrides")
+        if isinstance(saved, Mapping):
+            values.update(deepcopy(dict(saved)))
+        factory[entry["key"]] = values
+    return factory
+
+
 def _settings_value(store: Store, section: str) -> Any:
+    """单个设置分区的有效值：无保存值时给工厂值，不是空对象。"""
+
     if section in ("output", "style"):
         factory = (COMMON_OUTPUT_DEFAULTS if section == "output"
                    else COMMON_STYLE_DEFAULTS)
         return _filled_setting(store, section, factory)
-    value = store.get_setting(f"settings.{section}", default={})
-    return value if isinstance(value, Mapping) else {}
+    factory = (_assay_defaults_factory() if section == "defaults"
+               else _assay_detection_factory())
+    saved = store.get_setting(f"settings.{section}", default={})
+    if not isinstance(saved, Mapping):
+        return factory
+    for key, value in saved.items():
+        if isinstance(value, Mapping) and isinstance(factory.get(key), Mapping):
+            factory[key] = {**factory[key], **deepcopy(dict(value))}
+        elif isinstance(value, Mapping):
+            factory[key] = deepcopy(dict(value))
+    return factory
 
 
 def _run_payloads(directory: Path) -> list[dict]:
-    """读取一次运行的每个任务结果；缺失或损坏时如实标记。"""
+    """读取一次运行的结果；新布局是 runs/{run_id}，旧布局是嵌套 job 目录。"""
 
     payloads: list[dict] = []
     if not directory.is_dir():
         return payloads
-    for job_dir in sorted(item for item in directory.iterdir() if item.is_dir()):
-        entry: dict = {"job_id": job_dir.name, "files": []}
-        result_file = job_dir / "results.json"
-        if not result_file.is_file():
-            entry["error"] = "结果文件缺失"
-            payloads.append(entry)
-            continue
-        try:
-            entry["result"] = json.loads(result_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as error:
-            entry["error"] = f"结果文件不可读取：{error}"
-            payloads.append(entry)
-            continue
-        entry["files"] = sorted(
-            path.name for path in job_dir.iterdir()
-            if path.is_file() and _is_run_file(path.name))
-        try:
-            manifest_file = job_dir / "result_manifest.json"
-            if manifest_file.is_file():
-                entry["manifest"] = json.loads(
-                    manifest_file.read_text(encoding="utf-8"))
-            frozen = job_dir / "frozen_job.json"
-            if frozen.is_file():
-                entry["job"] = json.loads(frozen.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as error:
-            entry["error"] = f"清单文件不可读取：{error}"
-        units = []
-        for unit in (entry.get("manifest") or {}).get("units") or []:
-            units.append({"unit_id": unit.get("unit_id"),
-                          "unit_name": unit.get("unit_name"),
-                          "summary": unit.get("summary") or {},
-                          "figures": unit.get("figures") or {},
-                          "annotated_video": unit.get("annotated_video")})
-        if not units:
-            for row in entry["result"].get("summary") or []:
-                units.append({"unit_id": row.get("unit_id"),
-                              "unit_name": row.get("unit_name"),
-                              "summary": row, "figures": {}})
-        entry["units"] = units
-        assay = ((entry.get("result") or {}).get("metadata") or {}).get("assay") \
-            or (entry.get("job") or {}).get("assay")
-        entry["assay"] = assay
-        entry["metrics"] = _assay_metrics(assay)
-        entry["assay_label"] = _assay_label(assay)
-        payloads.append(entry)
-    return payloads
+    entries = sorted(item for item in directory.iterdir() if item.is_dir())
+    if any((directory / name).is_file()
+           for name in ("results.json", "result_manifest.json")):
+        entries.insert(0, directory)
+    return [_run_payload(entry) for entry in entries]
+
+
+def _run_payload(job_dir: Path) -> dict:
+    """单个视频的产物；缺失或损坏时如实标记，不假装成功。"""
+
+    entry: dict = {"job_id": job_dir.name, "files": []}
+    result_file = job_dir / "results.json"
+    if not result_file.is_file():
+        entry["error"] = "结果文件缺失"
+        return entry
+    try:
+        entry["result"] = json.loads(result_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        entry["error"] = f"结果文件不可读取：{error}"
+        return entry
+    entry["files"] = sorted(
+        path.name for path in job_dir.iterdir()
+        if path.is_file() and _is_run_file(path.name))
+    try:
+        manifest_file = job_dir / "result_manifest.json"
+        if manifest_file.is_file():
+            entry["manifest"] = json.loads(
+                manifest_file.read_text(encoding="utf-8"))
+        frozen = job_dir / "frozen_job.json"
+        if frozen.is_file():
+            entry["job"] = json.loads(frozen.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        entry["error"] = f"清单文件不可读取：{error}"
+    # 新布局把整个视频发布在 runs/{run_id}：任务 ID 以清单/冻结任务为准。
+    for source in (entry.get("manifest"), entry.get("job")):
+        if isinstance(source, Mapping) and source.get("job_id"):
+            entry["job_id"] = source["job_id"]
+            break
+    # 新布局把整个视频发布在 runs/{run_id}：任务 ID 以清单/冻结任务为准。
+    for source in (entry.get("manifest"), entry.get("job")):
+        if isinstance(source, Mapping) and source.get("job_id"):
+            entry["job_id"] = source["job_id"]
+            break
+    units = []
+    for unit in (entry.get("manifest") or {}).get("units") or []:
+        units.append({"unit_id": unit.get("unit_id"),
+                      "unit_name": unit.get("unit_name"),
+                      "summary": unit.get("summary") or {},
+                      "figures": unit.get("figures") or {},
+                      "annotated_video": unit.get("annotated_video")})
+    if not units:
+        for row in entry["result"].get("summary") or []:
+            units.append({"unit_id": row.get("unit_id"),
+                          "unit_name": row.get("unit_name"),
+                          "summary": row, "figures": {}})
+    entry["units"] = units
+    assay = ((entry.get("result") or {}).get("metadata") or {}).get("assay") \
+        or (entry.get("job") or {}).get("assay")
+    entry["assay"] = assay
+    entry["metrics"] = _assay_metrics(assay)
+    entry["assay_label"] = _assay_label(assay)
+    return entry
 
 
 def create_app(*, data_dir: Any = None, store: Store | None = None,
                testing: bool = False) -> Flask:
     paths = DataPaths.from_dir(data_dir)
     store = store or Store(paths)
+    # 调度器不在这里抢所有权：create_app 只创建，应用真正启动时才 start。
+    # testing 用同一服务的同步执行变体，避免测试里另开一条分析路径。
+    jobs = JobScheduler(store, paths, inline=bool(testing))
     app = Flask(__name__, static_folder="static", template_folder="templates")
     app.config.update(
         TESTING=testing,
         DATA_PATHS=paths,
         STORE=store,
+        JOBS=jobs,
+        JOB_OWNER=jobs.owner,
         JSON_SORT_KEYS=False,
     )
 
@@ -318,7 +397,7 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
     # -- 健康与目录 -----------------------------------------------------
     @app.get("/api/health")
     def health():
-        registry = JobOwnerRegistry(paths)
+        registry = app.config["JOB_OWNER"]
         return success(
             {
                 "status": "ok",
@@ -485,6 +564,15 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
             raise ApiError("结果文件不存在", 404)
         path = Path(paths.runs) / run_id / job_id / filename
         if not path.is_file():
+            # 新批次把整个视频发布在 runs/{run_id} 下；旧记录仍是嵌套目录。
+            flat = Path(paths.runs) / run_id / filename
+            manifest = read_json_file(
+                Path(paths.runs) / run_id / "result_manifest.json", default=None)
+            if (flat.is_file() and isinstance(manifest, Mapping)
+                    and manifest.get("job_id") == job_id
+                    and manifest.get("run_id") == run_id):
+                path = flat
+        if not path.is_file():
             raise ApiError("结果文件不存在", 404)
         if RUN_FIGURE.fullmatch(filename) or RUN_VIDEO.fullmatch(filename):
             # 图形与标注视频默认在结果页内联显示，带 download=1 时按附件下载。
@@ -556,8 +644,11 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
             figure_service.style_preview_png(target, merged)
         except (OSError, ValueError) as error:
             raise ApiError(f"无法生成样式预览：{error}", 422) from error
+        # 预览只渲染到 240 DPI；返回值说明实际渲染值，正式设置不被改写。
+        render_dpi = min(float(merged.get("dpi") or 150), 240.0)
+        preview_style = {**merged, "dpi": render_dpi}
         return success({"image_url": f"/api/previews/{filename}",
-                        "style": merged})
+                        "style": preview_style})
 
     # -- 项目 -----------------------------------------------------------
     @app.get("/api/projects")
@@ -692,7 +783,7 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
             raise ApiError("项目不存在", 404)
 
         # 只复制当时的设置快照：草稿不引用 settings 对象。
-        snapshot = snapshot_draft(assay, settings=_settings_snapshot(store))
+        snapshot = snapshot_draft(assay, settings=_settings_snapshot(store, assay))
         for key in ("options", "detection", "output", "style"):
             if key not in body:
                 continue
@@ -713,7 +804,8 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
             "output": snapshot["output"],
             "style": snapshot["style"],
         }
-        issues = validate_draft(draft, settings=_settings_snapshot(store))
+        issues = validate_draft(draft, settings=_settings_snapshot(
+            store, draft.get("assay")))
         if issues:
             raise ApiError("草稿未通过校验", 400, issues)
 
@@ -746,7 +838,8 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         if "videos" in changes:
             changes["videos"] = _normalize_videos(changes["videos"])
         candidate = {**existing, **changes}
-        issues = validate_draft(candidate, settings=_settings_snapshot(store))
+        issues = validate_draft(
+            candidate, settings=_settings_snapshot(store, candidate.get("assay")))
         if issues:
             raise ApiError("草稿未通过校验", 400, issues)
         record = store.update_draft(draft_id, changes)
@@ -766,83 +859,137 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         # 最终校验：允许未画完的草稿保存，但不允许带着缺四角开始任务。
         return success({"issues": validate_draft(
             draft, complete=True, animals=_project_animals(draft),
-            settings=_settings_snapshot(store))})
+            settings=_settings_snapshot(store, draft.get("assay")))})
 
     @app.post("/api/drafts/<draft_id>/validate")
     def validate_draft_post(draft_id: str):
         draft = _require_draft(draft_id)
         return success({"issues": validate_draft(
             draft, complete=True, animals=_project_animals(draft),
-            settings=_settings_snapshot(store))})
+            settings=_settings_snapshot(store, draft.get("assay")))})
 
-    def _run_draft(draft: dict):
-        """校验通过才创建并执行任务；返回 run_id 与每个任务的结果。"""
+    def _scheduler() -> JobScheduler:
+        return app.config["JOBS"]
 
-        issues = validate_draft(draft, complete=True,
-                                animals=_project_animals(draft),
-                                settings=_settings_snapshot(store))
-        if issues:
-            raise ApiError("草稿未通过校验", 400, issues)
-        assets = {}
-        for video in draft.get("videos") or []:
-            asset = store.get_asset(video.get("asset_id"))
-            if asset is None:
-                raise ApiError("素材不存在", 404,
-                               [{"field": "asset_id", "message": "素材不存在"}])
-            assets[video["asset_id"]] = asset
-        scheduler = JobScheduler(store)
+    def _batch_error(error: Exception):
+        if isinstance(error, NotFoundError):
+            raise ApiError("任务不存在", 404)
+        if isinstance(error, JobError):
+            raise ApiError(error.message, error.status, error.fields)
+        raise error
+
+    def _batch_payload(batch: dict) -> dict:
+        """批次 + 逐视频行；状态只有一份，不做第二套映射。"""
+
+        payload = dict(batch)
+        payload["job_id"] = batch.get("id")
+        videos = list(batch.get("videos") or [])
+        rows = []
+        for video in videos:
+            row = {
+                "job_id": video.get("job_id"),
+                "run_id": video.get("run_id"),
+                "name": video.get("name"),
+                "status": video.get("status"),
+                "progress": video.get("progress"),
+                "error": video.get("error"),
+            }
+            # 只有真的发布了结果才有清单；失败任务不能带一个空清单冒充。
+            if isinstance(video.get("result_manifest"), Mapping):
+                row["manifest"] = video["result_manifest"]
+            if video.get("output_dir"):
+                row["output_dir"] = video["output_dir"]
+            if video.get("log"):
+                row["log"] = video["log"]
+            rows.append(row)
+        payload["jobs"] = rows
+        payload["run_id"] = next(
+            (video.get("run_id") for video in videos
+             if video.get("status") == COMPLETED), None)
+        return payload
+
+    def _submit_draft(draft_id: str):
         try:
-            resolved = scheduler.freeze_batch(draft=draft, assets=assets)
-        except ValidationError as error:
-            raise ApiError(error.message, 400, [error.as_issue()])
-        if not resolved:
-            raise ApiError("草稿还没有视频", 400,
-                           [{"field": "videos", "message": "草稿还没有视频"}])
-        run_id = resolved[0]["run_id"]
-        outcomes = scheduler.run(draft=draft, resolved=resolved)
-        jobs = []
-        for outcome in outcomes:
-            job = outcome["job"]
-            entry = {"job_id": job.get("job_id"), "status": outcome["status"]}
-            if outcome["status"] == "done":
-                try:
-                    manifest = output_service.export_result(
-                        Path(paths.runs) / run_id / job["job_id"], job,
-                        outcome["result"])
-                    entry["manifest"] = manifest
-                except OSError as error:
-                    store.update_job_status(job["job_id"], "error")
-                    entry["status"] = "error"
-                    entry["error"] = f"结果文件写入失败：{error}"
-            else:
-                entry["error"] = outcome.get("error")
-            jobs.append(entry)
-        return success({"run_id": run_id, "jobs": jobs}, 201)
+            batch = _scheduler().submit(draft_id)
+        except Exception as error:  # 统一转成带字段的接口错误
+            _batch_error(error)
+        return _batch_payload(batch)
 
     @app.post("/api/drafts/<draft_id>/analyze")
     def analyze_draft(draft_id: str):
-        return _run_draft(_require_draft(draft_id))
+        """旧入口保留，但只做同一件事：校验、冻结、排队。"""
+
+        _require_draft(draft_id)
+        return success(_submit_draft(draft_id), 202)
 
     @app.post("/api/jobs")
     def create_job():
-        """工作台提交入口：先校验草稿，再创建并执行任务。"""
-
         body = _json_body()
         draft_id = body.get("draft_id")
         if not is_valid_id(draft_id):
             raise ApiError("草稿 ID 无效", 400,
                            [{"field": "draft_id", "message": "ID 无效"}])
-        return _run_draft(_require_draft(draft_id))
+        _require_draft(draft_id)
+        return success(_submit_draft(draft_id), 202)
+
+    @app.get("/api/jobs")
+    def list_jobs():
+        project_id = request.args.get("project_id")
+        if project_id is not None and not is_valid_id(project_id):
+            raise ApiError("项目 ID 无效", 400,
+                           [{"field": "project_id", "message": "ID 无效"}])
+        rows = _scheduler().list(project_id)
+        return success({"batches": rows})
+
+    @app.get("/api/jobs/<batch_id>")
+    def get_job(batch_id: str):
+        if not is_valid_id(batch_id):
+            raise ApiError("任务不存在", 404)
+        try:
+            batch = _scheduler().get(batch_id)
+        except Exception as error:
+            _batch_error(error)
+        return success({"batch": _batch_payload(batch)})
+
+    @app.post("/api/jobs/<batch_id>/cancel")
+    def cancel_job(batch_id: str):
+        if not is_valid_id(batch_id):
+            raise ApiError("任务不存在", 404)
+        try:
+            batch = _scheduler().cancel(batch_id)
+        except Exception as error:
+            _batch_error(error)
+        return success({"batch": _batch_payload(batch)}, 202)
+
+    @app.post("/api/jobs/<batch_id>/replay")
+    def replay_job(batch_id: str):
+        if not is_valid_id(batch_id):
+            raise ApiError("任务不存在", 404)
+        try:
+            batch = _scheduler().replay(batch_id)
+        except Exception as error:
+            _batch_error(error)
+        return success({"batch": _batch_payload(batch)}, 202)
+
+    @app.delete("/api/jobs/<batch_id>")
+    def delete_job(batch_id: str):
+        if not is_valid_id(batch_id):
+            raise ApiError("任务不存在", 404)
+        try:
+            _scheduler().delete(batch_id)
+        except Exception as error:
+            _batch_error(error)
+        return success({"deleted": True})
 
     @app.post("/api/drafts/<draft_id>/preview")
     def create_preview(draft_id: str):
-        _require_draft(draft_id)
+        draft = _require_draft(draft_id)
         body = _json_body()
         unit_id = body.get("unit_id")
         try:
             result = preview_service.create_preview(
                 store, paths, draft_id, body,
-                settings=_settings_snapshot(store))
+                settings=_settings_snapshot(store, draft.get("assay")))
         except ValidationError as error:
             # 字段问题带上单位身份，界面才能定位到具体动物的人工输入。
             raise ApiError(error.message, 400, [error.as_issue(
@@ -919,22 +1066,9 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         )
 
     def _project_jobs(project_id: str) -> list[dict]:
-        """项目批次：冻结配置里的视频名是结果入口的说明，不改写历史。"""
+        """项目批次：与任务中心同一份信息，只按项目过滤。"""
 
-        rows = []
-        for job in store.list_jobs_for_project(project_id):
-            config = job.get("config") or {}
-            frozen = config.get("job") if isinstance(config, Mapping) else None
-            asset = (frozen or {}).get("asset") if isinstance(frozen, Mapping) else None
-            rows.append({
-                "id": job.get("id"),
-                "run_id": job.get("run_id"),
-                "assay": job.get("assay"),
-                "status": job.get("status"),
-                "created_at": job.get("created_at"),
-                "asset_name": (asset or {}).get("name"),
-            })
-        return rows
+        return app.config["JOBS"].list(project_id)
 
     @app.get("/projects/<project_id>")
     def page_project(project_id: str):
@@ -985,8 +1119,13 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
 
     @app.get("/tasks")
     def page_tasks():
-        return render_template("tasks.html", active="tasks",
-                               jobs=store.list_jobs())
+        selected = request.args.get("job")
+        batches = app.config["JOBS"].list()
+        drafts = [draft for draft in store.list_drafts() if not draft.get("videos")]
+        return render_template(
+            "tasks.html", active="tasks", batches=batches, drafts=drafts,
+            selected=selected if is_valid_id(selected) else None,
+        )
 
     @app.get("/results/<run_id>")
     def page_result(run_id: str):
