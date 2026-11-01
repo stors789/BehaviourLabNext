@@ -273,19 +273,32 @@
     return ["视频", "场地", "检测"];
   }
 
+  // 任务导航的三段与真实阶段一致：选择与视频设置同属“视频”，
+  // “场地”“检测”才进画布的两个视图。
+  function tasknavEntries() {
+    if (state.recordMode) {
+      return [{ step: "select" }, { step: "arena" }, { step: "review" }];
+    }
+    return [
+      { step: "select" },
+      { step: "arena", view: "geometry" },
+      { step: "arena", view: "detection" },
+    ];
+  }
+
   function renderTasknav() {
     if (!el.tasknav) return;
     const labels = stepLabels();
     const links = el.tasknav.querySelectorAll("[data-step-link]");
-    const order = state.recordMode ? ["select", "arena", "review"] : ["select", "range", "arena"];
-    // 选择与视频设置都属于“视频”阶段：设置页不能显示成已进入场地。
+    const entries = tasknavEntries();
     let activeIndex = 0;
     if (state.step === "arena") activeIndex = state.view === "detection" ? 2 : 1;
     else if (state.step === "review") activeIndex = 2;
     links.forEach((link, index) => {
-      const step = order[index];
+      const entry = entries[index] || entries[0];
       link.textContent = labels[index];
-      link.dataset.stepLink = step;
+      link.dataset.stepLink = entry.step;
+      link.dataset.stepView = entry.view || "";
       if (index === activeIndex) link.setAttribute("aria-current", "page");
       else link.removeAttribute("aria-current");
     });
@@ -3321,13 +3334,22 @@
         const link = event.target.closest("[data-step-link]");
         if (!link) return;
         event.preventDefault();
-        const links = Array.from(el.tasknav.querySelectorAll("[data-step-link]"));
-        const index = links.indexOf(link);
         const step = link.dataset.stepLink;
+        const declared = link.dataset.stepView || "";
         const targetView = step === "arena"
-          ? (index === 2 ? "detection" : "geometry")
+          ? (declared === "detection" ? "detection" : "geometry")
           : state.view;
         if (step === state.step && (step !== "arena" || targetView === state.view)) return;
+        // 还没有草稿时留在选视频；有草稿但没视频时回视频设置，不落到空画布。
+        if (step === "arena" && !state.draftId) {
+          if (state.step !== "select") goStep("select");
+          status("先选择视频并设置范围", "warn");
+          return;
+        }
+        if (step === "arena" && !currentVideo()) {
+          goStep("range");
+          return;
+        }
         goStep(step, { view: targetView });
       });
     }

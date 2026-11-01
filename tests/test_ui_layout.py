@@ -156,6 +156,19 @@ def test_shell_markup_context_and_tasknav():
     assert 'if (state.step === "range") activeIndex = 1;' not in nav
     assert 'if (state.step === "arena") activeIndex' in nav
 
+    # 三段各自进真实阶段：场地→几何视图、检测→检测视图，视频不再映射到 range。
+    entries = WORKSPACE.split("function tasknavEntries()", 1)[1].split("\n  }", 1)[0]
+    assert '{ step: "arena", view: "geometry" }' in entries
+    assert '{ step: "arena", view: "detection" }' in entries
+    assert '"range"' not in entries
+    click = WORKSPACE.split('el.tasknav.addEventListener("click"', 1)[1].split(
+        "\n      });", 1)[0]
+    assert 'declared === "detection" ? "detection" : "geometry"' in click
+    # 没有草稿时留在选视频，有草稿但没视频时回视频设置：都不落到空画布。
+    assert 'if (step === "arena" && !state.draftId)' in click
+    assert 'status("先选择视频并设置范围", "warn")' in click
+    assert 'goStep("range")' in click
+
 
 def test_home_intro_and_compact_entries():
     assert 'class="intro"' in HOME
