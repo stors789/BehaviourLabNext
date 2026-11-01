@@ -124,7 +124,7 @@ def test_manual_bins_expose_original_keys(client, store, tmp_path,
 
 def test_annotated_video_is_generated_and_downloadable(client, store, tmp_path,
                                                        monkeypatch):
-    import cv2
+    import av
 
     monkeypatch.setattr(media, "VideoSource", Frames)
     monkeypatch.setattr(
@@ -145,17 +145,18 @@ def test_annotated_video_is_generated_and_downloadable(client, store, tmp_path,
     target = run_dir / name
     assert target.is_file() and target.stat().st_size > 0
 
-    capture = cv2.VideoCapture(str(target))
-    try:
-        assert capture.isOpened()
-        count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = capture.get(cv2.CAP_PROP_FPS)
-        ok, frame = capture.read()
-    finally:
-        capture.release()
-    assert ok and frame.shape[:2] == (96, 128)
-    assert count == 8, "标注视频只覆盖单位分析窗 [0.1, 0.9)"
-    assert fps == pytest.approx(10.0, abs=0.5)
+    with av.open(str(target)) as container:
+        stream = container.streams.video[0]
+        assert stream.codec_context.name == "h264", "浏览器可播的编码"
+        assert float(container.duration) / av.time_base == pytest.approx(
+            0.8, abs=1e-4)
+        frames = list(container.decode(video=0))
+    assert len(frames) == 8, "标注视频只覆盖单位分析窗 [0.1, 0.9)"
+    assert frames[0].to_ndarray(format="bgr24").shape[:2] == (96, 128)
+    assert [round(float(item.duration * item.time_base), 6) for item in frames] \
+        == [0.1] * 8
+    assert unit["annotated_video_duration_s"] == pytest.approx(0.8, abs=1e-4)
+    assert unit["annotated_video_time_base"] == "1/1000000"
 
     inline = client.get(f"/runs/{payload['run_id']}/{job['job_id']}/{name}")
     assert inline.status_code == 200
@@ -316,14 +317,121 @@ def test_annotated_video_skips_zero_exposure_boundary_frames(tmp_path,
               {"time_s": 0.55, "target": "B", "entry_index": 3},
               {"time_s": 0.75, "target": "C", "entry_index": 4}]
     target = tmp_path / "boundary.mp4"
-    written = annotated.write_manual_y_video(target, job=job,
-                                             summary=summary, events=events)
+    written, seconds = annotated.write_manual_y_video(
+        target, job=job, summary=summary, events=events)
     assert written == 8
+    assert seconds == pytest.approx(0.8, abs=1e-4)
 
-    import cv2
+    import av
 
-    capture = cv2.VideoCapture(str(target))
-    try:
-        assert int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) == 8
-    finally:
-        capture.release()
+    with av.open(str(target)) as container:
+        assert len(list(container.decode(video=0))) == 8
+
+
+class Frames29:
+    """29FPS 源：帧 i 在 i/29 秒，曝光到 (i+1)/29 秒。"""
+
+    def __init__(self, path=None, *, start_s=0.0, end_s=None,
+                 decode_images=True, **kwargs):
+        self._frames = []
+        for index in range(28):
+            moment = index / 29.0
+            self._frames.append(Frame(
+                image=(np.full((96, 128), 200, dtype=np.uint8)
+                       if decode_images else None),
+                index=index, time_s=moment, dt_s=1.0 / 29.0,
+                elapsed_s=moment, analysis_fps=29.0,
+                interval_start_s=moment, interval_end_s=(index + 1) / 29.0))
+
+    def iter_frames(self):
+        return iter(self._frames)
+
+
+def test_vfr_keeps_cropped_exposures(tmp_path, monkeypatch):
+    """窗口首尾的半帧曝光不能被补成完整帧，总时长仍等于 .8s。"""
+
+    monkeypatch.setattr(media, "VideoSource", Frames29)
+    job = {"asset": {"path": "memory", "metadata": {"fps": 29.0}},
+           "window": {"start_s": 0.0, "end_s": 1.0},
+           "orientation": 0, "fps_override": None}
+    summary = {"unit_name": "unit", "analysis_window_start_s": 0.1,
+               "analysis_window_end_s": 0.9}
+    events = [{"time_s": 0.2, "target": "A", "entry_index": 1}]
+    target = tmp_path / "vfr.mp4"
+    frames, seconds = annotated.write_manual_y_video(
+        target, job=job, summary=summary, events=events)
+    assert frames == 25, "源帧 2–26 是窗内正曝光"
+    assert seconds == pytest.approx(0.8, abs=1e-4)
+
+    import av
+
+    with av.open(str(target)) as container:
+        assert container.streams.video[0].codec_context.name == "h264"
+        assert float(container.duration) / av.time_base == pytest.approx(
+            0.8, abs=1e-4)
+        decoded = list(container.decode(video=0))
+    assert len(decoded) == 25
+    durations = [float(item.duration * item.time_base) for item in decoded]
+    assert durations[0] == pytest.approx(3 / 29.0 - 0.1, abs=2e-6)
+    assert durations[-1] == pytest.approx(0.9 - 26 / 29.0, abs=2e-6)
+    assert all(abs(item - 1 / 29.0) < 2e-6 for item in durations[1:-1])
+    assert sum(durations) == pytest.approx(0.8, abs=1e-4)
+    starts = [float(item.pts * item.time_base) for item in decoded]
+    assert starts[0] == pytest.approx(0.0, abs=1e-9)
+    # 时间基 1µs：帧时间按微秒取整，容忍累计 5µs 的量化误差。
+    assert starts[-1] == pytest.approx(0.8 - durations[-1], abs=1e-5)
+
+
+def test_encode_write_failure_cleans_up(tmp_path, monkeypatch):
+    """写帧阶段抛错也要变成明确的 OSError，并删除半成品。"""
+
+    monkeypatch.setattr(media, "VideoSource", Frames)
+    calls = {"count": 0}
+    original = annotated._mux
+
+    def flaky(container, packet, queued):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise RuntimeError("模拟写入失败")
+        return original(container, packet, queued)
+
+    monkeypatch.setattr(annotated, "_mux", flaky)
+    target = tmp_path / "broken.mp4"
+    job = {"asset": {"path": "memory", "metadata": {"fps": 10.0}},
+           "window": {"start_s": 0.0, "end_s": 1.0},
+           "orientation": 0, "fps_override": None}
+    summary = {"unit_name": "unit", "analysis_window_start_s": 0.1,
+               "analysis_window_end_s": 0.9}
+    with pytest.raises(OSError) as captured:
+        annotated.write_manual_y_video(target, job=job, summary=summary,
+                                       events=ENTRIES)
+    assert "标注视频编码失败" in str(captured.value)
+    assert not target.exists()
+
+
+def test_write_failure_marks_job_error(client, store, tmp_path, monkeypatch):
+    monkeypatch.setattr(media, "VideoSource", Frames)
+    monkeypatch.setattr(
+        "behaviourlab.engine.media.probe_video",
+        lambda path: {"width": 128, "height": 96, "duration_s": 1.0,
+                      "fps": 10.0, "frame_count": 10})
+    original = annotated._mux
+    calls = {"count": 0}
+
+    def flaky(container, packet, queued):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise RuntimeError("模拟写入失败")
+        return original(container, packet, queued)
+
+    monkeypatch.setattr(annotated, "_mux", flaky)
+    draft = seed(client, store, tmp_path)
+    payload = client.post("/api/jobs",
+                          json={"draft_id": draft["id"]}).get_json()["data"]
+    job = payload["jobs"][0]
+    assert job["status"] == "error", job
+    assert "标注视频" in str(job.get("error")), job
+    assert "manifest" not in job
+    run_dir = store.paths.runs / payload["run_id"] / job["job_id"]
+    assert not (run_dir / "result_manifest.json").exists()
+    assert not list(run_dir.glob("*_annotated.mp4"))

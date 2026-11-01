@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from . import figures
+from . import annotated, figures
 from .schema import sanitize_json
 from .store import atomic_write_json
 
@@ -329,7 +329,8 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
 
 def _annotated_video(target: Path, job: Mapping[str, Any], result: Any,
                      summary: Mapping[str, Any], stem: str,
-                     events: Sequence[Mapping[str, Any]]) -> str | None:
+                     events: Sequence[Mapping[str, Any]]
+                     ) -> tuple[str, float] | None:
     """人工 Y 的源图标注视频：开关关闭或无人工单位时不生成。"""
 
     output = job.get("output")
@@ -339,13 +340,17 @@ def _annotated_video(target: Path, job: Mapping[str, Any], result: Any,
     meta = units.get(summary.get("unit_id")) or {}
     if meta.get("mode") != "manual":
         return None
-    from . import annotated
 
     name = f"{stem}_annotated.mp4"
-    # 编码失败让异常冒到导出层：作业会显示明确错误，不留半成品清单。
-    annotated.write_manual_y_video(target / name, job=job, summary=summary,
-                                   events=events)
-    return name
+    try:
+        _, seconds = annotated.write_manual_y_video(
+            target / name, job=job, summary=summary, events=events)
+    except OSError:
+        # 编码失败让异常冒到导出层：作业标 error，不留半成品清单。
+        raise
+    except Exception as error:  # pragma: no cover - 防御未知编码错误
+        raise OSError(f"标注视频编码失败：{error}") from error
+    return name, float(seconds)
 
 
 def export_result(directory: str | Path, job: Mapping[str, Any],
@@ -390,11 +395,14 @@ def export_result(directory: str | Path, job: Mapping[str, Any],
             if info.get(key):
                 files.append(info[key])
         video = _annotated_video(target, job, result, row, stem, events)
+        entry = {"unit_id": unit_id, "unit_name": row.get("unit_name"),
+                 "summary": row, "figures": info,
+                 "annotated_video": video[0] if video else None}
         if video:
-            files.append(video)
-        units.append({"unit_id": unit_id, "unit_name": row.get("unit_name"),
-                      "summary": row, "figures": info,
-                      "annotated_video": video})
+            files.append(video[0])
+            entry["annotated_video_duration_s"] = round(video[1], 6)
+            entry["annotated_video_time_base"] = annotated.TIMEBASE_LABEL
+        units.append(entry)
 
     manifest = {
         "run_id": job.get("run_id"),

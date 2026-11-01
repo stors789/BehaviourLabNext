@@ -1,19 +1,27 @@
 """人工 Y 的源图标注视频：原始画面 + 实际源时间与人工入臂事件。
 
 只叠加可解释的文本（源秒、帧号、已记录事件），不做位置估计，不画固定鼠点、
-轨迹或热图。编码失败抛 OSError，由导出层如实报错，不静默声称完成。
+轨迹或热图。输出为浏览器可播的 H.264/MP4，按裁切后的真实曝光逐帧给时长
+（VFR），不把首尾短曝光补成完整帧。编码失败抛 OSError，由导出层如实报错。
 """
 
 from __future__ import annotations
 
 import math
 import os
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+import av
 
 from . import media
 
 ARM_KEYS = ("A", "B", "C")
+
+# 帧时间基：微秒。标注视频的时长与每帧持续时间都按这个单位取整。
+TIMEBASE = Fraction(1, 1_000_000)
+TIMEBASE_LABEL = "1/1000000"
 
 
 def _finite(value: Any) -> float | None:
@@ -57,14 +65,63 @@ def _ordered_events(events: Sequence[Mapping[str, Any]]) -> list[dict]:
     return kept
 
 
-def _frame_fps(frame: Any) -> float:
-    rate = _finite(getattr(frame, "analysis_fps", None))
-    if rate is not None and rate > 0:
-        return rate
-    step = _finite(getattr(frame, "dt_s", None))
-    if step is not None and step > 0:
-        return 1.0 / step
-    return 10.0
+def _clipped_exposure(frame: Any, start: float, end: float) -> float | None:
+    """帧在分析窗内的真实正曝光时长；没有曝光信息时退回名义步长。"""
+
+    exposure_start = _finite(getattr(frame, "interval_start_s", None))
+    exposure_end = _finite(getattr(frame, "interval_end_s", None))
+    if exposure_start is None or exposure_end is None:
+        moment = _finite(getattr(frame, "time_s", None))
+        step = _finite(getattr(frame, "dt_s", None))
+        if moment is None or step is None or step <= 0:
+            return None
+        return step if start <= moment < end else None
+    low = max(exposure_start, start)
+    high = min(exposure_end, end)
+    if high - low <= 1e-12:
+        return None
+    return high - low
+
+
+def _even_size(canvas: Any) -> Any:
+    """H.264 的 yuv420p 需要偶数宽高；奇数边缘补 1 像素。"""
+
+    import cv2
+
+    height, width = canvas.shape[:2]
+    pad_h = height % 2
+    pad_w = width % 2
+    if not pad_h and not pad_w:
+        return canvas
+    return cv2.copyMakeBorder(canvas, 0, pad_h, 0, pad_w, cv2.BORDER_REPLICATE)
+
+
+def _open_writer(target: Path, width: int, height: int):
+    """打开 H.264/MP4 输出：浏览器与桌面 WebView 都能直接播放。"""
+
+    container = av.open(
+        str(target), "w", format="mp4",
+        options={"movflags": "+faststart"},
+    )
+    stream = container.add_stream("libx264", rate=None)
+    stream.width = width
+    stream.height = height
+    stream.pix_fmt = "yuv420p"
+    stream.time_base = TIMEBASE
+    stream.codec_context.time_base = TIMEBASE
+    stream.codec_context.options = {
+        "crf": "20", "preset": "veryfast", "bf": "0",
+        "profile": "main", "level": "4.0",
+    }
+    return container, stream
+
+
+def _mux(container: Any, packet: Any, queued: list[int]) -> None:
+    """按帧顺序补上每帧持续时间，保证容器总时长等于曝光之和。"""
+
+    if queued:
+        packet.duration = queued.pop(0)
+    container.mux(packet)
 
 
 def _to_bgr(image: Any):
@@ -113,10 +170,9 @@ def _draw_label(canvas: Any, lines: Sequence[str]) -> Any:
 
 def write_manual_y_video(path: str | Path, *, job: Mapping[str, Any],
                          summary: Mapping[str, Any],
-                         events: Sequence[Mapping[str, Any]]) -> int:
-    """按单位分析窗写标注视频；返回写入帧数。"""
-
-    import cv2
+                         events: Sequence[Mapping[str, Any]]
+                         ) -> tuple[int, float]:
+    """按单位分析窗写标注视频；返回 (帧数, 总时长秒)。"""
 
     asset = job.get("asset") or {}
     source_path = asset.get("path")
@@ -149,11 +205,15 @@ def write_manual_y_video(path: str | Path, *, job: Mapping[str, Any],
     window_start = float(start)
     window_end = float(end) if end is not None else math.inf
 
-    writer = None
-    written = 0
+    container = None
+    stream = None
+    queued: list[int] = []
     cursor = 0
     sequence: list[str] = []
     current: dict | None = None
+    written = 0
+    position = 0
+    last_ticks = 0
     try:
         for frame in source.iter_frames():
             canvas = _to_bgr(frame.image)
@@ -162,15 +222,9 @@ def write_manual_y_video(path: str | Path, *, job: Mapping[str, Any],
             moment = _finite(frame.time_s)
             if moment is None:
                 continue
-            # 只写分析窗内的真实曝光帧；窗口两端的零曝光上下文帧不进入视频。
-            exposure_start = _finite(getattr(frame, "interval_start_s", None))
-            exposure_end = _finite(getattr(frame, "interval_end_s", None))
-            if exposure_start is None or exposure_end is None:
-                if not window_start <= moment < window_end:
-                    continue
-            elif not (exposure_end > exposure_start
-                      and exposure_end > window_start
-                      and exposure_start < window_end):
+            # 只收分析窗内的真实正曝光；窗口两端的零曝光上下文帧不进入视频。
+            duration = _clipped_exposure(frame, window_start, window_end)
+            if duration is None:
                 continue
             while cursor < len(ordered) and ordered[cursor]["time_s"] <= moment + 1e-9:
                 current = ordered[cursor]
@@ -183,28 +237,43 @@ def write_manual_y_video(path: str | Path, *, job: Mapping[str, Any],
                 f"entry #{current['entry_index']} {current['target']} at "
                 f"{clock_text(current['time_s'])}"
                 if current else "entry -")
-            canvas = _draw_label(canvas, lines)
-            height, width = canvas.shape[:2]
-            if writer is None:
-                writer = cv2.VideoWriter(
-                    str(target), cv2.VideoWriter_fourcc(*"mp4v"),
-                    _frame_fps(frame), (width, height))
-                if not writer.isOpened():
-                    raise OSError("标注视频编码器不可用（mp4v）")
-            writer.write(canvas)
+            canvas = _even_size(_draw_label(canvas, lines))
+            if container is None:
+                container, stream = _open_writer(target, canvas.shape[1],
+                                                 canvas.shape[0])
+            video_frame = av.VideoFrame.from_ndarray(canvas, format="bgr24")
+            ticks = max(1, int(round(duration * TIMEBASE.denominator)))
+            video_frame.pts = position
+            video_frame.time_base = TIMEBASE
+            queued.append(ticks)
+            for packet in stream.encode(video_frame):
+                _mux(container, packet, queued)
+            position += ticks
+            last_ticks = ticks
             written += 1
-    except Exception:
-        if writer is not None:
-            writer.release()
-            writer = None
+        if container is None:
+            raise OSError("分析范围内没有可写入的源帧，未生成标注视频")
+        for packet in stream.encode(None):
+            if not queued:
+                queued.append(last_ticks)
+            _mux(container, packet, queued)
+        container.close()
+        container = None
+        stream = None
+    except BaseException as error:
+        if container is not None:
+            try:
+                container.close()
+            except Exception:
+                pass
         try:
             os.unlink(target)
         except OSError:
             pass
-        raise
-    finally:
-        if writer is not None:
-            writer.release()
+        if isinstance(error, OSError):
+            raise
+        # 编码/写入失败统一变成明确的输出失败，交给导出层标 error。
+        raise OSError(f"标注视频编码失败：{error}") from error
 
     if not written:
         try:
@@ -212,4 +281,4 @@ def write_manual_y_video(path: str | Path, *, job: Mapping[str, Any],
         except OSError:
             pass
         raise OSError("分析范围内没有可写入的源帧，未生成标注视频")
-    return written
+    return written, position / TIMEBASE.denominator

@@ -126,7 +126,8 @@ def test_player_commits_only_after_viewport_checks():
         encoding="utf-8")
     # 提交画面前校验请求代号与页面上下文，暂停/离页都会废弃在途帧。
     assert "frameStillCurrent(context)" in source
-    assert "window.BLFrameView.frameStillCurrent(" in source
+    assert "window.BLFrameView" in source
+    assert "api.frameStillCurrent(" in source
     commit = source.split("function commitFrame(payload, context)", 1)[1].split(
         "\n  }", 1)[0]
     assert commit.index("frameStillCurrent(context)") < commit.index(
@@ -182,4 +183,49 @@ def test_analysis_submission_freezes_context_before_first_await():
     preview = source.split("async function runPreview(kind)", 1)[1].split(
         "\n  async function primaryAction", 1)[0]
     assert "const context = { page: pageKey(), edit: state.editCounter };" in preview
-    assert preview.count("pageKey() !== context.page") >= 3
+    assert preview.count("pageAlive(context)") >= 3
+
+
+def test_analyze_page_loads_frameview_before_workspace():
+    html = (ROOT / "behaviourlab/web/templates/analyze.html").read_text(
+        encoding="utf-8")
+    scripts = [line for line in html.splitlines() if "<script src=" in line]
+    names = [line.split("filename='", 1)[1].split("'", 1)[0]
+             for line in scripts if "filename='" in line]
+    assert "frameview.js" in names, "真实页面必须加载 frameview 模块"
+    assert names.index("frameview.js") < names.index("workspace.js")
+
+
+def test_leave_canvas_records_shown_frame_before_switching():
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    body = source.split("async function goStep(step, options)", 1)[1].split(
+        "\n  function showPanel", 1)[0]
+    # 先停播并写回原历史项（shownFrame），再切换 step / pushState。
+    assert body.index("stopPlayback()") < body.index("rememberPosition()")
+    assert body.index("rememberPosition()") < body.index("state.step = step")
+    assert body.index("rememberPosition()") < body.index("history.pushState")
+
+
+def test_teardown_discards_preview_confirmation():
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    teardown = source.split("function teardownPage()", 1)[1].split("\n  }", 1)[0]
+    assert "state.pageClosed = true" in teardown
+    assert "state.previewGate.invalidate()" in teardown
+    assert "state.previewAwaiting = false" in teardown
+    # JSON 返回与 PNG 成功回调都要求页面仍存活且上下文一致。
+    preview = source.split("async function runPreview(kind)", 1)[1].split(
+        "\n  async function primaryAction", 1)[0]
+    assert preview.count("pageAlive(context)") >= 3
+    assert "!state.pageClosed" in source.split("function pageAlive", 1)[1].split(
+        "\n  }", 1)[0]
+
+
+def test_jump_keeps_target_frame_when_not_playing():
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    body = source.split("function stopPlayback()", 1)[1].split("\n  }", 1)[0]
+    # 只有真的从播放中暂停才回退到已显示帧；滑条跳转保留目标帧。
+    assert "const wasPlaying = state.playing;" in body
+    assert "if (wasPlaying && Number.isInteger(state.shownFrame)" in body

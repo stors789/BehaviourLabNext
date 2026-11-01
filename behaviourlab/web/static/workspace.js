@@ -37,6 +37,7 @@
     previewGate: new PreviewGate(),
     previewKind: "detection",
     previewAwaiting: false,
+    pageClosed: false,
     loading: false,
     recordMode: false,
     canvasMessage: "正在读取源帧…",
@@ -282,6 +283,12 @@
     ].join("|");
   }
 
+  function pageAlive(context) {
+    // 已销毁的页面或已换页的上下文都不再接受异步结果。
+    return Boolean(context) && !state.pageClosed
+      && pageKey() === context.page;
+  }
+
   function analysisState() {
     return {
       draftId: state.draftId || null,
@@ -305,6 +312,9 @@
     stopPlayback();
     const leavingEditor = state.step === "arena" || state.step === "review";
     if (leavingEditor) {
+      // 先把这个画布最后实际显示的帧写回原历史项，再切换到目标阶段；
+      // 连续播放时提交不写 history，这里补上，后退/刷新才不会回到旧帧。
+      rememberPosition();
       const token = ++state.navToken;
       const ok = await saveThen();
       if (token !== state.navToken) return false;
@@ -922,8 +932,13 @@
 
   function frameStillCurrent(context) {
     // 提交画面前同时校验请求代号与页面上下文，不只是请求代号。
-    return window.BLFrameView.frameStillCurrent(
-      context, state.imageToken, pageKey());
+    const api = window.BLFrameView;
+    if (api && typeof api.frameStillCurrent === "function") {
+      return api.frameStillCurrent(context, state.imageToken, pageKey());
+    }
+    // 旧缓存页未加载 frameview 时退回同一条判定，播放器不至于整页崩掉。
+    return Boolean(context) && context.ticket === state.imageToken
+      && context.page === pageKey();
   }
 
   function commitFrame(payload, context) {
@@ -1002,6 +1017,7 @@
   }
 
   function stopPlayback() {
+    const wasPlaying = state.playing;
     state.playToken += 1;
     state.playing = false;
     state.playLastTime = null;
@@ -1017,8 +1033,10 @@
     }
     // 停播同时废弃尚未显示的帧请求：稍后释出的旧响应不能回写。
     state.imageToken += 1;
-    if (Number.isInteger(state.shownFrame) && state.frame !== state.shownFrame) {
-      // 请求了但没显示的帧不算数：滑条、帧号与历史都回到实际画面。
+    if (wasPlaying && Number.isInteger(state.shownFrame)
+        && state.frame !== state.shownFrame) {
+      // 暂停时请求了但没显示的帧不算数：滑条、帧号与历史回到实际画面。
+      // 跳转（本来就没在播放）保留目标帧，否则滑条一松手就被旧帧顶回去。
       state.frame = state.shownFrame;
       el.frameRange.value = String(state.frame);
       el.frameNumber.value = String(state.frame);
@@ -2366,7 +2384,7 @@
           const live = currentVideo();
           const liveUnit = currentUnit();
           return Boolean(live && liveUnit && live.asset_id === video.asset_id &&
-            liveUnit.id === unit.id && pageKey() === context.page);
+            liveUnit.id === unit.id && pageAlive(context));
         },
         config: () => previewConfig(type),
         send: (config) => {
@@ -2398,8 +2416,8 @@
         return;
       }
       const data = result.data;
-      if (pageKey() !== context.page) {
-        // 已经离开复核页：旧响应不得确认，也不得把图挂到新页面。
+      if (!pageAlive(context)) {
+        // 已经离开或已销毁页面：旧响应不得确认，也不得把图挂到新页面。
         state.previewGate.invalidate();
         state.previewAwaiting = false;
         return;
@@ -2408,7 +2426,7 @@
       state.previewAwaiting = true;
       el.preview.onload = () => {
         state.previewAwaiting = false;
-        if (pageKey() !== context.page) {
+        if (!pageAlive(context)) {
           el.preview.hidden = true;
           return;
         }
@@ -2423,7 +2441,7 @@
       };
       el.preview.onerror = () => {
         state.previewAwaiting = false;
-        if (pageKey() !== context.page) {
+        if (!pageAlive(context)) {
           el.preview.hidden = true;
           return;
         }
@@ -2437,13 +2455,15 @@
       el.preview.hidden = false;
     } catch (error) {
       if (request) state.previewGate.fail(request);
+      // 页面已销毁或已换页时，失败提示也不写到新页面上。
+      if (state.pageClosed || pageKey() !== context.page) return;
       const reason = issueText(error, "预览失败");
       setPreviewNote({ tone: "error", text: reason });
       status(reason, "error");
     } finally {
       el.primary.disabled = false;
       el.secondary.disabled = false;
-      renderInspector();
+      if (!state.pageClosed) renderInspector();
     }
   }
 
@@ -2781,6 +2801,7 @@
 
     window.addEventListener("popstate", async (event) => {
       const target = event.state && event.state.analysis;
+      stopPlayback();
       const token = ++state.navToken;
       const ok = await saveThen();
       if (token !== state.navToken) return;
@@ -2837,6 +2858,7 @@
         status(lastSaveText("保存失败，仍留在当前页"), "error");
         return;
       }
+      rememberPosition();
       location.href = url.href;
     });
 
@@ -2911,6 +2933,10 @@
 
   // 页面销毁时停播并解除键盘监听，旧请求不再作用于新页。
   function teardownPage() {
+    state.pageClosed = true;
+    // 销毁时连同预览请求与确认一起废弃：稍后返回的 JSON/PNG 不能再确认。
+    state.previewGate.invalidate();
+    state.previewAwaiting = false;
     stopPlayback();
     document.removeEventListener("keydown", manualHotkeys);
   }
