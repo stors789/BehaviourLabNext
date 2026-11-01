@@ -1010,33 +1010,58 @@
       const number = Number(value);
       return Number.isFinite(number) ? number : null;
     };
-    if (mode === "global") return { window: null, error: null };
+    if (mode === "global") return { window: null, error: null, field: null };
     if (mode === "exact") {
       const start = read(source.start_s);
       const end = read(source.end_s);
       if (start === null || start < 0) {
-        return { window: null, error: "动物时间窗起点必须是非负秒数" };
+        return { window: null, error: "动物时间窗起点必须是非负秒数",
+                 field: "start_s" };
       }
       if (end === null || end <= start) {
-        return { window: null, error: "动物时间窗终点必须大于起点" };
+        return { window: null, error: "动物时间窗终点必须大于起点",
+                 field: "end_s" };
       }
-      return { window: { mode: "exact", start_s: start, end_s: end }, error: null };
+      return {
+        window: { mode: "exact", start_s: start, end_s: end },
+        error: null,
+        field: null,
+      };
     }
     if (mode === "relative") {
       const offset = read(source.offset_s);
       const duration = read(source.duration_s);
       if (offset === null) {
-        return { window: null, error: "首次检测后的偏移必须是数值（可为负）" };
+        return { window: null, error: "首次检测后的偏移必须是数值（可为负）",
+                 field: "offset_s" };
       }
       if (duration === null || duration <= 0) {
-        return { window: null, error: "持续时间必须是大于 0 的数值" };
+        return { window: null, error: "持续时间必须是大于 0 的数值",
+                 field: "duration_s" };
       }
       return {
         window: { mode: "relative", offset_s: offset, duration_s: duration },
         error: null,
+        field: null,
       };
     }
-    return { window: null, error: "未知的动物时间窗模式" };
+    return { window: null, error: "未知的动物时间窗模式", field: "mode" };
+  }
+
+  // 选择页勾选与草稿视频对齐：保留仍选中视频的完整配置（单位、几何、
+  // 参数、人工记录），新增视频按调用方给的初始化规则补在末尾。
+  function reconcileVideos(videos, selectedIds, assets, makeVideo) {
+    const list = Array.isArray(videos) ? videos : [];
+    const picked = new Set(selectedIds || []);
+    const kept = list.filter((video) => video && picked.has(video.asset_id));
+    const added = [];
+    (assets || []).forEach((asset) => {
+      if (!picked.has(asset.id)) return;
+      if (kept.some((video) => video.asset_id === asset.id)) return;
+      if (added.some((video) => video.asset_id === asset.id)) return;
+      added.push(makeVideo(asset));
+    });
+    return kept.concat(added);
   }
 
   // 从当前视频的单位列表里移除一只：只剩一只时不允许删除。
@@ -1077,6 +1102,7 @@
     stableStringify,
     normalizeWindow,
     assignWindow,
+    reconcileVideos,
     removeUnit,
     resolveStep,
     rotateGeometry,

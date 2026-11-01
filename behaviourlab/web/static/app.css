@@ -1369,7 +1369,9 @@ input[type="checkbox"] {
 
 /* -- 场地 / 检测工作台 ---------------------------------------------- */
 
-.work[data-step="arena"] {
+/* 场地、检测与人工复核同属视频中心工作台，占满视口同一套尺寸。 */
+.work[data-step="arena"],
+.work[data-step="review"] {
   height: calc(100vh - 60px);
   min-height: 620px;
   padding: 14px 20px 18px;
@@ -1743,6 +1745,17 @@ input[type="checkbox"] {
   color: var(--bad);
 }
 
+.field-error {
+  margin: 0;
+  color: var(--bad);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+input[aria-invalid="true"] {
+  border-color: var(--bad);
+}
+
 .manual-field {
   display: flex;
   flex-direction: column;
@@ -1939,7 +1952,8 @@ input[type="checkbox"] {
     overflow-x: auto;
   }
 
-  .work[data-step="arena"] {
+  .work[data-step="arena"],
+  .work[data-step="review"] {
     height: auto;
     min-height: 0;
     padding: 12px;

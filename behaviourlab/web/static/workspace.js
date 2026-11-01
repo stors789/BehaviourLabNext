@@ -57,10 +57,16 @@
     editCounter: 0,
     // 人工洞序列的编辑文本与格式错误按动物缓存，互不影响。
     manualCache: new Map(),
+    // 动物时间窗的未解决编辑按“视频+动物”保存：模式、原始文本与字段错误。
+    windowEdits: new Map(),
+    // 状态栏里人工格式错误与窗口错误的归属，用于只清理自己那条旧提示。
+    manualStatus: null,
+    windowStatus: null,
   };
 
   const el = {
     panels: Array.from(document.querySelectorAll("[data-panel]")),
+    topContext: document.querySelector(".top-context"),
     tasknav: document.querySelector("#tasknav"),
     assay: document.querySelector("#assay-select"),
     project: document.querySelector("#project-select"),
@@ -273,6 +279,59 @@
     return ["视频", "场地", "检测"];
   }
 
+  // 顶部上下文不依赖整页重载：新建草稿后立即换成实验名 + 任务导航，
+  // 切实验清掉草稿时再退回页面名。
+  function ensureTopContext() {
+    const wrap = el.topContext;
+    if (!wrap) return;
+    if (!state.draftId) {
+      if (!wrap.querySelector(".page-context")) {
+        wrap.innerHTML = "";
+        const line = document.createElement("p");
+        line.className = "page-context";
+        line.textContent = state.mode === "independent" ? "独立分析" : "添加项目分析";
+        wrap.append(line);
+      }
+      el.tasknav = null;
+      return;
+    }
+    let task = wrap.querySelector(".top-task");
+    if (!task) {
+      wrap.innerHTML = "";
+      task = document.createElement("div");
+      task.className = "top-task";
+      const assayNode = document.createElement("span");
+      assayNode.className = "top-assay";
+      const nav = document.createElement("nav");
+      nav.className = "tasknav";
+      nav.id = "tasknav";
+      nav.setAttribute("aria-label", "分析步骤");
+      ["视频", "场地", "检测"].forEach((label, index) => {
+        if (index) {
+          const sep = document.createElement("span");
+          sep.className = "tasknav-sep";
+          sep.setAttribute("aria-hidden", "true");
+          sep.textContent = "›";
+          nav.append(sep);
+        }
+        const link = document.createElement("a");
+        link.href = "#";
+        link.dataset.stepLink = "select";
+        link.textContent = label;
+        nav.append(link);
+      });
+      task.append(assayNode, nav);
+      wrap.append(task);
+    }
+    el.tasknav = task.querySelector("#tasknav");
+    const label = (state.catalog.find((item) => item.key === state.assay) || {}).label || "";
+    const assayNode = task.querySelector(".top-assay");
+    if (assayNode) {
+      assayNode.textContent = label;
+      assayNode.hidden = !label;
+    }
+  }
+
   // 任务导航的三段与真实阶段一致：选择与视频设置同属“视频”，
   // “场地”“检测”才进画布的两个视图。
   function tasknavEntries() {
@@ -338,18 +397,25 @@
       unit: state.unitIndex,
       // 记录实际显示过的帧；请求了但没显示出来的帧不写进历史。
       frame: Number.isInteger(state.shownFrame) ? state.shownFrame : state.frame,
+      // 视频设置页有自己的一份已显示源帧，与画布帧分开保存。
+      rangeFrame: Number.isInteger(state.rangeFrame) ? state.rangeFrame : 0,
       arenaView: state.view,
     };
   }
 
-  function rememberPosition() {
+  function rememberPosition(step, view) {
     // 立即写当前历史项：没有延迟回调，后退/前进时不会被旧页写回。
     if (!state.draftId || state.applyingHistory) return;
-    history.replaceState({ analysis: analysisState() }, "", location.href);
+    history.replaceState({ analysis: analysisState() }, "",
+      step ? stepUrl(step, view) : location.href);
   }
 
   async function goStep(step, options) {
     const opts = options || {};
+    // 未解决的窗口编辑不得被带进下一阶段；回视频/视频设置仍放行，
+    // 否则用户无法去修另一个视频的字段。
+    const advancing = step === "arena" || step === "review";
+    if (advancing && blockOnWindowError()) return false;
     stopPlayback();
     const leavingEditor = state.step === "arena" || state.step === "review";
     if (leavingEditor) {
@@ -427,7 +493,10 @@
       const box = document.createElement("input");
       box.type = "checkbox";
       box.checked = state.selected.has(asset.id);
-      box.disabled = Boolean(state.draft && state.draft.videos.some((v) => v.asset_id === asset.id));
+      // 草稿里的视频只在“当前仍选中”时锁定勾选；已移除的可以重新勾回来，
+      // 不给“移除后无法再选”的死角。
+      box.disabled = Boolean(state.draft && state.selected.has(asset.id) &&
+        state.draft.videos.some((v) => v.asset_id === asset.id));
       box.addEventListener("change", () => {
         if (box.checked) state.selected.add(asset.id);
         else state.selected.delete(asset.id);
@@ -536,6 +605,18 @@
     };
   }
 
+  // 新增视频沿用新建草稿时的初始化规则，不继承别的视频的几何或参数。
+  function newDraftVideo(asset) {
+    return {
+      asset_id: asset.id,
+      window: { start_s: 0, end_s: null },
+      orientation: 0,
+      fps_override: null,
+      sample_fps: null,
+      units: [newUnit("小鼠 1")],
+    };
+  }
+
   function selectionKey() {
     return [state.assay, state.projectId,
       Array.from(state.selected).sort().join(",")].join("|");
@@ -550,14 +631,7 @@
     if (state.draftRequest && state.draftRequest.key === key) {
       return state.draftRequest.promise;
     }
-    const videos = chosen.map((asset) => ({
-      asset_id: asset.id,
-      window: { start_s: 0, end_s: null },
-      orientation: 0,
-      fps_override: null,
-      sample_fps: null,
-      units: [newUnit("小鼠 1")],
-    }));
+    const videos = chosen.map(newDraftVideo);
     const promise = send("POST", "/api/drafts", {
       assay: state.assay || "tst",
       project_id: state.projectId || null,
@@ -581,6 +655,30 @@
     return promise;
   }
 
+  // 选择页的勾选必须与草稿实际分析集合一致：留下仍选中视频的单位、几何、
+  // 参数和人工记录，新增视频按初始化规则补上，移除只退出本草稿的选择。
+  function syncDraftVideos() {
+    const draft = state.draft;
+    if (!draft) return false;
+    const before = draft.videos || [];
+    const previous = before[state.videoIndex] || null;
+    const videos = window.BLCore.reconcileVideos(
+      before, state.selected, state.assets, newDraftVideo);
+    const changed = videos.length !== before.length ||
+      videos.some((video, index) => video !== before[index]);
+    if (!changed) return false;
+    draft.videos = videos;
+    if (videos.length) {
+      // 用同步前的视频对象定位，不能拿新数组的旧下标去猜。
+      const index = previous ? videos.indexOf(previous) : -1;
+      state.videoIndex = index >= 0 ? index : 0;
+      const units = videos[state.videoIndex].units || [];
+      if (state.unitIndex >= units.length) state.unitIndex = 0;
+    }
+    pruneManualCache();
+    return true;
+  }
+
   async function setupVideos() {
     if (!state.draftId) {
       const key = selectionKey();
@@ -597,7 +695,19 @@
         return;
       }
       if (!state.draftId) return;
+      ensureTopContext();
+      renderTasknav();
     }
+    if (state.draft && syncDraftVideos()) {
+      markDirty();
+      const saved = await saveThen();
+      if (!saved) {
+        status(lastSaveText("保存失败，选择未更新"), "error");
+        return;
+      }
+    }
+    ensureTopContext();
+    renderTasknav();
     await goStep("range", { replace: true });
   }
 
@@ -623,8 +733,13 @@
       button.addEventListener("click", () => {
         state.videoIndex = index;
         state.unitIndex = 0;
+        // 换视频等于换一套源帧：设置页与画布都回到第 0 帧。
         state.rangeFrame = 0;
+        state.frame = 0;
+        state.shownFrame = 0;
+        state.lastFrame = 0;
         renderRange();
+        rememberPosition();
       });
       el.rangeList.append(button);
     });
@@ -672,7 +787,7 @@
     const token = ++state.rangeToken;
     const target = Math.max(0, Math.min(state.lastFrame,
       Number.isInteger(index) ? index : 0));
-    state.rangeFrame = target;
+    // 请求目标只用于本次加载；state.rangeFrame 等图真正显示后再提交。
     if (el.rangeSlide) el.rangeSlide.value = String(target);
     if (el.rangeIndex) el.rangeIndex.value = String(target);
     if (el.rangeTime) {
@@ -700,6 +815,9 @@
           el.rangeTime.textContent = "第 " + (Number.isFinite(frame) ? frame : target) +
             " 帧 · " + timeText(time, 3) + " / " + timeText(videoDuration(), 1);
         }
+        // 只有这次请求仍有效且图已显示成功，才提交“已显示”的源帧与位置。
+        state.rangeFrame = Number.isFinite(frame) ? Math.round(frame) : target;
+        rememberPosition();
       };
       el.rangeImage.src = url;
     } catch (error) {
@@ -1363,6 +1481,9 @@
 
     const video = currentVideo();
     if (!video) return;
+    // 纯人工 Y 的记录/复核只看原始源帧：不叠自动 ROI、编辑手柄或检测结果。
+    // 几何与检测配置原样保留，切回自动仍会重新绘制。
+    if (state.recordMode) return;
     // 其他动物只是只读参照。
     video.units.forEach((unit, index) => {
       if (index === state.unitIndex) return;
@@ -2064,31 +2185,170 @@
   }
 
   function manualFormatError() {
-    // 提交的是整批视频/动物：任一动物的人工缓存有未解析错误都要拦下。
-    const units = [];
-    ((state.draft && state.draft.videos) || []).forEach((video) => {
-      (video.units || []).forEach((unit) => {
-        if (unit) units.push(unit);
-      });
-    });
-    const issue = window.BLCore.manualFormatIssue(units, (unit) =>
-      (unit.id ? manualCache().get(unit.id) : null));
-    if (!issue) return null;
-    const who = issue.unitName ? "「" + issue.unitName + "」" : "其他动物";
-    return who + issue.error + "；请回到该动物修正，或关闭其人工洞序列";
+    // 提交的是整批视频/动物：任一动物的人工缓存有未解析错误都要拦下，
+    // 并带上视频位置，两个视频同名动物时也能落到正确那一个。
+    const videos = (state.draft && state.draft.videos) || [];
+    for (let index = 0; index < videos.length; index += 1) {
+      const units = (videos[index].units || []).filter(Boolean);
+      const issue = window.BLCore.manualFormatIssue(units, (unit) =>
+        (unit.id ? manualCache().get(unit.id) : null));
+      if (!issue) continue;
+      const asset = assetById(videos[index].asset_id);
+      const videoLabel = asset && asset.name ? asset.name : "视频 " + (index + 1);
+      return {
+        message: "视频「" + videoLabel + "」·「" +
+          (issue.unitName || "未命名小鼠") + "」" + issue.error +
+          "；请回到该动物修正，或关闭其人工洞序列",
+        videoIndex: index,
+        unitId: issue.unitId,
+        unitName: issue.unitName,
+      };
+    }
+    return null;
+  }
+
+  // 未解决的动物时间窗编辑：提示具体字段并定位，返回 true 表示已拦截。
+  function blockOnWindowError() {
+    const issue = pendingWindowError();
+    if (!issue) return false;
+    status(issue.message, "error");
+    const video = state.draft.videos[issue.videoIndex] || {};
+    const unit = (video.units || [])[issue.unitIndex] || {};
+    state.windowStatus = {
+      key: (video.asset_id || "") + "|" + (unit.id || ""),
+      text: issue.message,
+    };
+    revealWindowError(issue);
+    return true;
+  }
+
+  // 切到出错的那个视频/动物，展开人工事件并聚焦原始非法文本。
+  function revealManualIssue(issue) {
+    const videos = (state.draft && state.draft.videos) || [];
+    for (let index = 0; index < videos.length; index += 1) {
+      const units = videos[index].units || [];
+      const unitIndex = units.findIndex((unit) => unit && unit.id === issue.unitId);
+      if (unitIndex < 0) continue;
+      stopPlayback();
+      state.videoIndex = index;
+      state.unitIndex = unitIndex;
+      state.stepKey = null;
+      ensureContext();
+      renderInspector();
+      loadFrame();
+      draw();
+      const area = el.inspectBody.querySelector("[data-manual-input]");
+      if (area) {
+        const fold = area.closest("details");
+        if (fold) fold.open = true;
+        area.focus();
+        const end = area.value.length;
+        area.setSelectionRange(end, end);
+      }
+      return true;
+    }
+    return false;
   }
 
   function pruneManualCache() {
-    if (!state.manualCache) return;
+    if (state.manualCache) {
+      const alive = new Set();
+      ((state.draft && state.draft.videos) || []).forEach((video) => {
+        (video.units || []).forEach((unit) => {
+          if (unit && unit.id) alive.add(unit.id);
+        });
+      });
+      Array.from(manualCache().keys()).forEach((key) => {
+        if (!alive.has(key)) manualCache().delete(key);
+      });
+    }
+    pruneWindowEdits();
+  }
+
+  // -- 动物时间窗的未解决编辑 -----------------------------------------
+  // 键按视频+动物：切视频、切动物、重渲染都保留原始非法或未填完的文本。
+  function windowEditKey(unit) {
+    const video = currentVideo();
+    return (video ? video.asset_id : "") + "|" + (unit && unit.id ? unit.id : "");
+  }
+
+  function windowEditOf(unit) {
+    if (!unit) return null;
+    return state.windowEdits.get(windowEditKey(unit)) || null;
+  }
+
+  function pruneWindowEdits() {
+    if (!state.windowEdits) return;
     const alive = new Set();
     ((state.draft && state.draft.videos) || []).forEach((video) => {
       (video.units || []).forEach((unit) => {
-        if (unit && unit.id) alive.add(unit.id);
+        if (unit) alive.add((video.asset_id || "") + "|" + (unit.id || ""));
       });
     });
-    Array.from(manualCache().keys()).forEach((key) => {
-      if (!alive.has(key)) manualCache().delete(key);
+    Array.from(state.windowEdits.keys()).forEach((key) => {
+      if (!alive.has(key)) state.windowEdits.delete(key);
     });
+  }
+
+  // 未解决的窗口编辑必须拦住推进/预览/校验/开始，不能静默用最后一次合法值。
+  function pendingWindowError() {
+    const videos = (state.draft && state.draft.videos) || [];
+    for (let v = 0; v < videos.length; v += 1) {
+      const units = videos[v].units || [];
+      for (let u = 0; u < units.length; u += 1) {
+        const unit = units[u];
+        if (!unit) continue;
+        const key = (videos[v].asset_id || "") + "|" + (unit.id || "");
+        const entry = state.windowEdits.get(key);
+        if (!entry || !entry.error) continue;
+        const asset = assetById(videos[v].asset_id);
+        const videoLabel = asset && asset.name ? asset.name : "视频 " + (v + 1);
+        return {
+          message: "视频「" + videoLabel + "」·「" + (unit.name || "小鼠 " + (u + 1)) +
+            "」动物时间窗：" + entry.error,
+          videoIndex: v,
+          unitIndex: u,
+          field: entry.field,
+        };
+      }
+    }
+    return null;
+  }
+
+  function revealWindowError(issue) {
+    if (!issue) return;
+    const video = state.draft && state.draft.videos[issue.videoIndex];
+    const unit = video && (video.units || [])[issue.unitIndex];
+    if (!unit) return;
+    const needStep = state.step !== "arena" || state.view !== "geometry";
+    const needUnit = state.videoIndex !== issue.videoIndex ||
+      state.unitIndex !== issue.unitIndex;
+    if (needStep || needUnit) {
+      stopPlayback();
+      state.videoIndex = issue.videoIndex;
+      state.unitIndex = issue.unitIndex;
+      state.stepKey = null;
+      if (needStep) {
+        // 字段在场地阶段的“实验设置”里：先切回该阶段再聚焦。
+        state.step = "arena";
+        state.view = "geometry";
+        root.dataset.step = "arena";
+        showPanel();
+        rememberPosition("arena", "geometry");
+      }
+      ensureContext();
+      renderTasknav();
+      renderInspector();
+      if (needUnit) loadFrame();
+      draw();
+    }
+    const input = el.inspectBody.querySelector(
+      '[data-window-field="' + (issue.field || "") + '"]');
+    if (input) {
+      const fold = input.closest("details");
+      if (fold) fold.open = true;
+      input.focus();
+    }
   }
 
   function appendManualEvents(body, unit) {
@@ -2118,7 +2378,14 @@
       if (!target.manual || typeof target.manual !== "object") target.manual = {};
       // 切换即改模式：关闭写 null，重新打开从空人工列表开始。
       target.manual.hole_visits = check.checked ? [] : null;
-      if (target.id) manualCache().delete(target.id);
+      if (target.id) {
+        manualCache().delete(target.id);
+        if (state.manualStatus && state.manualStatus.unitId === target.id &&
+            statusNode().textContent === state.manualStatus.text) {
+          state.manualStatus = null;
+          status("");
+        }
+      }
       invalidatePreview();
       markDirty();
       renderInspector();
@@ -2130,6 +2397,7 @@
       const area = document.createElement("textarea");
       area.rows = 4;
       area.className = "manual-visits";
+      area.dataset.manualInput = "1";
       area.placeholder = "视频秒, 洞号";
       const entry = manualText(unit);
       area.value = entry.text;
@@ -2148,6 +2416,7 @@
           cached.error = parsed.error;
           hint.textContent = parsed.error;
           hint.dataset.tone = "error";
+          state.manualStatus = { unitId: target.id, text: parsed.error };
           status(parsed.error, "error");
           invalidatePreview();
           return;
@@ -2155,6 +2424,12 @@
         cached.error = null;
         hint.textContent = "每行一条；按输入顺序计分，不自动排序。";
         delete hint.dataset.tone;
+        // 只清掉属于这只动物的那条旧格式错误提示，别动其他单位的未解决错误。
+        if (state.manualStatus && state.manualStatus.unitId === target.id &&
+            statusNode().textContent === state.manualStatus.text) {
+          state.manualStatus = null;
+          status("");
+        }
         if (!target.manual || typeof target.manual !== "object") target.manual = {};
         target.manual.hole_visits = parsed.entries;
         invalidatePreview();
@@ -2659,16 +2934,19 @@
     return label;
   }
 
-  // 动物时间窗：跟随视频 / 指定时间 / 首次检测后。只写当前 unit.window，
-  // relative 的首次检测由服务端算，界面不复算也不写默认合法值。
+  // 动物时间窗：跟随视频 / 指定时间 / 首次检测后。编辑一开始就撤销旧确认；
+  // 非法或未填完的值按“视频+动物”原样保留并阻断推进，不用最后一次合法值顶替。
   function animalWindowField(unit, options) {
     const opts = options || {};
     const allowRelative = opts.allowRelative !== false;
     const video = currentVideo();
     const duration = videoDuration();
+    const edit = windowEditOf(unit);
     const current = unit.window && typeof unit.window === "object" ? unit.window : null;
-    const mode = current && (current.mode === "exact" ||
-      (current.mode === "relative" && allowRelative)) ? current.mode : "global";
+    const mode = edit ? edit.mode
+      : (current && (current.mode === "exact" ||
+        (current.mode === "relative" && allowRelative)) ? current.mode : "global");
+    const raw = edit ? edit.values : null;
 
     const wrap = document.createElement("div");
     wrap.className = "field-stack window-field";
@@ -2702,60 +2980,104 @@
       });
       return row;
     };
-    const numberInput = (value, minimum) => {
+    const numberInput = (field, fallback, minimum) => {
       const input = document.createElement("input");
       input.type = "number";
       input.step = "any";
+      input.dataset.windowField = field;
       // 只有真正有下限的字段才设 min：相对偏移允许负值。
       if (minimum != null) input.min = String(minimum);
+      const value = raw && raw[field] != null ? raw[field] : fallback;
       input.value = value == null ? "" : String(value);
       return input;
     };
 
-    const startInput = numberInput(
+    const startInput = numberInput("start_s",
       current && current.start_s != null ? current.start_s
         : (video && video.window && video.window.start_s) || 0, 0);
-    const endInput = numberInput(
+    const endInput = numberInput("end_s",
       current && current.end_s != null ? current.end_s : duration, 0);
-    const offsetInput = numberInput(current && current.offset_s != null
-      ? current.offset_s : 0, null);
-    const spanInput = numberInput(current && current.duration_s != null
-      ? current.duration_s : 2, 0);
+    const offsetInput = numberInput("offset_s",
+      current && current.offset_s != null ? current.offset_s : 0, null);
+    const spanInput = numberInput("duration_s",
+      current && current.duration_s != null ? current.duration_s : 2, 0);
 
     const exactRow = fieldRow([["起点（秒）", startInput], ["终点（秒）", endInput]]);
     const relativeRow = fieldRow([["偏移（秒）", offsetInput], ["持续时间（秒）", spanInput]]);
-    wrap.append(exactRow, relativeRow);
+    const errorNode = document.createElement("p");
+    errorNode.className = "field-error";
+    errorNode.hidden = true;
+    wrap.append(exactRow, relativeRow, errorNode);
 
+    const inputs = {
+      start_s: startInput, end_s: endInput,
+      offset_s: offsetInput, duration_s: spanInput,
+    };
+    const markField = (field) => {
+      Object.keys(inputs).forEach((key) => {
+        if (field && key === field) inputs[key].setAttribute("aria-invalid", "true");
+        else inputs[key].removeAttribute("aria-invalid");
+      });
+    };
     const updateRows = () => {
       exactRow.hidden = select.value !== "exact";
       relativeRow.hidden = select.value !== "relative";
     };
     updateRows();
+    if (edit && edit.error) {
+      markField(edit.field);
+      errorNode.hidden = false;
+      errorNode.textContent = edit.error;
+    }
 
-    const apply = () => {
+    const commit = () => {
       const target = currentUnit();
       if (!target) return false;
-      const values = select.value === "exact"
-        ? { start_s: startInput.value, end_s: endInput.value }
-        : { offset_s: offsetInput.value, duration_s: spanInput.value };
-      const result = window.BLCore.assignWindow(target, select.value, values);
+      const values = {
+        start_s: startInput.value,
+        end_s: endInput.value,
+        offset_s: offsetInput.value,
+        duration_s: spanInput.value,
+      };
+      const result = window.BLCore.assignWindow(null, select.value, values);
+      // 用户一改，上一份确认就不再对应当前界面。
+      invalidatePreview();
       if (result.error) {
+        state.windowEdits.set(windowEditKey(target),
+          { mode: select.value, values, error: result.error, field: result.field });
+        markField(result.field);
+        errorNode.hidden = false;
+        errorNode.textContent = result.error;
+        state.windowStatus = { key: windowEditKey(target), text: result.error };
         status(result.error, "error");
         return false;
       }
-      invalidatePreview();
+      const fixedKey = windowEditKey(target);
+      if (state.windowStatus && state.windowStatus.key === fixedKey &&
+          statusNode().textContent === state.windowStatus.text) {
+        // 只清掉这一处还没解决的提示，别的单位的问题保留。
+        status("");
+      }
+      if (state.windowStatus && state.windowStatus.key === fixedKey) {
+        state.windowStatus = null;
+      }
+      state.windowEdits.delete(fixedKey);
+      target.window = result.window;
+      markField(null);
+      errorNode.hidden = true;
+      errorNode.textContent = "";
       markDirty();
-      updateRows();
       return true;
     };
 
     select.addEventListener("change", () => {
       // 校验失败时保留刚选的模式与已输入值，只报字段原因，不静默回退。
       updateRows();
-      apply();
+      commit();
     });
     [startInput, endInput, offsetInput, spanInput].forEach((input) => {
-      input.addEventListener("change", () => { apply(); });
+      input.addEventListener("input", () => { commit(); });
+      input.addEventListener("change", () => { commit(); });
     });
     return wrap;
   }
@@ -2860,10 +3182,13 @@
 
   async function runPreview(kind) {
     if (!state.draftId) return;
+    if (blockOnWindowError()) return;
     const formatError = manualFormatError();
     if (formatError) {
       // 非法人工格式不落盘、不预览：先修好输入。
-      status(formatError, "error");
+      status(formatError.message, "error");
+      state.manualStatus = { unitId: formatError.unitId, text: formatError.message };
+      revealManualIssue(formatError);
       return;
     }
     // 只接受显式的阶段名；事件对象等非字符串一律按当前阶段处理。
@@ -2978,9 +3303,12 @@
   }
 
   async function primaryAction() {
+    if (blockOnWindowError()) return;
     const formatError = manualFormatError();
     if (formatError) {
-      status(formatError, "error");
+      status(formatError.message, "error");
+      state.manualStatus = { unitId: formatError.unitId, text: formatError.message };
+      revealManualIssue(formatError);
       return;
     }
     if (state.step === "review") {
@@ -3022,6 +3350,7 @@
 
   async function startAnalysis() {
     if (!state.draftId) return;
+    if (blockOnWindowError()) return;
     stopPlayback();
     const kind = state.step === "review" ? "behavior"
       : (state.previewKind === "behavior" ? "behavior" : "detection");
@@ -3187,6 +3516,8 @@
           history.replaceState({ step: "select" }, "", stepUrl("select"));
           status("已切换实验，需重新创建草稿", "warn");
         }
+        ensureTopContext();
+        renderTasknav();
         loadAssets();
       });
     }
@@ -3329,8 +3660,8 @@
       runPreview(state.step === "review" || state.previewKind === "behavior" ? "behavior" : "detection");
     });
 
-    if (el.tasknav) {
-      el.tasknav.addEventListener("click", (event) => {
+    if (el.topContext) {
+      el.topContext.addEventListener("click", (event) => {
         const link = event.target.closest("[data-step-link]");
         if (!link) return;
         event.preventDefault();
@@ -3378,7 +3709,8 @@
         state.unitIndex = Number.isInteger(target.unit) ? target.unit : 0;
         state.frame = Number.isInteger(target.frame) ? target.frame : 0;
         state.shownFrame = state.frame;
-        state.rangeFrame = state.frame;
+        state.rangeFrame = Number.isInteger(target.rangeFrame)
+          ? target.rangeFrame : state.frame;
         state.view = target.arenaView === "detection" ? "detection" : "geometry";
         showPanel();
         renderTasknav();
@@ -3558,6 +3890,8 @@
       }
     }
     registerFieldLabels();
+    ensureTopContext();
+    renderTasknav();
     const entry = history.state && history.state.analysis;
     if (entry && entry.draftId === state.draftId) {
       state.videoIndex = Number.isInteger(entry.video) ? entry.video : 0;
@@ -3565,7 +3899,8 @@
       state.frame = Number.isInteger(entry.frame) ? entry.frame : 0;
       // 恢复阶段还没显示新帧前，历史就按这个目标帧继续。
       state.shownFrame = state.frame;
-      state.rangeFrame = state.frame;
+      state.rangeFrame = Number.isInteger(entry.rangeFrame)
+        ? entry.rangeFrame : state.frame;
       if (state.step === "arena") {
         state.view = entry.arenaView === "detection" ? "detection" : "geometry";
       }

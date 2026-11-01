@@ -161,7 +161,8 @@ def test_shell_markup_context_and_tasknav():
     assert '{ step: "arena", view: "geometry" }' in entries
     assert '{ step: "arena", view: "detection" }' in entries
     assert '"range"' not in entries
-    click = WORKSPACE.split('el.tasknav.addEventListener("click"', 1)[1].split(
+    # 导航可能在建草稿后才生成，点击走 .top-context 委托。
+    click = WORKSPACE.split('el.topContext.addEventListener("click"', 1)[1].split(
         "\n      });", 1)[0]
     assert 'declared === "detection" ? "detection" : "geometry"' in click
     # 没有草稿时留在选视频，有草稿但没视频时回视频设置：都不落到空画布。
@@ -245,12 +246,16 @@ def test_animal_window_entry_wiring():
             in field)
     # 偏移可为负：只有起止与持续时间带下限。
     assert "if (minimum != null) input.min = String(minimum);" in field
-    assert "offsetInput = numberInput(current && current.offset_s" in field
+    assert 'offsetInput = numberInput("offset_s"' in field
 
-    # 只写当前动物，改值使旧预览确认失效。
-    assert "assignWindow(target, select.value, values)" in field
+    # 先校验再写：非法值只进未解决编辑表，合法值才落到当前动物。
+    assert "assignWindow(null, select.value, values)" in field
+    assert "state.windowEdits.set(windowEditKey(target)" in field
+    assert "target.window = result.window;" in field
+    # 编辑一开始旧确认就作废。
     assert "invalidatePreview();" in field
-    assert "target.window = " not in field
+    # 字段带定位标记，错误可聚焦到具体输入。
+    assert 'input.dataset.windowField = field;' in field
 
 
 def test_unit_delete_entry_scope():
@@ -315,41 +320,6 @@ def test_analyze_page_renders_shell_with_draft(client, store, tmp_path):
     assert "{{" not in page
 
 
-def test_analyze_page_renders_shell_with_draft(client, store, tmp_path):
-    """有草稿时顶栏同时给出实验名与任务导航，工作台元素齐全。"""
-
-    source = tmp_path / "vid.mp4"
-    source.write_bytes(b"placeholder")
-    asset = store.create_asset(
-        name="小鼠A.mp4", path=str(source), project_id=None,
-        metadata={"width": 640, "height": 480, "duration_s": 4.0,
-                  "fps": 25.0, "frame_count": 100})
-    draft = store.create_draft("tst", videos=[{
-        "asset_id": asset["id"],
-        "window": {"start_s": 0.0, "end_s": 4.0},
-        "orientation": 0, "fps_override": None, "sample_fps": None,
-        "units": [{"id": "a" * 32, "name": "小鼠 1", "animal_id": None,
-                   "window": None, "geometry": {}, "options": {},
-                   "detection": {}, "manual": None}],
-    }])
-
-    page = client.get(
-        f"/analyze?mode=independent&draft_id={draft['id']}&step=range"
-    ).get_data(as_text=True)
-    assert 'class="top-assay"' in page
-    assert "TST" in page or "强迫" in page
-    assert 'id="tasknav"' in page
-    assert 'data-step="range"' in page
-    assert 'id="range-list"' in page
-    assert 'id="range-frame-range"' in page
-    assert 'id="range-status"' in page
-    assert 'id="window-start"' in page and 'id="window-end"' in page
-    assert 'id="setup-videos"' in page
-    assert 'id="preview-note"' in page
-    assert 'id="toolhead-title"' in page
-    assert "{{" not in page
-
-
 def test_geometry_tools_only_in_geometry_stage():
     """撤销/重画只在可编辑的场地阶段出现，检测阶段不摆几何工具。"""
 
@@ -362,10 +332,135 @@ def test_geometry_tools_only_in_geometry_stage():
     detection = WORKSPACE.split("function renderDetectionInspector", 1)[1].split(
         "\n  }", 1)[0]
     assert "syncTools();" in detection
-    # 工具头固定高度：标题与按钮同处一条 40px 行，不因按钮出现改变布局。
-    head = (ROOT / "behaviourlab/web/templates/analyze.html").read_text(
+
+
+# -- 界面补齐四组有限修正 -------------------------------------------------
+
+def body_of(name: str, end: str = "\n  }") -> str:
+    assert name in WORKSPACE, name
+    return WORKSPACE.split(name, 1)[1].split(end, 1)[0]
+
+
+def test_selection_syncs_into_current_draft():
+    """选择页的勾选必须落到当前草稿，并在建草稿后立刻更新顶部上下文。"""
+
+    sync = body_of("function syncDraftVideos()")
+    assert "window.BLCore.reconcileVideos(" in sync
+    assert "newDraftVideo" in sync
+    assert "pruneManualCache();" in sync
+
+    setup = body_of("async function setupVideos()")
+    assert "syncDraftVideos()" in setup
+    # 保存失败停在选择页，显示实际原因，不谎称成功。
+    assert "保存失败，选择未更新" in setup
+    assert setup.index("saveThen()") < setup.index('goStep("range"')
+    # 新建草稿后立即换成实验名 + 任务导航，不等整页刷新。
+    assert "ensureTopContext();" in setup
+    assert "renderTasknav();" in setup
+
+    top = body_of("function ensureTopContext()")
+    assert 'nav.id = "tasknav"' in top
+    assert "top-assay" in top
+
+    # 草稿里的视频移出选择后可以重新勾回，不留“移除即锁死”的死角。
+    assets_block = body_of("function renderAssets()")
+    assert "state.draft && state.selected.has(asset.id) &&" in assets_block
+
+    # 草稿里的视频移出选择后可以重新勾回，不留“移除即锁死”的死角。
+    assets_block = body_of("function renderAssets()")
+    assert "state.draft && state.selected.has(asset.id) &&" in assets_block
+
+
+def test_selection_reconcile_keeps_existing_config():
+    """纯函数层：移除只退出本草稿，新增按初始化规则补齐。"""
+
+    core = (ROOT / "behaviourlab/web/static/editor-core.js").read_text(
         encoding="utf-8")
-    toolhead = head.split('class="toolhead" id="toolhead"', 1)[1].split("</div>\n        <div class=\"canvaswrap\"", 1)[0]
-    assert 'id="toolhead-title"' in toolhead
-    assert 'id="tool-undo"' in toolhead and 'id="tool-redraw"' in toolhead
-    assert 'id="tool-finish"' in toolhead
+    block = core.split("function reconcileVideos(", 1)[1].split("\n  }", 1)[0]
+    assert "const kept = list.filter" in block
+    assert "kept.concat(added)" in block
+    assert "added.some" in block
+
+
+def test_video_setup_frame_history_is_committed_after_display():
+    analysis = body_of("function analysisState()")
+    assert "rangeFrame:" in analysis
+
+    load = body_of("async function loadRangeFrame(video, index)")
+    assert 'response.headers.get("X-Source-Frame")' in load
+    # 只有本次请求仍有效、且图已显示成功才写“已显示”的源帧与历史。
+    onload = load.split("el.rangeImage.onload = () => {", 1)[1].split("};", 1)[0]
+    assert "token !== state.rangeToken" in onload
+    assert onload.index("token !== state.rangeToken") < onload.index("state.rangeFrame =")
+    assert onload.index("state.rangeFrame =") < onload.index("rememberPosition();")
+
+    row = WORKSPACE.split('button.addEventListener("click", () => {', 1)[1].split(
+        "\n      });", 1)[0]
+    assert "state.rangeFrame = 0;" in row
+    assert "state.frame = 0;" in row
+    assert "rememberPosition();" in row
+
+    pop = WORKSPACE.split('window.addEventListener("popstate"', 1)[1].split(
+        "\n    });", 1)[0]
+    assert "target.rangeFrame" in pop
+    boot = WORKSPACE.split(
+        "const entry = history.state && history.state.analysis;", 1)[1].split(
+        "await loadAssets()", 1)[0]
+    assert "entry.rangeFrame" in boot
+
+
+def test_invalid_window_revokes_confirmation_and_blocks_advance():
+    field = body_of("function animalWindowField(unit, options)")
+    assert "windowEditOf(unit)" in field
+    commit = field.split("const commit = () => {", 1)[1].split("\n    };", 1)[0]
+    # 先校验：非法值只进未解决编辑表，不写 unit.window。
+    assert commit.index("if (result.error)") < commit.index("target.window = result.window;")
+    assert "state.windowEdits.set(windowEditKey(target)" in commit
+    assert "invalidatePreview();" in commit
+    assert "aria-invalid" in field
+    assert "input.dataset.windowField = field;" in field
+
+    for entry in ("async function runPreview(kind)",
+                  "async function primaryAction()",
+                  "async function startAnalysis()"):
+        assert "blockOnWindowError()" in body_of(entry), entry
+    go = body_of("async function goStep(step, options)")
+    assert "advancing && blockOnWindowError()" in go
+
+    pending = body_of("function pendingWindowError()")
+    assert "entry.error" in pending and "videoIndex" in pending
+    reveal = body_of("function revealWindowError(issue)")
+    assert 'state.step = "arena";' in reveal
+
+
+def test_manual_error_locates_video_and_clears_only_own_text():
+    manual = body_of("function manualFormatError()")
+    assert "视频「" in manual
+    assert "assetById(" in manual
+    assert "videoIndex: index" in manual
+
+    reveal = body_of("function revealManualIssue(issue)")
+    assert "state.videoIndex = index;" in reveal
+    assert "state.unitIndex = unitIndex;" in reveal
+    assert "fold.open = true;" in reveal
+    assert "area.focus();" in reveal
+
+    handler = WORKSPACE.split('area.addEventListener("input", () => {', 1)[1].split(
+        "\n      });", 1)[0]
+    # 只清掉这只动物自己那条旧格式错误。
+    assert "statusNode().textContent === state.manualStatus.text" in handler
+    assert "state.manualStatus = { unitId: target.id, text: parsed.error };" in handler
+
+
+def test_manual_y_keeps_raw_frame_and_review_uses_workspace_height():
+    draw = WORKSPACE.split("\n  function draw() {", 1)[1].split("\n  }", 1)[0]
+    guard = "if (state.recordMode) return;"
+    assert guard in draw
+    # 原始画面：早退发生在任何几何叠画之前。
+    assert draw.index(guard) < draw.index('drawShape(item.shape, "#8ed7c7"')
+    assert draw.index(guard) < draw.index('drawShape(shape, "#ffd26f", 2.8, true)')
+
+    review = rule('.work[data-step="review"]')
+    assert "height: calc(100vh - 60px)" in review
+    assert "min-height: 620px" in review
+    assert "padding: 14px 20px 18px" in review

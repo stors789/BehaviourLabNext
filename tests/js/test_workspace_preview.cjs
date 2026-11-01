@@ -12,6 +12,7 @@ const {
   mwmLines,
   normalizeWindow,
   assignWindow,
+  reconcileVideos,
   removeUnit,
 } = require("../../behaviourlab/web/static/editor-core.js");
 
@@ -506,15 +507,15 @@ function animalWindowValues() {
   const second = { id: "b", window: { mode: "exact", start_s: 1, end_s: 2 } };
 
   assert.deepStrictEqual(assignWindow(first, "global", {}),
-    { window: null, error: null });
+    { window: null, error: null, field: null });
   assert.strictEqual(first.window, null);
 
   assert.deepStrictEqual(assignWindow(first, "exact", { start_s: "1.5", end_s: "4" }),
-    { window: { mode: "exact", start_s: 1.5, end_s: 4 }, error: null });
+    { window: { mode: "exact", start_s: 1.5, end_s: 4 }, error: null, field: null });
   assert.deepStrictEqual(first.window, { mode: "exact", start_s: 1.5, end_s: 4 });
-  assert.ok(normalizeWindow("exact", { start_s: "", end_s: 4 }).error);
-  assert.ok(normalizeWindow("exact", { start_s: 4, end_s: 4 }).error);
-  assert.ok(normalizeWindow("exact", { start_s: -1, end_s: 4 }).error);
+  assert.strictEqual(normalizeWindow("exact", { start_s: "", end_s: 4 }).field, "start_s");
+  assert.strictEqual(normalizeWindow("exact", { start_s: 4, end_s: 4 }).field, "end_s");
+  assert.strictEqual(normalizeWindow("exact", { start_s: -1, end_s: 4 }).field, "start_s");
 
   // 负偏移合法，持续时间必须为正：-1 / 3 不得被控件改成 0。
   const relative = assignWindow(first, "relative",
@@ -523,16 +524,64 @@ function animalWindowValues() {
     { mode: "relative", offset_s: -1, duration_s: 3 });
   assert.strictEqual(first.window.offset_s, -1);
   assert.strictEqual(first.window.duration_s, 3);
-  assert.ok(normalizeWindow("relative", { offset_s: "", duration_s: 3 }).error);
-  assert.ok(normalizeWindow("relative", { offset_s: 0, duration_s: 0 }).error);
+  assert.strictEqual(normalizeWindow("relative",
+    { offset_s: "", duration_s: 3 }).field, "offset_s");
+  // 固定例：relative offset=-1、duration 改成 0；exact 起点清空。
+  const badRelative = normalizeWindow("relative", { offset_s: -1, duration_s: 0 });
+  assert.strictEqual(badRelative.window, null, "非法值不能当合法窗口");
+  assert.strictEqual(badRelative.field, "duration_s");
+  const blankStart = normalizeWindow("exact", { start_s: "", end_s: 4 });
+  assert.strictEqual(blankStart.window, null, "清空的起点不能回填成 0");
+  assert.strictEqual(blankStart.field, "start_s");
+  assert.strictEqual(normalizeWindow("relative",
+    { offset_s: 0, duration_s: 0 }).field, "duration_s");
   assert.deepStrictEqual(normalizeWindow("relative", { offset_s: 0, duration_s: 2 }),
-    { window: { mode: "relative", offset_s: 0, duration_s: 2 }, error: null });
+    { window: { mode: "relative", offset_s: 0, duration_s: 2 }, error: null,
+      field: null });
 
   // 校验失败不写任何动物；写入只影响传入的那一只。
   assert.ok(assignWindow(first, "exact", { start_s: 3, end_s: 1 }).error);
   assert.deepStrictEqual(first.window,
     { mode: "relative", offset_s: -1, duration_s: 3 });
   assert.deepStrictEqual(second.window, { mode: "exact", start_s: 1, end_s: 2 });
+}
+
+// 选择页勾选与草稿对齐：移除只退出本草稿的选择，保留原视频的完整配置；
+// 新增视频按初始化规则补在末尾，不覆盖已有单位/几何/参数/人工记录。
+function selectionSync() {
+  const videoA = {
+    asset_id: "a",
+    window: { start_s: 1, end_s: 2 },
+    units: [{ id: "u1", geometry: { arena: { type: "quad" } },
+              options: { bin_seconds: 30 }, manual: { hole_visits: [] } }],
+  };
+  const videoB = { asset_id: "b", units: [] };
+  const assets = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  const make = (asset) => ({
+    asset_id: asset.id,
+    window: { start_s: 0, end_s: null },
+    units: [{ id: "new-" + asset.id }],
+  });
+
+  // 已有 A、B，移除 B：只留 A，且 A 的单位/几何/参数/人工记录原样保留。
+  const removed = reconcileVideos([videoA, videoB], ["a"], assets, make);
+  assert.deepStrictEqual(removed.map((video) => video.asset_id), ["a"]);
+  assert.strictEqual(removed[0], videoA);
+  assert.deepStrictEqual(removed[0].units[0].geometry, { arena: { type: "quad" } });
+  assert.deepStrictEqual(removed[0].units[0].manual, { hole_visits: [] });
+
+  // 已有 A，再选 B：A 不动，B 按初始化规则补在末尾。
+  const added = reconcileVideos([videoA], ["a", "b"], assets, make);
+  assert.deepStrictEqual(added.map((video) => video.asset_id), ["a", "b"]);
+  assert.strictEqual(added[0], videoA);
+  assert.deepStrictEqual(added[1].window, { start_s: 0, end_s: null });
+  assert.deepStrictEqual(added[1].units, [{ id: "new-b" }]);
+
+  // 重复选择不重复添加；空选择得到空列表。
+  assert.deepStrictEqual(
+    reconcileVideos([videoA], ["a", "a", "b"], assets, make)
+      .map((video) => video.asset_id), ["a", "b"]);
+  assert.deepStrictEqual(reconcileVideos([videoA, videoB], [], assets, make), []);
 }
 
 // 删除当前小鼠：只去掉这一只，剩一只时没有删除入口，输入数组不被改写。
@@ -566,6 +615,7 @@ function unitRemoval() {
   barnesScopeNotes();
   manualVisitsParsing();
   animalWindowValues();
+  selectionSync();
   unitRemoval();
   previewActionContract();
   await saveFailureCarriesFieldReason();
