@@ -90,6 +90,7 @@
     frameNumber: document.querySelector("#frame-number"),
     timeLabel: document.querySelector("#time-label"),
     statusbar: document.querySelector("#statusbar"),
+    toolhead: document.querySelector("#toolhead"),
     inspectBody: document.querySelector("#inspect-body"),
     primary: document.querySelector("#primary-action"),
     secondary: document.querySelector("#secondary-action"),
@@ -903,6 +904,7 @@
       el.frameRange.value = String(state.frame);
       el.frameNumber.value = String(state.frame);
       el.timeLabel.textContent = frameLabel(state.frameInfo);
+      syncRecordHint();
       state.loading = false;
       status("");
       // 连续播放每帧不改 history；只有暂停/跳转/记录才记当前帧。
@@ -916,6 +918,7 @@
       state.frameInfo = null;
       state.canvasMessage = "源帧不可读";
       el.timeLabel.textContent = frameLabel(null);
+      syncRecordHint();
       draw();
       const asset = assetById(video.asset_id);
       status("源帧不可读：" + (asset ? asset.name : "视频"), "error");
@@ -932,6 +935,14 @@
   function syncPlayButton() {
     const button = playbackButton();
     if (button) button.textContent = state.playing ? "暂停" : "播放";
+  }
+
+  function syncRecordHint() {
+    const hint = document.querySelector("[data-record-hint]");
+    if (!hint) return;
+    hint.textContent = state.frameInfo
+      ? "空格播放/暂停 · A/B/C 记录当前帧"
+      : "正在读取源帧，稍后可记录";
   }
 
   function stopPlayback() {
@@ -1295,6 +1306,8 @@
     if (!unit) return;
     const body = el.inspectBody;
     body.innerHTML = "";
+    // 人工记录/复核没有几何绘制，撤销与重画在这里不适用。
+    if (el.toolhead) el.toolhead.hidden = Boolean(state.recordMode);
     if (state.recordMode) {
       if (state.step === "review") renderReviewInspector(body, unit);
       else renderRecordInspector(body, unit);
@@ -2167,9 +2180,7 @@
     body.append(armRow());
     const hint = document.createElement("p");
     hint.className = "muted";
-    hint.textContent = state.frameInfo
-      ? "空格播放/暂停 · A/B/C 记录当前帧"
-      : "正在读取源帧，稍后可记录";
+    hint.dataset.recordHint = "1";
     body.append(hint);
     body.append(manualList(unit, false));
     const actions = document.createElement("div");
@@ -2192,6 +2203,7 @@
     el.secondary.hidden = true;
     el.preview.hidden = true;
     syncPlayButton();
+    syncRecordHint();
   }
 
   function renderReviewInspector(body, unit) {
