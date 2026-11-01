@@ -600,13 +600,17 @@
     {% elif assay == "ymaze" %}
     {% set unit_events = (entry.result.events or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
     {% set unit_candidates = ((entry.result.tables or {}).get("candidates") or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
+    {% set unit_meta = ((entry.result.metadata or {}).get("units") or {}).get(s.unit_id) or {} %}
+    {% set manual = unit_meta.mode == "manual" %}
     <div class="metric-grid">
       {{ metric("总入臂次数", s.total_arm_entries if s.total_arm_entries is not none else "—", "次") }}
       {{ metric("交替次数", s.alternation_count if s.alternation_count is not none else "—", "次") }}
       {{ metric("交替机会数", s.alternation_opportunities if s.alternation_opportunities is not none else "—", "次") }}
       {{ metric("自发交替率", num(s.alternation_percent, 1), "%") }}
+      {% if not manual %}
       {{ metric("中心区时间", num(s.center_time_s, 3), "s") }}
       {{ metric("A 臂时间", num(s.arm_A_time_s, 3), "s") }}
+      {% endif %}
     </div>
 
     <details class="fold">
@@ -617,7 +621,11 @@
             <tr><th>入臂</th><td>
               A {{ s.arm_A_entries }} 次 · B {{ s.arm_B_entries }} 次 · C {{ s.arm_C_entries }} 次 ·
               总计 {{ s.total_arm_entries }} 次 ·
+              {% if manual %}
+              来源 人工记录（事件时间为源帧绝对秒）
+              {% else %}
               来源 自动追踪（入臂确认 {{ num(s.entry_confirm_s, 2) }} s）
+              {% endif %}
             </td></tr>
             <tr><th>交替</th><td>
               {{ s.alternation_count }} 次 / 机会 {{ s.alternation_opportunities }} 次 ·
@@ -625,10 +633,15 @@
               序列 {% if unit_events %}{{ unit_events | map(attribute="target") | join("-") }}{% else %}—{% endif %}
             </td></tr>
             <tr><th>时间</th><td>
+              {% if manual %}
+              单位窗 {{ num(s.total_time_s, 3) }} s
+              {% else %}
               窗口 {{ num(s.total_time_s, 3) }} s · 检测 {{ num(s.observed_time_s, 3) }} s ·
               缺失 {{ num(s.missing_time_s, 3) }} s · 区外 {{ num(s.unknown_time_s, 3) }} s
               （{{ s.detected_frames }} / {{ s.window_frames }} 行）
+              {% endif %}
             </td></tr>
+            {% if not manual %}
             <tr><th>区域时间</th><td>
               中心 {{ num(s.center_time_s, 3) }} / A {{ num(s.arm_A_time_s, 3) }} /
               B {{ num(s.arm_B_time_s, 3) }} / C {{ num(s.arm_C_time_s, 3) }} s
@@ -642,7 +655,11 @@
             <tr><th>估计尺度</th><td>
               {{ num(s.cm_per_px_est, 3) }} cm_estimated/px（手画臂长/臂宽的比例平均，非透视校正）
             </td></tr>
+            {% endif %}
             <tr><th>参数</th><td>
+              {% if manual %}
+              箱宽 {{ num(s.bin_seconds, 2) }} s
+              {% else %}
               臂长 {{ num(s.arm_length_cm, 2) }} cm · 臂宽 {{ num(s.arm_width_cm, 2) }} cm ·
               入臂深度比例 {{ num(s.entry_depth_ratio, 2) }} ·
               预测最大偏差 {{ num(s.max_jump_cm, 2) }} cm ·
@@ -652,6 +669,7 @@
               须经中心 {{ "是" if s.require_center else "否" }} ·
               移动阈值 {{ num(s.movement_threshold_cm_s, 2) }} cm/s ·
               箱宽 {{ num(s.bin_seconds, 2) }} s
+              {% endif %}
             </td></tr>
             <tr><th>窗口</th><td>
               {% if s.analysis_window_start_s is not none %}
@@ -664,10 +682,24 @@
         {% if unit_bins %}
         <table class="simple-table">
           <thead>
+            {% if manual %}
+            <tr><th>箱</th><th>时间（s）</th><th>入臂</th><th>交替</th><th>机会</th><th>交替率</th></tr>
+            {% else %}
             <tr><th>箱</th><th>时间（s）</th><th>中心</th><th>A</th><th>B</th><th>C</th><th>入臂</th><th>交替</th><th>交替率</th><th>距离</th></tr>
+            {% endif %}
           </thead>
           <tbody>
             {% for b in unit_bins %}
+            {% if manual %}
+            <tr>
+              <td>{{ b.bin_index }}</td>
+              <td>{{ num(b.start_s, 2) }}–{{ num(b.end_s, 2) }}</td>
+              <td>{{ b.total_arm_entries }}</td>
+              <td>{{ b.alternation_count }}</td>
+              <td>{{ b.alternation_opportunities }}</td>
+              <td>{{ num(b.alternation_percent, 1) }} %</td>
+            </tr>
+            {% else %}
             <tr>
               <td>{{ b.bin_index }}</td>
               <td>{{ num(b.start_s, 2) }}–{{ num(b.end_s, 2) }}</td>
@@ -680,6 +712,7 @@
               <td>{{ num(b.alternation_percent, 1) }} %</td>
               <td>{{ num(b.distance_cm, 2) }}</td>
             </tr>
+            {% endif %}
             {% endfor %}
           </tbody>
         </table>
@@ -747,7 +780,11 @@
       </div>
     </details>
     {% endif %}
+    {% if manual %}
+    <p class="muted">入臂时间取源帧绝对秒，按逐帧目视确认记录；不输出位置、占用、距离或速度。</p>
+    {% else %}
     <p class="muted">入臂由候选关联与真实时间确认自动判定；距离与速度为手画尺寸的估计值（cm_estimated）。</p>
+    {% endif %}
 
     {% else %}
     <div class="metric-grid">

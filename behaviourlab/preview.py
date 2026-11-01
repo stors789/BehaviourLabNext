@@ -399,8 +399,7 @@ def create_preview(
 
     behavior = None
     module = experiments.get(draft["assay"])
-    if (kind == "behavior" and not manual_scope
-            and hasattr(module, "preview_analysis")):
+    if kind == "behavior" and hasattr(module, "preview_analysis"):
         core_unit = {
             "id": unit.get("id"),
             "name": unit.get("name"),
@@ -410,6 +409,7 @@ def create_preview(
             "options": resolve_options(draft["assay"], draft=draft,
                                        video=video, unit=unit),
             "detection": settings,
+            "manual": unit.get("manual"),
         }
         try:
             behavior = module.preview_analysis(
@@ -493,9 +493,13 @@ def create_preview(
     if missing:
         warnings.append("尚未绘制：" + "、".join(missing))
 
-    if behavior is not None and behavior["rows"] == 0:
+    manual_behavior = bool(behavior) and behavior.get("manual") is True
+    if manual_behavior and behavior.get("events") == 0:
+        warnings.append("分析时间窗内没有人工入臂记录。")
+    elif behavior is not None and not manual_behavior and behavior["rows"] == 0:
         warnings.append("预览范围内没有可用的行为数据。")
-    elif behavior is not None and behavior["window_start_s"] is None:
+    elif (behavior is not None and not manual_behavior
+            and behavior["window_start_s"] is None):
         warnings.append("未检测到动物，无法确定相对时间窗。")
 
     return {

@@ -132,6 +132,9 @@ def _report_markdown(job: Mapping[str, Any], result: Any,
         metrics = [{"key": "center_percent", "label": "中心占比", "unit": "%"},
                    {"key": "total_distance_cm", "label": "场地内路程", "unit": "cm"},
                    {"key": "mean_speed_cm_s", "label": "平均速度", "unit": "cm/s"}]
+    # 只保留当前结果真正有的指标列（人工 Y 没有占用与速度）。
+    metrics = [item for item in metrics
+               if any(item["key"] in row for row in result.summary)]
     headers = ["动物"] + [
         item["label"] + (f"（{item['unit']}）" if item.get("unit") else "")
         for item in metrics]

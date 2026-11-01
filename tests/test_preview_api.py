@@ -46,6 +46,28 @@ class RangeSource:
         return iter(self._frames)
 
 
+class ClockSource:
+    """人工预览时钟源：不给图像，只提供真实时间覆盖。"""
+
+    def __init__(self, path, *, start_s=0.0, end_s=None, **kwargs):
+        from behaviourlab.schema import Frame
+
+        self._frames = []
+        begin = float(start_s or 0.0)
+        stop = float(end_s if end_s is not None else begin + 1.0)
+        step = 0.1
+        count = max(1, int(round((stop - begin) / step)))
+        for index in range(count):
+            moment = round(begin + index * step, 6)
+            self._frames.append(Frame(
+                image=None, index=index, time_s=moment, dt_s=step,
+                elapsed_s=moment - begin, analysis_fps=1.0 / step,
+                interval_start_s=moment, interval_end_s=moment + step))
+
+    def iter_frames(self):
+        return iter(self._frames)
+
+
 def seed(store, tmp_path, geometry=None, duration=10.0, *, assay="oft",
          window=None, unit_options=None, manual=None):
     if geometry is None:
@@ -180,8 +202,11 @@ def test_manual_y_keeps_configured_window(client, store, tmp_path, monkeypatch):
         store, tmp_path, assay="ymaze", duration=60.0,
         window={"start_s": 1.0, "end_s": 20.0},
         unit_options={"mode": "manual"},
-        manual={"events": [{"time_s": 2.5, "frame": 75, "kind": "event"}]},
+        manual={"mode": "manual",
+                "entries": [{"time_s": 2.5, "arm": "A"}]},
     )
+    monkeypatch.setattr(preview.media, "VideoSource", ClockSource)
+    monkeypatch.setattr(preview.media, "VideoSource", ClockSource)
     monkeypatch.setattr(preview.media, "read_frame_at_time",
                         lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
 
@@ -275,8 +300,11 @@ def test_manual_y_keeps_configured_window(client, store, tmp_path, monkeypatch):
         store, tmp_path, assay="ymaze", duration=60.0,
         window={"start_s": 1.0, "end_s": 20.0},
         unit_options={"mode": "manual"},
-        manual={"events": [{"time_s": 2.5, "frame": 75, "kind": "event"}]},
+        manual={"mode": "manual",
+                "entries": [{"time_s": 2.5, "arm": "A"}]},
     )
+    monkeypatch.setattr(preview.media, "VideoSource", ClockSource)
+    monkeypatch.setattr(preview.media, "VideoSource", ClockSource)
     monkeypatch.setattr(preview.media, "read_frame_at_time",
                         lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
 
@@ -416,8 +444,11 @@ def test_manual_y_previews_without_detection_region(client, store, tmp_path,
         geometry={},
         window={"start_s": 1.0, "end_s": 20.0},
         unit_options={"mode": "manual"},
-        manual={"events": [{"time_s": 2.5, "frame": 75, "kind": "event"}]},
+        manual={"mode": "manual",
+                "entries": [{"time_s": 2.5, "arm": "A"}]},
     )
+    monkeypatch.setattr(preview.media, "VideoSource", ClockSource)
+    monkeypatch.setattr(preview.media, "VideoSource", ClockSource)
     monkeypatch.setattr(preview.media, "read_frame_at_time",
                         lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
 
@@ -757,39 +788,18 @@ def test_preview_keeps_unit_evidence_between_requests(client, store, tmp_path,
     assert abs(recovered["center"][0] - 38.5) <= 1.0
 
 
-def test_manual_records_without_mode_use_manual_path(client, store, tmp_path,
+def test_manual_y_mode_field_drives_manual_path(client, store, tmp_path,
                                                      monkeypatch):
     asset, draft = seed(
         store, tmp_path, assay="ymaze", duration=60.0,
         geometry={},
         window={"start_s": 1.0, "end_s": 20.0},
         unit_options={},
-        manual={"events": [{"time_s": 2.5, "frame": 75, "kind": "event"}]},
+        manual={"mode": "manual",
+                "entries": [{"time_s": 2.5, "arm": "A"}]},
     )
-    monkeypatch.setattr(preview.media, "read_frame_at_time",
-                        lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
-
-    response = client.post(
-        f"/api/drafts/{draft['id']}/preview",
-        json={"asset_id": asset["id"], "unit_id": "a" * 32,
-              "time_s": 2.99997, "kind": "behavior"},
-    )
-    assert response.status_code == 201, response.get_json()
-    data = response.get_json()["data"]
-    assert data["preview_scope"]["mode"] == "configured"
-    assert data["summary"]["manual_preserved"] is True
-    assert data["summary"]["detection_available"] is False
-
-
-def test_manual_records_without_mode_use_manual_path(client, store, tmp_path,
-                                                     monkeypatch):
-    asset, draft = seed(
-        store, tmp_path, assay="ymaze", duration=60.0,
-        geometry={},
-        window={"start_s": 1.0, "end_s": 20.0},
-        unit_options={},
-        manual={"events": [{"time_s": 2.5, "frame": 75, "kind": "event"}]},
-    )
+    monkeypatch.setattr(preview.media, "VideoSource", ClockSource)
+    monkeypatch.setattr(preview.media, "VideoSource", ClockSource)
     monkeypatch.setattr(preview.media, "read_frame_at_time",
                         lambda *args, **kwargs: make_frame(index=90, time_s=2.99997))
 

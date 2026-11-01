@@ -15,7 +15,7 @@ import numpy as np
 
 from .. import detection, geometry as geo, media, timeline
 from ..schema import AnalysisResult, Detection, ValidationError, is_number
-from .base import ExperimentNotImplemented, geometry_field, metric, parameter
+from .base import geometry_field, metric, parameter
 
 KEY = "ymaze"
 
@@ -1054,34 +1054,298 @@ def capture(context: Any, units: Sequence[Mapping[str, Any]]) -> dict:
     return captured
 
 
+def is_manual_unit(unit: Mapping[str, Any]) -> bool:
+    """专用人工 Y 的判定：只有 unit.manual.mode == "manual" 才算。"""
+
+    manual = unit.get("manual")
+    return isinstance(manual, Mapping) and manual.get("mode") == "manual"
+
+
+def validate_manual(unit: Mapping[str, Any], *,
+                    complete: bool = False) -> list[dict]:
+    """人工 Y：只校验时间箱、单位窗与有序非空入臂记录。
+
+    几何、自动臂尺寸/追踪参数与检测参数在人工模式不参与运行，因此不校验。
+    """
+
+    issues: list[dict] = []
+    options = unit.get("options") or {}
+    if isinstance(options, Mapping) and "bin_seconds" in options:
+        width = _finite(options.get("bin_seconds"))
+        if width is None:
+            issues.append({"field": "options.bin_seconds",
+                           "message": "必须是有限数值"})
+        elif width <= 0:
+            issues.append({"field": "options.bin_seconds",
+                           "message": "必须大于 0"})
+
+    window = unit.get("window")
+    if isinstance(window, Mapping) and (window.get("mode") or "global") == "relative":
+        issues.append({"field": "window.mode",
+                       "message": "人工 Y 只支持跟随视频或绝对窗口"})
+
+    manual = unit.get("manual")
+    entries = manual.get("entries") if isinstance(manual, Mapping) else None
+    if not isinstance(entries, list):
+        issues.append({"field": "manual.entries", "message": "必须是数组"})
+        return issues
+    if not entries:
+        # 清空后仍可保存草稿，开始分析时再要求至少一条。
+        if complete:
+            issues.append({"field": "manual.entries",
+                           "message": "至少需要一条入臂记录"})
+        return issues
+
+    previous: float | None = None
+    for index, entry in enumerate(entries):
+        prefix = f"manual.entries[{index}]"
+        if not isinstance(entry, Mapping):
+            issues.append({"field": prefix, "message": "必须是对象"})
+            continue
+        raw = entry.get("time_s")
+        if isinstance(raw, bool) or not is_number(raw) \
+                or not math.isfinite(float(raw)):
+            issues.append({"field": f"{prefix}.time_s",
+                           "message": "必须是有限数值"})
+            continue
+        moment = float(raw)
+        if moment < 0:
+            issues.append({"field": f"{prefix}.time_s", "message": "必须 ≥ 0"})
+        if previous is not None and moment <= previous:
+            issues.append({"field": f"{prefix}.time_s",
+                           "message": "入臂时间必须晚于上一条记录"})
+        previous = moment
+        if entry.get("arm") not in ARM_KEYS:
+            issues.append({"field": f"{prefix}.arm",
+                           "message": "必须是 A、B 或 C"})
+    return issues
+
+
+def _manual_entries(unit: Mapping[str, Any]) -> list[dict]:
+    manual = unit.get("manual")
+    raw = manual.get("entries") if isinstance(manual, Mapping) else None
+    entries: list[dict] = []
+    for item in raw or []:
+        if not isinstance(item, Mapping):
+            continue
+        moment = _finite(item.get("time_s"))
+        arm = item.get("arm")
+        if moment is None or arm not in ARM_KEYS:
+            continue
+        entries.append({"time_s": moment, "arm": arm})
+    return entries
+
+
+def _manual_bins(unit: Mapping[str, Any], window: timeline.Window,
+                 events: Sequence[Mapping[str, Any]],
+                 width: float) -> list[dict]:
+    """人工分箱：相对单位窗从 0 起，机会按全序列判定后入箱。"""
+
+    if not window.known or window.duration_s <= 0:
+        return []
+    origin = float(window.start_s)
+    duration = window.duration_s
+    count = max(1, int(math.ceil((duration - 1e-12) / width)))
+    buckets = [{"entries": {key: 0 for key in ARM_KEYS},
+                "alternation": 0, "opportunities": 0}
+               for _ in range(count)]
+    for event in events:
+        index = int(math.floor((float(event["time_s"]) - origin) / width
+                               + 1e-9))
+        if not 0 <= index < count:
+            continue
+        bucket = buckets[index]
+        target = event.get("target")
+        if target in bucket["entries"]:
+            bucket["entries"][target] += 1
+        if event.get("alternation_opportunity"):
+            bucket["opportunities"] += 1
+        if event.get("alternation"):
+            bucket["alternation"] += 1
+
+    bins: list[dict] = []
+    for index, bucket in enumerate(buckets):
+        start = index * width
+        end = min(start + width, duration)
+        total = sum(bucket["entries"].values())
+        bins.append({
+            "unit_id": unit.get("id"),
+            "unit_name": unit.get("name"),
+            "bin_index": index + 1,
+            "start_s": start,
+            "end_s": end,
+            "duration_s": end - start,
+            "total_arm_entries": total,
+            "arm_A_entries": bucket["entries"]["A"],
+            "arm_B_entries": bucket["entries"]["B"],
+            "arm_C_entries": bucket["entries"]["C"],
+            "alternation_count": bucket["alternation"],
+            "alternation_opportunities": bucket["opportunities"],
+            "alternation_percent": _percent(bucket["alternation"],
+                                            bucket["opportunities"]),
+        })
+    return bins
+
+
+def _manual_facts(unit: Mapping[str, Any],
+                  window: timeline.Window) -> dict:
+    """人工入臂：只用已记录事件，不产生位置、占用、距离或速度。"""
+
+    options = unit.get("options") or {}
+    width = _finite(options.get("bin_seconds"))
+    if width is None:
+        width = float(DEFAULTS["bin_seconds"])
+    entries = _manual_entries(unit)
+    kept: list[dict] = []
+    if window.known:
+        low, high = float(window.start_s), float(window.end_s)
+        kept = [entry for entry in entries if low <= entry["time_s"] < high]
+
+    events: list[dict] = []
+    sequence: list[str] = []
+    counts = {key: 0 for key in ARM_KEYS}
+    alternation = opportunities = 0
+    for index, entry in enumerate(kept, start=1):
+        arm = entry["arm"]
+        sequence.append(arm)
+        recent = sequence[-3:]
+        opportunity = index >= 3
+        is_alternation = opportunity and len(set(recent)) == 3
+        counts[arm] += 1
+        if opportunity:
+            opportunities += 1
+        if is_alternation:
+            alternation += 1
+        events.append({
+            "event_id": f"{unit.get('id')}:arm_entry:{index}",
+            "unit_id": unit.get("id"),
+            "unit_name": unit.get("name"),
+            "kind": "arm_entry",
+            "time_s": entry["time_s"],
+            "confirmed_s": entry["time_s"],
+            "target": arm,
+            "source": "manual",
+            "entry_index": index,
+            "recent_sequence": "-".join(recent),
+            "alternation_opportunity": opportunity,
+            "alternation": is_alternation,
+        })
+
+    total = len(kept)
+    duration = window.duration_s if window.known else 0.0
+    summary = {
+        "unit_id": unit.get("id"),
+        "unit_name": unit.get("name"),
+        "mode": KEY,
+        "analysis_window_start_s": window.start_s if window.known else None,
+        "analysis_window_end_s": window.end_s if window.known else None,
+        "total_time_s": duration,
+        "total_arm_entries": total,
+        "alternation_count": alternation,
+        "alternation_opportunities": opportunities,
+        "alternation_percent": _percent(alternation, opportunities),
+        "arm_A_entries": counts["A"],
+        "arm_B_entries": counts["B"],
+        "arm_C_entries": counts["C"],
+        "bin_seconds": width,
+    }
+    warning = None
+    if window.known and total == 0:
+        warning = "分析时间窗内没有人工入臂记录"
+    elif not window.known:
+        warning = ("未检测到动物，无法确定相对时间窗："
+                   + str(unit.get("name") or unit.get("id")))
+    metadata = {
+        "mode": "manual",
+        "event_time": "video absolute seconds",
+        "position_available": False,
+        "tracking_reliable": False,
+    }
+    return {"events": events,
+            "bins": _manual_bins(unit, window, events, width),
+            "summary": summary, "metadata": metadata, "warning": warning}
+
+
+def _source_for(context: Any):
+    """分析/预览共用的源；预览没有解码源时按任务配置构造。"""
+
+    source = context.source
+    if source is not None:
+        return source
+    job = context.job
+    asset = job.get("asset") or {}
+    metadata = asset.get("metadata") or {}
+    window = job.get("window") or {}
+    return media.VideoSource(
+        asset.get("path"),
+        start_s=float(window.get("start_s") or 0.0),
+        end_s=window.get("end_s"),
+        orientation=int(job.get("orientation", 0) or 0),
+        fps_override=job.get("fps_override"),
+        sample_fps=job.get("sample_fps"),
+        source_fps=metadata.get("fps"),
+        decode_images=True,
+    )
+
+
+def _decode_clock(context: Any) -> list[dict]:
+    """纯人工：完整解码源帧只为取真实时钟与覆盖，不创建检测器。"""
+
+    rows: list[dict] = []
+    for frame in _source_for(context).iter_frames():
+        if context.cancelled():
+            raise ValidationError("分析已取消", "job")
+        rows.append({
+            "unit_id": "",
+            "frame": frame.index,
+            "time_s": frame.time_s,
+            "source_interval_start_s": frame.interval_start_s,
+            "source_interval_end_s": frame.interval_end_s,
+            "interval_start_s": frame.interval_start_s,
+            "interval_end_s": frame.interval_end_s,
+            "dt_s": max(0.0, float(frame.interval_end_s)
+                        - float(frame.interval_start_s)),
+        })
+    return rows
+
+
 def analyze(context: Any) -> AnalysisResult:
     job = context.job
     units = list(job.get("units") or [])
     if not units:
         raise ValidationError("草稿还没有小鼠", "units")
-    for unit in units:
-        options = unit.get("options") or {}
-        if (options.get("mode") or "auto") == "manual":
-            # 人工 Y 的播放器与记录流程在后续块接入；这里不伪造自动结果。
-            raise ExperimentNotImplemented("ymaze", "Y 迷宫人工记录")
-        issues = validate_unit(options, unit.get("geometry") or {},
-                               complete=True)
+    manual_units = [unit for unit in units if is_manual_unit(unit)]
+    auto_units = [unit for unit in units if not is_manual_unit(unit)]
+    for unit in auto_units:
+        issues = validate_unit(unit.get("options") or {},
+                               unit.get("geometry") or {}, complete=True)
+        if issues:
+            raise ValidationError(issues[0]["message"], issues[0]["field"])
+    for unit in manual_units:
+        issues = validate_manual(unit, complete=True)
         if issues:
             raise ValidationError(issues[0]["message"], issues[0]["field"])
 
-    captured = capture(context, units)
+    # 纯人工不创建检测器、不读背景；混合时只把自动单位交给检测。
+    captured = capture(context, auto_units) if auto_units else {}
     if context.cancelled():
         raise ValidationError("分析已取消", "job")
     asset = job.get("asset") or {}
     metadata = asset.get("metadata") or {}
-    all_rows = [row for facts in captured.values() for row in facts["rows"]]
+    if captured:
+        clock_rows = [row for facts in captured.values()
+                      for row in facts["rows"]]
+    elif manual_units:
+        clock_rows = _decode_clock(context)
+    else:
+        clock_rows = []
     video_window = timeline.resolve_video_window(
-        job.get("window"), all_rows, metadata.get("duration_s"))
+        job.get("window"), clock_rows, metadata.get("duration_s"))
     first_seen = {
         unit["id"]: timeline.first_seen_in_window(
             KEY, captured[unit["id"]]["rows"], video_window,
             unit.get("geometry") or {})
-        for unit in units
+        for unit in auto_units
     }
 
     observations: list[dict] = []
@@ -1094,6 +1358,17 @@ def analyze(context: Any) -> AnalysisResult:
     for unit in units:
         if context.cancelled():
             raise ValidationError("分析已取消", "job")
+        if is_manual_unit(unit):
+            window = timeline.resolve_unit_window(unit.get("window"),
+                                                  video_window, None)
+            facts = _manual_facts(unit, window)
+            summary.append(facts["summary"])
+            events.extend(facts["events"])
+            bins.extend(facts["bins"])
+            unit_metadata[unit["id"]] = facts["metadata"]
+            if facts["warning"]:
+                warnings.append(facts["warning"])
+            continue
         facts = process_unit(unit, captured[unit["id"]], video_window,
                              first_seen[unit["id"]])
         observations.extend(facts["rows"])
@@ -1117,14 +1392,68 @@ def analyze(context: Any) -> AnalysisResult:
     )
 
 
+def _manual_preview(*, asset: Mapping[str, Any], video: Mapping[str, Any],
+                    unit: Mapping[str, Any], start_s: float,
+                    end_s: float) -> dict:
+    """纯人工预览：只迭代源时钟，不创建检测器也不解码画面。"""
+
+    metadata = asset.get("metadata") or {}
+    source = media.VideoSource(
+        asset.get("path"),
+        start_s=float(start_s),
+        end_s=float(end_s),
+        orientation=int(video.get("orientation", 0) or 0),
+        fps_override=video.get("fps_override"),
+        sample_fps=video.get("sample_fps"),
+        source_fps=metadata.get("fps"),
+        decode_images=False,
+    )
+    rows = [{"source_interval_end_s": frame.interval_end_s}
+            for frame in source.iter_frames()]
+    video_window = timeline.resolve_video_window(
+        {"start_s": float(start_s), "end_s": float(end_s)}, rows,
+        metadata.get("duration_s"))
+    window = timeline.resolve_unit_window(unit.get("window"), video_window,
+                                          None)
+    facts = _manual_facts(unit, window)
+    summary = facts["summary"]
+    return {
+        "mode": KEY,
+        "manual": True,
+        "start_s": float(start_s),
+        "end_s": float(end_s),
+        "window_start_s": summary["analysis_window_start_s"],
+        "window_end_s": summary["analysis_window_end_s"],
+        "total_time_s": summary["total_time_s"],
+        "total_arm_entries": summary["total_arm_entries"],
+        "arm_A_entries": summary["arm_A_entries"],
+        "arm_B_entries": summary["arm_B_entries"],
+        "arm_C_entries": summary["arm_C_entries"],
+        "alternation_count": summary["alternation_count"],
+        "alternation_opportunities": summary["alternation_opportunities"],
+        "alternation_percent": summary["alternation_percent"],
+        "bin_seconds": summary["bin_seconds"],
+        "rows": 0,
+        "events": len(facts["events"]),
+        "bins": len(facts["bins"]),
+    }
+
+
 def preview_analysis(*, asset: Mapping[str, Any], video: Mapping[str, Any],
                      unit: Mapping[str, Any], start_s: float,
                      end_s: float, time_s: float | None = None) -> dict:
-    """行为预览：对实际片段跑同一捕获→处理核心，返回片段汇总。"""
+    """行为预览：人工只走时钟；自动仍跑同一捕获→处理核心。"""
 
     from ..schema import AnalysisContext, new_id
 
     options = unit.get("options") or {}
+    if is_manual_unit(unit):
+        issues = validate_manual(unit, complete=True)
+        if issues:
+            raise ValidationError(issues[0]["message"], issues[0]["field"])
+        return _manual_preview(asset=asset, video=video, unit=unit,
+                               start_s=start_s, end_s=end_s)
+
     issues = validate_unit(options, unit.get("geometry") or {}, complete=True)
     if issues:
         raise ValidationError(issues[0]["message"], issues[0]["field"])
@@ -1195,9 +1524,10 @@ def validate(job: Any) -> list[dict]:
     issues: list[dict] = []
     for unit in job.get("units") or []:
         prefix = f"units[{unit.get('id')}]"
-        for issue in validate_unit(unit.get("options") or {},
-                                   unit.get("geometry") or {},
-                                   complete=True):
+        found = (validate_manual(unit, complete=True) if is_manual_unit(unit)
+                 else validate_unit(unit.get("options") or {},
+                                    unit.get("geometry") or {}, complete=True))
+        for issue in found:
             entry = dict(issue)
             entry["field"] = f"{prefix}.{entry['field']}"
             issues.append(entry)

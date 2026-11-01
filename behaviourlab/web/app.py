@@ -662,9 +662,9 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         draft = _require_draft(draft_id)
         return success({"issues": validate_draft(draft, complete=True)})
 
-    @app.post("/api/drafts/<draft_id>/analyze")
-    def analyze_draft(draft_id: str):
-        draft = _require_draft(draft_id)
+    def _run_draft(draft: dict):
+        """校验通过才创建并执行任务；返回 run_id 与每个任务的结果。"""
+
         issues = validate_draft(draft, complete=True)
         if issues:
             raise ApiError("草稿未通过校验", 400, issues)
@@ -703,6 +703,21 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
                 entry["error"] = outcome.get("error")
             jobs.append(entry)
         return success({"run_id": run_id, "jobs": jobs}, 201)
+
+    @app.post("/api/drafts/<draft_id>/analyze")
+    def analyze_draft(draft_id: str):
+        return _run_draft(_require_draft(draft_id))
+
+    @app.post("/api/jobs")
+    def create_job():
+        """工作台提交入口：先校验草稿，再创建并执行任务。"""
+
+        body = _json_body()
+        draft_id = body.get("draft_id")
+        if not is_valid_id(draft_id):
+            raise ApiError("草稿 ID 无效", 400,
+                           [{"field": "draft_id", "message": "ID 无效"}])
+        return _run_draft(_require_draft(draft_id))
 
     @app.post("/api/drafts/<draft_id>/preview")
     def create_preview(draft_id: str):

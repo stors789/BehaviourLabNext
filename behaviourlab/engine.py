@@ -418,25 +418,40 @@ def validate_draft(draft: Mapping[str, Any], *,
             for field in ("geometry", "options", "detection"):
                 if not isinstance(unit.get(field, {}), Mapping):
                     issues.append({"field": f"{unit_prefix}.{field}", "message": "必须是对象"})
-            checker = (getattr(experiments.get(assay), "validate_unit", None)
-                       if experiments.exists(assay) else None)
-            if checker is not None:
-                layers = (draft.get("options"), video.get("options"),
-                          unit.get("options"))
-                provided = {key for layer in layers if isinstance(layer, Mapping)
-                            for key in layer}
-                merged = resolve_options(assay, draft=draft, video=video,
-                                         unit=unit)
-                for issue in checker(merged, unit.get("geometry") or {}, provided,
-                                     complete=complete):
-                    entry = dict(issue)
-                    field = issue.get("field")
-                    entry["field"] = (f"{unit_prefix}.{field}" if field
-                                      else unit_prefix)
-                    issues.append(entry)
-            if isinstance(unit.get("detection"), Mapping):
-                issues.extend(validate_detection(unit["detection"],
-                                                 f"{unit_prefix}.detection"))
+            # 专用人工 Y 只消费 bin_seconds 与记录：几何、自动参数与检测
+            # 参数都不参与运行，交给模块的人工校验，不在这里要求。
+            manual_y = assay == "ymaze" and isinstance(unit.get("manual"), Mapping) \
+                and unit["manual"].get("mode") == "manual"
+            if manual_y:
+                manual_checker = getattr(experiments.get(assay),
+                                         "validate_manual", None)
+                if manual_checker is not None:
+                    for issue in manual_checker(unit, complete=complete):
+                        entry = dict(issue)
+                        field = issue.get("field")
+                        entry["field"] = (f"{unit_prefix}.{field}" if field
+                                          else unit_prefix)
+                        issues.append(entry)
+            else:
+                checker = (getattr(experiments.get(assay), "validate_unit", None)
+                           if experiments.exists(assay) else None)
+                if checker is not None:
+                    layers = (draft.get("options"), video.get("options"),
+                              unit.get("options"))
+                    provided = {key for layer in layers if isinstance(layer, Mapping)
+                                for key in layer}
+                    merged = resolve_options(assay, draft=draft, video=video,
+                                             unit=unit)
+                    for issue in checker(merged, unit.get("geometry") or {}, provided,
+                                         complete=complete):
+                        entry = dict(issue)
+                        field = issue.get("field")
+                        entry["field"] = (f"{unit_prefix}.{field}" if field
+                                          else unit_prefix)
+                        issues.append(entry)
+                if isinstance(unit.get("detection"), Mapping):
+                    issues.extend(validate_detection(unit["detection"],
+                                                     f"{unit_prefix}.detection"))
             manual = unit.get("manual")
             if manual is not None and not isinstance(manual, Mapping):
                 issues.append({"field": f"{unit_prefix}.manual", "message": "必须是对象或 null"})

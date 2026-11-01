@@ -44,6 +44,12 @@
     positionTimer: null,
     applyingHistory: false,
     draftRequest: null,
+    playing: false,
+    playToken: 0,
+    playTimer: null,
+    playLastTime: null,
+    rate: 1,
+    editCounter: 0,
   };
 
   const el = {
@@ -173,6 +179,8 @@
   }
 
   function invalidatePreview() {
+    // 只有影响分析内容的改变才推进编辑代号：折叠/输出开关不使预览失效。
+    state.editCounter += 1;
     state.previewGate.invalidate();
     state.previewAwaiting = false;
     if (el.preview) {
@@ -286,6 +294,7 @@
 
   async function goStep(step, options) {
     const opts = options || {};
+    stopPlayback();
     const leavingEditor = state.step === "arena" || state.step === "review";
     if (leavingEditor) {
       const token = ++state.navToken;
@@ -703,9 +712,53 @@
   function isManualMode() {
     if (state.assay !== "ymaze") return false;
     const unit = currentUnit();
+    return Boolean(unit && unit.manual && unit.manual.mode === "manual");
+  }
+
+  // -- 人工 Y：记录容器与时间显示 -------------------------------------
+  function manualOf(unit) {
+    if (!unit) return null;
+    if (!unit.manual || typeof unit.manual !== "object") return null;
+    if (!Array.isArray(unit.manual.entries)) return null;
+    return unit.manual;
+  }
+
+  function ensureManual(unit) {
+    if (!unit.manual || typeof unit.manual !== "object") {
+      unit.manual = { mode: "manual", entries: [] };
+    }
+    if (!Array.isArray(unit.manual.entries)) unit.manual.entries = [];
+    unit.manual.mode = "manual";
+    return unit.manual;
+  }
+
+  function timeText(seconds, digits) {
+    if (!Number.isFinite(seconds) || seconds < 0) {
+      return digits === 3 ? "--:--.---" : "--:--.-";
+    }
+    const minutes = Math.floor(seconds / 60);
+    const rest = seconds - minutes * 60;
+    const width = digits === 3 ? 6 : 4;
+    return String(minutes).padStart(2, "0") + ":" +
+      rest.toFixed(digits).padStart(width, "0");
+  }
+
+  function videoDuration() {
     const video = currentVideo();
-    const options = Object.assign({}, (video && video.options) || {}, (unit && unit.options) || {});
-    return options.mode === "manual";
+    const asset = video ? assetById(video.asset_id) : null;
+    const meta = (asset && asset.metadata) || {};
+    const declared = Number(meta.duration_s);
+    if (Number.isFinite(declared) && declared > 0) return declared;
+    const fps = (video && video.fps_override) || Number(meta.fps) || 25;
+    return (state.lastFrame + 1) / fps;
+  }
+
+  function frameLabel(info) {
+    const total = timeText(videoDuration(), 1);
+    if (!info || !Number.isFinite(info.time)) {
+      return "第 — 帧 · --:--.--- / " + total;
+    }
+    return "第 " + info.frame + " 帧 · " + timeText(info.time, 3) + " / " + total;
   }
 
   function assaySpec() {
@@ -807,11 +860,19 @@
   }
 
   // -- 源帧 -----------------------------------------------------------
-  async function loadFrame() {
+  async function loadFrame(index) {
     const video = currentVideo();
-    if (!video) return;
+    if (!video) return null;
+    if (Number.isInteger(index)) {
+      state.frame = Math.max(0, Math.min(state.lastFrame, index));
+      el.frameRange.value = String(state.frame);
+      el.frameNumber.value = String(state.frame);
+    }
     const token = ++state.imageToken;
     state.loading = true;
+    // 图片成功前不保留上一帧时间：记录不能借用旧帧的时刻。
+    state.frameInfo = null;
+    el.timeLabel.textContent = frameLabel(null);
     state.canvasMessage = "正在读取源帧…";
     status(STATUS.loading);
     try {
@@ -824,7 +885,7 @@
       const frameIndex = Number(response.headers.get("X-Source-Frame"));
       const clock = response.headers.get("X-Clock-Source") || "";
       const blob = await response.blob();
-      if (token !== state.imageToken) return;
+      if (token !== state.imageToken) return null;
       const url = URL.createObjectURL(blob);
       const image = new Image();
       await new Promise((resolve, reject) => {
@@ -833,7 +894,7 @@
         image.src = url;
       });
       URL.revokeObjectURL(url);
-      if (token !== state.imageToken) return;
+      if (token !== state.imageToken) return null;
       state.image = image;
       state.canvasMessage = "";
       invalidatePreview();
@@ -841,23 +902,95 @@
       if (Number.isFinite(frameIndex) && frameIndex !== state.frame) state.frame = frameIndex;
       el.frameRange.value = String(state.frame);
       el.frameNumber.value = String(state.frame);
-      el.timeLabel.textContent = Number.isFinite(time)
-        ? time.toFixed(3) + " 秒 · " + clock
-        : "";
+      el.timeLabel.textContent = frameLabel(state.frameInfo);
       state.loading = false;
       status("");
-      schedulePosition();
+      // 连续播放每帧不改 history；只有暂停/跳转/记录才记当前帧。
+      if (!state.playing) schedulePosition();
       draw();
+      return state.frameInfo;
     } catch (error) {
-      if (token !== state.imageToken) return;
+      if (token !== state.imageToken) return null;
       state.loading = false;
       state.image = null;
+      state.frameInfo = null;
       state.canvasMessage = "源帧不可读";
+      el.timeLabel.textContent = frameLabel(null);
       draw();
       const asset = assetById(video.asset_id);
       status("源帧不可读：" + (asset ? asset.name : "视频"), "error");
       el.statusbar.title = error.message;
+      return null;
     }
+  }
+
+  // -- 源帧播放（记录页） ---------------------------------------------
+  function playbackButton() {
+    return document.querySelector("[data-play-toggle]");
+  }
+
+  function syncPlayButton() {
+    const button = playbackButton();
+    if (button) button.textContent = state.playing ? "暂停" : "播放";
+  }
+
+  function stopPlayback() {
+    state.playToken += 1;
+    state.playing = false;
+    state.playLastTime = null;
+    if (state.playTimer) {
+      clearTimeout(state.playTimer);
+      state.playTimer = null;
+    }
+    syncPlayButton();
+  }
+
+  async function playStep(token) {
+    if (!state.playing || token !== state.playToken) return;
+    if (state.frame >= state.lastFrame) {
+      stopPlayback();
+      rememberPosition();
+      return;
+    }
+    const started = performance.now();
+    // 逐个请求下一源帧：真实时间差决定下次显示，不用名义 FPS 顶替 VFR。
+    const info = await loadFrame(state.frame + 1);
+    if (!state.playing || token !== state.playToken) return;
+    if (!info) {
+      stopPlayback();
+      return;
+    }
+    let delay = 0;
+    const previous = state.playLastTime;
+    if (Number.isFinite(previous) && Number.isFinite(info.time)
+        && info.time > previous) {
+      delay = ((info.time - previous) * 1000) / state.rate
+        - (performance.now() - started);
+    }
+    state.playLastTime = info.time;
+    state.playTimer = setTimeout(() => { playStep(token); }, Math.max(0, delay));
+  }
+
+  function togglePlayback() {
+    if (state.playing) {
+      stopPlayback();
+      rememberPosition();
+      return;
+    }
+    if (!state.draft || !currentVideo()) return;
+    if (state.frame >= state.lastFrame) return;
+    state.playing = true;
+    state.playToken += 1;
+    const token = state.playToken;
+    state.playLastTime = state.frameInfo ? state.frameInfo.time : null;
+    syncPlayButton();
+    playStep(token);
+  }
+
+  function setRate(rate) {
+    state.rate = rate;
+    renderInspector();
+    status("播放速度 " + rate + "×");
   }
 
   function viewport() {
@@ -1186,6 +1319,10 @@
       }
     });
     body.append(list);
+    if (state.assay === "ymaze") {
+      // 场地页选择记录方式：自动追踪 / 人工记录（人工切换需确认已有记录）。
+      appendPathMode(body);
+    }
     if (optional.length) {
       const fold = document.createElement("details");
       fold.className = "fold";
@@ -1574,7 +1711,7 @@
   function appendPathMode(body) {
     if (state.assay !== "ymaze") return;
     const unit = currentUnit();
-    const current = (unit && unit.options && unit.options.mode) === "manual"
+    const current = unit && unit.manual && unit.manual.mode === "manual"
       ? "manual" : "auto";
     const wrap = document.createElement("div");
     wrap.className = "mode-row";
@@ -1592,9 +1729,30 @@
   async function setPathMode(mode) {
     const unit = currentUnit();
     if (!unit) return;
-    unit.options = Object.assign({}, unit.options || {}, { mode });
-    state.recordMode = mode === "manual";
+    const current = unit.manual && unit.manual.mode === "manual" ? "manual" : "auto";
+    if (current === mode) return;
+    if (mode === "manual") {
+      // 自动 → 人工：新建空记录；相对单位窗改为跟随视频，几何/检测值保留。
+      unit.manual = { mode: "manual", entries: [] };
+      if (unit.window && unit.window.mode === "relative") unit.window = null;
+      if (!unit.options) unit.options = {};
+      unit.options.mode = "manual";
+    } else {
+      const entries = unit.manual && Array.isArray(unit.manual.entries)
+        ? unit.manual.entries : [];
+      if (entries.length && !window.confirm(
+          "已有 " + entries.length + " 条人工记录，切回自动后不再使用。确认切换？")) {
+        return;
+      }
+      unit.manual = null;
+      if (!unit.options) unit.options = {};
+      unit.options.mode = "auto";
+    }
+    // 任何模式切换都废弃旧预览确认与在途画面请求。
+    stopPlayback();
     invalidatePreview();
+    state.imageToken += 1;
+    state.recordMode = mode === "manual";
     markDirty();
     renderTasknav();
     if (state.step === "review") {
@@ -1752,69 +1910,304 @@
     return label;
   }
 
-  // -- 人工记录（Y 迷宫人工路径） --------------------------------------
-  function renderRecordInspector(body, unit) {
-    const title = document.createElement("h3");
-    title.textContent = "人工记录";
-    const note = document.createElement("p");
-    note.className = "muted";
-    note.textContent = "按当前帧记录事件；播放器在第 16 块接入。";
-    body.append(title, note);
-    appendPathMode(body);
+  // -- 人工 Y：记录、撤销与只读复核 -----------------------------------
+  const ARM_LABELS = { A: "A 臂", B: "B 臂", C: "C 臂" };
 
-    const record = document.createElement("button");
-    record.className = "button full";
-    record.type = "button";
-    record.textContent = "记录当前帧事件";
-    record.addEventListener("click", () => {
+  function playbackRow(options) {
+    const opts = options || {};
+    const wrap = document.createElement("div");
+    wrap.className = "mode-row";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "button small";
+    toggle.dataset.playToggle = "1";
+    toggle.textContent = state.playing ? "暂停" : "播放";
+    toggle.addEventListener("click", togglePlayback);
+    wrap.append(toggle);
+    if (opts.rates !== false) {
+      [0.5, 1, 2].forEach((rate) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "mode-button" + (state.rate === rate ? " is-current" : "");
+        button.textContent = rate + "×";
+        button.addEventListener("click", () => { setRate(rate); });
+        wrap.append(button);
+      });
+    }
+    return wrap;
+  }
+
+  function armRow() {
+    const wrap = document.createElement("div");
+    wrap.className = "mode-row";
+    ["A", "B", "C"].forEach((arm) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "mode-button";
+      button.textContent = ARM_LABELS[arm];
+      button.addEventListener("click", () => { appendManualEntry(arm); });
+      wrap.append(button);
+    });
+    return wrap;
+  }
+
+  function manualList(unit, readOnly) {
+    const entries = unit && unit.manual && Array.isArray(unit.manual.entries)
+      ? unit.manual.entries : [];
+    const list = document.createElement("ul");
+    list.className = "event-list";
+    if (!entries.length) {
+      const empty = document.createElement("li");
+      empty.className = "muted";
+      empty.textContent = "尚未记录入臂";
+      list.append(empty);
+      return list;
+    }
+    entries.forEach((entry) => {
+      const item = document.createElement("li");
+      const label = document.createElement("span");
+      const moment = Number(entry.time_s);
+      label.textContent = timeText(moment, 3) + " · " + (ARM_LABELS[entry.arm] || entry.arm);
+      item.append(label);
+      list.append(item);
+    });
+    if (!readOnly) {
+      // 列表按录入顺序显示；新增后滚到末尾。
+      requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; });
+    }
+    return list;
+  }
+
+  function appendManualEntry(arm) {
+    const unit = currentUnit();
+    if (!unit || state.assay !== "ymaze") return;
+    const info = state.frameInfo;
+    if (!info || info.frame !== state.frame || !Number.isFinite(info.time)) {
+      status("正在读取源帧，稍后再记录", "warn");
+      return;
+    }
+    const manual = ensureManual(unit);
+    const entries = manual.entries;
+    const last = entries.length ? Number(entries[entries.length - 1].time_s) : null;
+    if (last !== null && Number.isFinite(last) && info.time <= last + 1e-9) {
+      status("入臂时间必须晚于上一条记录", "error");
+      return;
+    }
+    // 时间只取当前可见帧响应头，不取滑条、请求值或名义帧率。
+    entries.push({ time_s: info.time, arm });
+    invalidatePreview();
+    markDirty();
+    renderInspector();
+    rememberPosition();
+    status("");
+  }
+
+  function undoManualEntry() {
+    const unit = currentUnit();
+    if (!unit || !unit.manual || !Array.isArray(unit.manual.entries)) return;
+    if (!unit.manual.entries.length) return;
+    unit.manual.entries.pop();
+    invalidatePreview();
+    markDirty();
+    renderInspector();
+    rememberPosition();
+  }
+
+  function clearManualEntries() {
+    const unit = currentUnit();
+    if (!unit || !unit.manual || !Array.isArray(unit.manual.entries)) return;
+    if (!unit.manual.entries.length) return;
+    unit.manual.entries = [];
+    invalidatePreview();
+    markDirty();
+    renderInspector();
+    rememberPosition();
+  }
+
+  function binSecondsField(unit) {
+    const label = document.createElement("label");
+    label.className = "field";
+    const caption = document.createElement("span");
+    caption.textContent = "时间箱长度（s）";
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.step = "any";
+    const current = effectiveOption(unit, "bin_seconds", 60);
+    input.value = current == null ? "" : String(current);
+    input.addEventListener("change", () => {
       const target = currentUnit();
       if (!target) return;
-      if (!target.manual) target.manual = { events: [] };
-      if (!Array.isArray(target.manual.events)) target.manual.events = [];
-      const time = state.frameInfo && Number.isFinite(state.frameInfo.time)
-        ? state.frameInfo.time : null;
-      if (time == null) {
-        status("当前帧时间不可用", "error");
+      const value = Number(input.value);
+      if (!Number.isFinite(value) || value <= 0) {
+        status("时间箱长度必须大于 0", "error");
+        input.value = String(effectiveOption(target, "bin_seconds", 60));
         return;
       }
-      target.manual.events.push({ time_s: time, frame: state.frame, kind: "event" });
+      if (!target.options) target.options = {};
+      target.options.bin_seconds = value;
       invalidatePreview();
       markDirty();
       renderInspector();
     });
-    body.append(record);
+    label.append(caption, input);
+    return label;
+  }
 
-    const list = document.createElement("ul");
-    list.className = "event-list";
-    const events = (unit.manual && unit.manual.events) || [];
-    if (!events.length) {
-      const empty = document.createElement("li");
-      empty.className = "muted";
-      empty.textContent = "还没有记录。";
-      list.append(empty);
-    }
-    events.forEach((event, index) => {
-      const item = document.createElement("li");
-      const label = document.createElement("span");
-      label.textContent = "帧 " + event.frame + " · " + Number(event.time_s).toFixed(2) + " 秒";
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "remove-button";
-      remove.textContent = "移除";
-      remove.addEventListener("click", () => {
-        const target = currentUnit();
-        const live = (target && target.manual && target.manual.events) || [];
-        live.splice(index, 1);
-        invalidatePreview();
-        markDirty();
-        renderInspector();
-      });
-      item.append(label, remove);
-      list.append(item);
+  function animalWindowField(unit) {
+    const video = currentVideo();
+    const duration = videoDuration();
+    const window = unit.window && unit.window.mode === "exact" ? unit.window : null;
+    const wrap = document.createElement("div");
+    const modeLabel = document.createElement("label");
+    modeLabel.className = "field";
+    const caption = document.createElement("span");
+    caption.textContent = "动物时间窗";
+    const select = document.createElement("select");
+    [["global", "跟随视频"], ["exact", "绝对窗口"]].forEach(([value, text]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      option.selected = (window ? "exact" : "global") === value;
+      select.append(option);
     });
-    body.append(list);
+    modeLabel.append(caption, select);
+    wrap.append(modeLabel);
+
+    const rows = document.createElement("div");
+    rows.className = "field-row";
+    rows.hidden = !window;
+    const startInput = document.createElement("input");
+    startInput.type = "number";
+    startInput.min = "0";
+    startInput.step = "any";
+    startInput.value = window ? String(window.start_s) : "0";
+    const endInput = document.createElement("input");
+    endInput.type = "number";
+    endInput.min = "0";
+    endInput.step = "any";
+    endInput.value = window && window.end_s != null
+      ? String(window.end_s) : String(duration);
+    const startLabel = document.createElement("label");
+    startLabel.className = "field";
+    const startCaption = document.createElement("span");
+    startCaption.textContent = "起点（秒）";
+    startLabel.append(startCaption, startInput);
+    const endLabel = document.createElement("label");
+    endLabel.className = "field";
+    const endCaption = document.createElement("span");
+    endCaption.textContent = "终点（秒）";
+    endLabel.append(endCaption, endInput);
+    rows.append(startLabel, endLabel);
+    wrap.append(rows);
+
+    const applyWindow = () => {
+      const target = currentUnit();
+      if (!target) return;
+      if (select.value === "global") {
+        target.window = null;
+        rows.hidden = true;
+      } else {
+        const start = Number(startInput.value);
+        const end = Number(endInput.value);
+        if (!Number.isFinite(start) || start < 0) {
+          status("窗口起点必须是非负数", "error");
+          return;
+        }
+        if (!Number.isFinite(end) || end <= start) {
+          status("窗口终点必须大于起点", "error");
+          return;
+        }
+        target.window = { mode: "exact", start_s: start, end_s: end };
+        rows.hidden = false;
+      }
+      invalidatePreview();
+      markDirty();
+      renderInspector();
+    };
+    select.addEventListener("change", () => {
+      if (select.value === "exact" && !window) {
+        startInput.value = String((video && video.window && video.window.start_s) || 0);
+        endInput.value = String(duration);
+      }
+      applyWindow();
+    });
+    startInput.addEventListener("change", applyWindow);
+    endInput.addEventListener("change", applyWindow);
+    return wrap;
+  }
+
+  function appendManualSettings(body, unit) {
+    const settings = document.createElement("details");
+    settings.className = "fold";
+    const summary = document.createElement("summary");
+    summary.textContent = "实验设置";
+    const inner = document.createElement("div");
+    inner.className = "fold-body";
+    inner.append(binSecondsField(unit), animalWindowField(unit));
+    settings.append(summary, inner);
+    body.append(settings);
+
+    const animal = document.createElement("details");
+    animal.className = "fold";
+    const animalSummary = document.createElement("summary");
+    animalSummary.textContent = "小鼠设置";
+    const animalBody = document.createElement("div");
+    animalBody.className = "fold-body";
+    animalBody.append(nameField(unit));
+    animal.append(animalSummary, animalBody);
+    body.append(animal);
+  }
+
+  function renderRecordInspector(body, unit) {
+    const title = document.createElement("h3");
+    title.textContent = "人工入臂记录";
+    body.append(title);
+    body.append(playbackRow());
+    body.append(armRow());
+    const hint = document.createElement("p");
+    hint.className = "muted";
+    hint.textContent = state.frameInfo
+      ? "空格播放/暂停 · A/B/C 记录当前帧"
+      : "正在读取源帧，稍后可记录";
+    body.append(hint);
+    body.append(manualList(unit, false));
+    const actions = document.createElement("div");
+    actions.className = "mode-row";
+    const undo = document.createElement("button");
+    undo.type = "button";
+    undo.className = "button small";
+    undo.textContent = "撤销";
+    undo.addEventListener("click", undoManualEntry);
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "button small";
+    clear.textContent = "清空";
+    clear.addEventListener("click", clearManualEntries);
+    actions.append(undo, clear);
+    body.append(actions);
+    appendManualSettings(body, unit);
+    appendPathMode(body);
     el.primary.textContent = "下一步：复核";
     el.secondary.hidden = true;
+    el.preview.hidden = true;
+    syncPlayButton();
+  }
+
+  function renderReviewInspector(body, unit) {
+    const title = document.createElement("h3");
+    title.textContent = "复核画面";
+    body.append(title);
+    body.append(playbackRow({ rates: false }));
+    body.append(manualList(unit, true));
+    appendAnnotationToggle(body);
+
+    const confirmed = state.previewGate.confirmed(previewConfig("behavior"));
+    el.primary.textContent = confirmed ? "检查并开始分析" : "行为预览";
+    el.secondary.textContent = "更新行为预览";
+    el.secondary.hidden = !confirmed;
+    el.preview.hidden = !confirmed && !state.previewAwaiting;
+    syncPlayButton();
   }
 
   // -- 预览与校验 -----------------------------------------------------
@@ -1823,6 +2216,7 @@
     const unit = currentUnit();
     return {
       kind: kind || "detection",
+      assay: state.assay,
       asset_id: video.asset_id,
       frame_index: state.frame,
       orientation: video.orientation || 0,
@@ -1834,6 +2228,8 @@
       draft_detection: clone(state.draft.detection || {}),
       video_options: clone(video.options || {}),
       video_detection: clone(video.detection || {}),
+      // 单调编辑代号：值改回原样也必须重新预览。
+      edit: state.editCounter,
     };
   }
 
@@ -1868,12 +2264,17 @@
         config: () => previewConfig(type),
         send: (config) => {
           request = state.previewGate.begin(config);
-          return send("POST", "/api/drafts/" + state.draftId + "/preview", {
+          const body = {
             asset_id: config.asset_id,
             unit_id: config.unit.id,
             frame_index: config.frame_index,
             kind: config.kind,
-          });
+          };
+          // time_s 取当前可见帧的实际响应值；服务端仍按 frame_index 重读源图。
+          if (state.frameInfo && Number.isFinite(state.frameInfo.time)) {
+            body.time_s = state.frameInfo.time;
+          }
+          return send("POST", "/api/drafts/" + state.draftId + "/preview", body);
         },
       });
       if (result.status === "save_failed") {
@@ -1965,6 +2366,7 @@
 
   async function startAnalysis() {
     if (!state.draftId) return;
+    stopPlayback();
     const kind = state.step === "review" ? "behavior"
       : (state.previewKind === "behavior" ? "behavior" : "detection");
     if (!state.previewGate.confirmed(previewConfig(kind))) {
@@ -1978,15 +2380,29 @@
       return;
     }
     el.primary.disabled = true;
-    status("正在分析…");
+    status("正在校验草稿…");
     try {
-      const data = await send("POST", "/api/drafts/" + state.draftId + "/analyze", {});
+      // 先取最终校验，issues 为空才创建任务，不留半个作业。
+      const checked = await send("POST", "/api/drafts/" + state.draftId + "/validate", {});
+      const issues = (checked && checked.issues) || [];
+      if (issues.length) {
+        status(issueText({ fields: issues }, "草稿未通过校验"), "error");
+        renderInspector();
+        return;
+      }
+      const pageToken = state.navToken;
+      status("正在分析…");
+      const data = await send("POST", "/api/jobs", { draft_id: state.draftId });
       const failed = (data.jobs || []).find((job) => job.status !== "done");
       if (failed) {
         status(failed.error || "分析失败", "error");
         return;
       }
       status("分析完成", "ok");
+      if (state.navToken !== pageToken) {
+        status("任务已开始，可在任务页查看", "ok");
+        return;
+      }
       window.location.href = "/results/" + data.run_id;
     } catch (error) {
       // 校验失败时给出可定位原因，而不是只显示“草稿未通过校验”。
@@ -2163,10 +2579,17 @@
     });
 
     el.frameRange.addEventListener("input", () => {
+      // 跳转先暂停，并清掉旧帧时间，等待新帧。
+      stopPlayback();
+      state.frameInfo = null;
+      el.timeLabel.textContent = frameLabel(null);
       state.frame = Number(el.frameRange.value);
       loadFrame();
     });
     el.frameRange.addEventListener("change", () => {
+      stopPlayback();
+      state.frameInfo = null;
+      el.timeLabel.textContent = frameLabel(null);
       state.frame = Number(el.frameRange.value);
       loadFrame();
       rememberPosition();
@@ -2261,6 +2684,8 @@
       location.href = url.href;
     });
 
+    document.addEventListener("keydown", manualHotkeys);
+
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || !state.pendingNav) return;
       state.navToken += 1;
@@ -2268,8 +2693,10 @@
       status("已取消跳转", "warn");
     });
 
+    window.addEventListener("pagehide", teardownPage);
     window.addEventListener("beforeunload", (event) => {
       rememberPosition();
+      teardownPage();
       if (!isDirty()) return;
       event.preventDefault();
       event.returnValue = "";
@@ -2294,10 +2721,44 @@
     const next = Math.min(state.lastFrame, Math.max(0, Math.round(value)));
     el.frameNumber.value = String(next);
     if (next === state.frame) return;
+    stopPlayback();
+    state.frameInfo = null;
+    el.timeLabel.textContent = frameLabel(null);
     state.frame = next;
     el.frameRange.value = String(next);
     loadFrame();
     rememberPosition();
+  }
+
+  function manualHotkeys(event) {
+    if (event.defaultPrevented || event.metaKey || event.ctrlKey
+        || event.altKey || event.shiftKey) {
+      return;
+    }
+    const target = event.target;
+    const tag = target && target.tagName ? target.tagName.toLowerCase() : "";
+    if (tag === "input" || tag === "select" || tag === "textarea"
+        || (target && target.isContentEditable)) {
+      return;
+    }
+    if (!state.recordMode || state.assay !== "ymaze") return;
+    if (state.step !== "arena" || !state.draft) return;
+    if (event.key === " " || event.key === "Spacebar") {
+      event.preventDefault();
+      togglePlayback();
+      return;
+    }
+    const arm = event.key ? event.key.toUpperCase() : "";
+    if (arm === "A" || arm === "B" || arm === "C") {
+      event.preventDefault();
+      appendManualEntry(arm);
+    }
+  }
+
+  // 页面销毁时停播并解除键盘监听，旧请求不再作用于新页。
+  function teardownPage() {
+    stopPlayback();
+    document.removeEventListener("keydown", manualHotkeys);
   }
 
   async function uploadFiles(files) {
