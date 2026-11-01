@@ -107,7 +107,7 @@ def import_paths(
                 errors.append(_error(name, f"无法读取文件：{error}"))
                 continue
 
-            folded = os.path.normcase(canonical)
+            folded = os.path.normcase(canonical).casefold()
             if folded in seen:
                 continue
             seen.add(folded)

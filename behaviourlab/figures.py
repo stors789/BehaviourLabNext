@@ -555,8 +555,56 @@ def center_rect_for(summary: Mapping[str, Any]) -> tuple[float, float, float, fl
             width * (1.0 + rx) / 2.0, height * (1.0 + ry) / 2.0)
 
 
+STYLE_PREVIEW_DPI_CAP = 240
+
+
+def style_preview_png(path: str | Path, style: Mapping[str, Any] | None = None,
+                      *, dpi_cap: int = STYLE_PREVIEW_DPI_CAP) -> bool:
+    """图形样式的两面板预览（7×3 英寸）；预览 DPI 上限不回写正式 style。"""
+
+    color, colormap, line_width, dpi = _style(style)
+    dpi = max(50, min(int(dpi), int(dpi_cap)))
+    figure = Figure(figsize=(7.0, 3.0))
+    FigureCanvasAgg(figure)
+    track_axes, heat_axes = figure.subplots(1, 2)
+
+    track_axes.set_xlim(0.0, 30.0)
+    track_axes.set_ylim(30.0, 0.0)
+    track_axes.set_aspect("equal", adjustable="box")
+    track_axes.add_patch(patches.Rectangle((0.0, 0.0), 30.0, 30.0, fill=False,
+                                           edgecolor="#8a8a8a", linewidth=0.8))
+    xs = [4.0, 9.0, 15.5, 21.0, 26.0]
+    ys = [22.0, 12.0, 20.0, 8.0, 17.0]
+    track_axes.plot(xs, ys, color=color, linewidth=line_width,
+                    solid_capstyle="round")
+    track_axes.set_xlabel("x (cm)", fontsize=8)
+    track_axes.set_ylabel("y (cm)", fontsize=8)
+    track_axes.tick_params(labelsize=8)
+    track_axes.set_title("轨迹", fontsize=9, color="#333333")
+
+    import numpy as np
+
+    grid_x, grid_y = np.meshgrid(np.linspace(-3.0, 3.0, 48),
+                                 np.linspace(-3.0, 3.0, 48))
+    density = np.exp(-(grid_x ** 2 + (grid_y * 1.2) ** 2) / 1.6)
+    density += 0.6 * np.exp(-((grid_x - 1.4) ** 2 + (grid_y + 1.2) ** 2) / 0.8)
+    image = heat_axes.imshow(density, cmap=colormap, origin="upper",
+                             extent=(-15.0, 15.0, 15.0, -15.0),
+                             interpolation="bilinear")
+    figure.colorbar(image, ax=heat_axes, fraction=0.046, pad=0.03, label="s")
+    heat_axes.set_xlabel("x (cm)", fontsize=8)
+    heat_axes.set_ylabel("y (cm)", fontsize=8)
+    heat_axes.tick_params(labelsize=8)
+    heat_axes.set_title("热图", fontsize=9, color="#333333")
+
+    figure.tight_layout()
+    figure.savefig(path, format="png", dpi=dpi)
+    return True
+
+
 STATE_COLORS = {
     "active": "#8C6BB1",
+
     "struggling": "#B45F45",
     "immobile": "#6F8F7C",
     "swing": "#4E7FA6",

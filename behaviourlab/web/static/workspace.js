@@ -64,6 +64,13 @@
     windowStatus: null,
     // 选择集合还没成功落盘：失败后再次点“设置视频”必须真的重试。
     selectionPending: false,
+    // 同实验场地模板与项目小鼠绑定；模板操作不跨动物保留。
+    templates: [],
+    templatesAssay: "",
+    templateId: null,
+    templateName: "",
+    projectAnimals: [],
+    projectAnimalsLoaded: false,
   };
 
   const el = {
@@ -702,6 +709,9 @@
       state.selectionPending = false;
       ensureTopContext();
       renderTasknav();
+      // 新草稿可能换了实验或项目：模板与项目小鼠都按新草稿重新读取。
+      loadTemplates();
+      loadProjectAnimals();
     }
     const changed = state.draft ? syncDraftVideos() : false;
     if (changed) {
@@ -1857,6 +1867,7 @@
       body.append(fold);
     }
     appendExperimentSettings(body, unit);
+    appendTemplateFold(body, unit);
     const missing = required.filter((step) => !drawn(step));
     el.primary.textContent = "下一步：检测";
     el.secondary.hidden = true;
@@ -2562,11 +2573,17 @@
 
     const animal = document.createElement("details");
     animal.className = "fold";
+    // 项目模式还没有绑定小鼠时默认展开，先看到绑定入口。
+    if (state.draft && state.draft.project_id && !unit.animal_id) {
+      animal.open = true;
+    }
     const animalSummary = document.createElement("summary");
     animalSummary.textContent = "小鼠设置";
     const animalBody = document.createElement("div");
     animalBody.className = "fold-body";
     animalBody.append(nameField(unit));
+    const binding = animalBindingField(unit);
+    if (binding) animalBody.append(binding);
     const remove = unitDeleteField(unit);
     if (remove) animalBody.append(remove);
     animal.append(animalSummary, animalBody);
@@ -2851,6 +2868,246 @@
     });
     label.append(caption, input);
     return label;
+  }
+
+  // -- 项目小鼠绑定与场地模板 -----------------------------------------
+  function loadProjectAnimals() {
+    const projectId = state.draft && state.draft.project_id;
+    if (!projectId) {
+      state.projectAnimals = [];
+      state.projectAnimalsLoaded = true;
+      return Promise.resolve();
+    }
+    return get("/api/projects/" + projectId + "/animals").then((data) => {
+      state.projectAnimals = data.animals || [];
+      state.projectAnimalsLoaded = true;
+      if (!state.pageClosed && state.step !== "select") renderInspector();
+    }).catch(() => {
+      state.projectAnimals = [];
+      state.projectAnimalsLoaded = true;
+    });
+  }
+
+  // 绑定只是身份：不复制姓名，也不改单位 id。
+  function animalBindingField(unit) {
+    if (!state.draft || !state.draft.project_id) return null;
+    const label = document.createElement("label");
+    label.className = "field";
+    const caption = document.createElement("span");
+    caption.textContent = "绑定项目小鼠";
+    const select = document.createElement("select");
+    select.dataset.animalBinding = "1";
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = state.projectAnimalsLoaded ? "未绑定" : "正在读取…";
+    select.append(blank);
+    (state.projectAnimals || []).forEach((animal) => {
+      const option = document.createElement("option");
+      option.value = animal.id;
+      option.textContent = animal.code
+        ? animal.name + " · " + animal.code : animal.name;
+      select.append(option);
+    });
+    select.value = unit.animal_id || "";
+    select.addEventListener("change", () => {
+      const target = currentUnit();
+      if (!target) return;
+      target.animal_id = select.value || null;
+      invalidatePreview();
+      markDirty();
+      ensureContext();
+    });
+    label.append(caption, select);
+    return label;
+  }
+
+  function loadTemplates() {
+    const assay = state.assay;
+    if (!assay) return Promise.resolve();
+    return get("/api/templates?assay=" + encodeURIComponent(assay)).then((data) => {
+      state.templates = data.templates || [];
+      state.templatesAssay = assay;
+      if (state.templateId
+          && !state.templates.some((item) => item.id === state.templateId)) {
+        state.templateId = null;
+      }
+      if (!state.pageClosed && state.step !== "select") renderInspector();
+    }).catch(() => {
+      state.templates = [];
+      state.templatesAssay = assay;
+    });
+  }
+
+  function templateKeysFor(assay) {
+    const entry = (state.catalog || []).find((item) => item.key === assay);
+    return entry && Array.isArray(entry.template_keys) ? entry.template_keys : [];
+  }
+
+  // 界面显示的“有效参数”：草稿 → 视频 → 动物逐层覆盖，用于保存模板。
+  function resolvedOptionsFor(unit) {
+    const video = currentVideo();
+    return Object.assign({},
+      (state.draft && state.draft.options) || {},
+      (video && video.options) || {},
+      (unit && unit.options) || {});
+  }
+
+  function appendTemplateFold(body, unit) {
+    if (!state.draftId) return;
+    const fold = document.createElement("details");
+    fold.className = "fold";
+    fold.dataset.templateFold = "1";
+    const summary = document.createElement("summary");
+    // 模板列表按实验隔离：标题写明当前实验，条目只显示名字。
+    const assayEntry = (state.catalog || [])
+      .find((item) => item.key === state.assay);
+    summary.textContent = "场地模板 · "
+      + (assayEntry ? assayEntry.short : state.assay.toUpperCase());
+    const inner = document.createElement("div");
+    inner.className = "fold-body";
+
+    const templates = state.templatesAssay === state.assay
+      ? (state.templates || []) : [];
+    const select = document.createElement("select");
+    select.dataset.templateSelect = "1";
+    if (!templates.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "同实验还没有模板";
+      select.append(option);
+      select.disabled = true;
+    } else {
+      templates.forEach((template) => {
+        const option = document.createElement("option");
+        option.value = template.id;
+        option.textContent = template.name;
+        select.append(option);
+      });
+      select.value = state.templateId || templates[0].id;
+      select.addEventListener("change", () => { state.templateId = select.value; });
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "mode-row";
+    const apply = document.createElement("button");
+    apply.type = "button";
+    apply.className = "button small";
+    apply.textContent = "应用";
+    apply.disabled = !templates.length;
+    apply.addEventListener("click", () => { applyTemplate(select.value); });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "button small danger";
+    remove.textContent = "删除模板";
+    remove.disabled = !templates.length;
+    remove.addEventListener("click", () => { deleteTemplate(select.value); });
+    actions.append(apply, remove);
+
+    const nameRow = document.createElement("div");
+    nameRow.className = "field-row";
+    const nameLabel = document.createElement("label");
+    nameLabel.className = "field grow";
+    const nameCaption = document.createElement("span");
+    nameCaption.textContent = "模板名称";
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.maxLength = 120;
+    nameInput.dataset.templateName = "1";
+    nameInput.value = state.templateName || "";
+    nameInput.addEventListener("input", () => {
+      state.templateName = nameInput.value;
+    });
+    nameLabel.append(nameCaption, nameInput);
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "button small";
+    save.textContent = "保存当前场地";
+    save.addEventListener("click", () => { saveTemplate(nameInput.value); });
+    nameRow.append(nameLabel, save);
+
+    inner.append(select, actions, nameRow);
+    fold.append(summary, inner);
+    body.append(fold);
+  }
+
+  async function saveTemplate(rawName) {
+    const unit = currentUnit();
+    if (!unit) return;
+    const name = String(rawName || "").trim();
+    if (!name) {
+      status("模板需要名称", "error");
+      const input = el.inspectBody.querySelector("[data-template-name]");
+      if (input) input.focus();
+      return;
+    }
+    const payload = window.BLCore.templatePayload(
+      { geometry: unit.geometry || {}, options: resolvedOptionsFor(unit) },
+      templateKeysFor(state.assay));
+    if (!Object.keys(payload.geometry).length) {
+      status("先绘制场地再保存模板", "warn");
+      return;
+    }
+    try {
+      await send("POST", "/api/templates", {
+        name, assay: state.assay, unit: payload,
+      });
+    } catch (error) {
+      status(issueText(error, "模板保存失败"), "error");
+      return;
+    }
+    state.templateName = "";
+    await loadTemplates();
+    status("已保存模板「" + name + "」", "ok");
+  }
+
+  async function applyTemplate(templateId) {
+    const unit = currentUnit();
+    const template = (state.templates || [])
+      .find((item) => item.id === templateId) || null;
+    if (!unit || !template) {
+      status("先选择一个模板", "warn");
+      return;
+    }
+    const hasGeometry = Object.keys(unit.geometry || {}).length > 0;
+    if (hasGeometry
+        && !window.confirm("用模板替换当前场地？当前几何将被覆盖。")) {
+      return;
+    }
+    const applied = window.BLCore.applyFieldTemplate(
+      state.assay, template, unit, templateKeysFor(state.assay));
+    unit.geometry = applied.geometry;
+    unit.options = applied.options;
+    state.stepKey = null;
+    stopPlayback();
+    invalidatePreview();
+    markDirty();
+    ensureContext();
+    renderInspector();
+    draw();
+    const ok = await saveThen();
+    if (!ok) {
+      status(lastSaveText("模板已应用但草稿未保存，请重试"), "error");
+      return;
+    }
+    status("已应用模板「" + template.name + "」", "ok");
+  }
+
+  async function deleteTemplate(templateId) {
+    const template = (state.templates || [])
+      .find((item) => item.id === templateId) || null;
+    if (!template) return;
+    if (!window.confirm("删除模板「" + template.name + "」？已完成的运行不受影响。")) {
+      return;
+    }
+    try {
+      await send("DELETE", "/api/templates/" + templateId, {});
+    } catch (error) {
+      status(issueText(error, "模板删除失败"), "error");
+      return;
+    }
+    if (state.templateId === templateId) state.templateId = null;
+    await loadTemplates();
+    status("已删除模板", "ok");
   }
 
   // -- 人工 Y：记录、撤销与只读复核 -----------------------------------
@@ -3667,6 +3924,9 @@
       state.frame = 0;
       state.shownFrame = 0;
       state.stepKey = null;
+      // 模板的临时操作属于上一只动物，切视频即丢弃。
+      state.templateName = "";
+      state.templateId = null;
       state.editor.reset(null, null);
       ensureContext();
       loadFrame();
@@ -3677,6 +3937,9 @@
       state.unitIndex = Number(el.unitSelect.value);
       state.stepKey = null;
       state.view = "geometry";
+      // 不把上一只动物的临时模板操作带到这一只。
+      state.templateName = "";
+      state.templateId = null;
       invalidatePreview();
       ensureContext();
       renderTasknav();
@@ -3985,6 +4248,8 @@
         state.assay = data.draft.assay;
         if (data.draft.project_id) state.projectId = data.draft.project_id;
         if (el.assay) el.assay.value = state.assay;
+        loadTemplates();
+        loadProjectAnimals();
       } catch (error) {
         status(error.message, "error");
       }

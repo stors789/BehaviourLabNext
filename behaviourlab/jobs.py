@@ -39,6 +39,8 @@ class JobScheduler:
                     asset=asset,
                     job_id=new_id(),
                     run_id=run_id,
+                    # 完整默认值已在草稿创建时快照；提交不再读取新的设置。
+                    settings={},
                 )
             )
         return resolved

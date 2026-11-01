@@ -14,6 +14,8 @@ from werkzeug.exceptions import HTTPException
 
 from .. import assets as asset_service
 from .. import experiments
+from .. import field_templates
+from .. import figures as figure_service
 from .. import media as media_service
 from .. import preview as preview_service
 from ..assets import BackgroundError
@@ -25,12 +27,14 @@ from ..engine import (
     snapshot_draft,
     validate_draft,
     validate_settings_value,
+    validate_style,
 )
 from ..jobs import JobScheduler
 from .. import outputs as output_service
 from ..processes import JobOwnerRegistry
-from ..schema import ValidationError, is_valid_id, new_id
-from ..store import NotFoundError, Store
+from ..schema import ValidationError, is_number, is_valid_id, new_id
+from ..store import NotFoundError, Store, storage_log_path
+from . import descriptors as web_descriptors
 
 LOGGER = logging.getLogger(__name__)
 
@@ -157,6 +161,38 @@ def _assay_label(assay: Any) -> str:
     if not experiments.exists(assay):
         return str(assay or "").upper()
     return str(experiments.get(assay).SPEC.get("label") or assay)
+
+
+def _filled_setting(store: Store, section: str, factory: Mapping[str, Any]) -> dict:
+    """输出/样式：保存值补全 factory 字段后返回，未保存时就是 factory。"""
+
+    value = store.get_setting(f"settings.{section}", default=None)
+    merged = deepcopy(dict(factory))
+    if isinstance(value, Mapping):
+        merged.update(deepcopy(dict(value)))
+    return merged
+
+
+def _settings_snapshot(store: Store) -> dict:
+    """四个分区一次取出；defaults/detection 仍是按实验键的对象。"""
+
+    defaults = store.get_setting("settings.defaults", default={})
+    detection = store.get_setting("settings.detection", default={})
+    return {
+        "defaults": defaults if isinstance(defaults, Mapping) else {},
+        "detection": detection if isinstance(detection, Mapping) else {},
+        "output": _filled_setting(store, "output", COMMON_OUTPUT_DEFAULTS),
+        "style": _filled_setting(store, "style", COMMON_STYLE_DEFAULTS),
+    }
+
+
+def _settings_value(store: Store, section: str) -> Any:
+    if section in ("output", "style"):
+        factory = (COMMON_OUTPUT_DEFAULTS if section == "output"
+                   else COMMON_STYLE_DEFAULTS)
+        return _filled_setting(store, section, factory)
+    value = store.get_setting(f"settings.{section}", default={})
+    return value if isinstance(value, Mapping) else {}
 
 
 def _run_payloads(directory: Path) -> list[dict]:
@@ -290,6 +326,7 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
                 "schema_version": SCHEMA_VERSION,
                 "data_root": str(paths.root),
                 "database": str(paths.database),
+                "storage_log": str(storage_log_path(paths)),
                 "job_owner": registry.is_active(),
             }
         )
@@ -469,19 +506,11 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         return send_file(path, conditional=True)
 
     # -- 设置 -----------------------------------------------------------
-    def _defaults_for(section: str) -> dict:
-        if section == "output":
-            return deepcopy(COMMON_OUTPUT_DEFAULTS)
-        if section == "style":
-            return deepcopy(COMMON_STYLE_DEFAULTS)
-        return {}
-
     @app.get("/api/settings/<section>")
     def get_settings(section: str):
         if section not in SETTINGS_SECTIONS:
             raise ApiError("未知设置分区", 404)
-        value = store.get_setting(f"settings.{section}", default=_defaults_for(section))
-        return success({"value": value})
+        return success({"key": section, "value": _settings_value(store, section)})
 
     @app.put("/api/settings/<section>")
     def put_settings(section: str):
@@ -492,11 +521,43 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
             raise ApiError("缺少 value", 400,
                            [{"field": "value", "message": "必须提供 value"}])
         value = body["value"]
+        if not isinstance(value, Mapping):
+            raise ApiError("设置值必须是对象", 400,
+                           [{"field": "value", "message": "必须是对象"}])
+        value = dict(value)
+        if section in ("output", "style"):
+            # 保存时补全 factory 字段，读回不再依赖缺省逻辑。
+            factory = (COMMON_OUTPUT_DEFAULTS if section == "output"
+                       else COMMON_STYLE_DEFAULTS)
+            filled = deepcopy(dict(factory))
+            filled.update(value)
+            value = filled
         issues = validate_settings_value(section, value)
         if issues:
             raise ApiError("设置未通过校验", 400, issues)
         saved = store.set_setting(f"settings.{section}", value)
-        return success({"value": saved})
+        return success({"key": section, "value": saved})
+
+    @app.post("/api/settings/style/preview")
+    def preview_style():
+        body = _json_body()
+        value = body.get("value")
+        if not isinstance(value, Mapping):
+            raise ApiError("样式必须是对象", 400,
+                           [{"field": "value", "message": "必须是对象"}])
+        merged = deepcopy(dict(COMMON_STYLE_DEFAULTS))
+        merged.update(dict(value))
+        issues = validate_style(merged)
+        if issues:
+            raise ApiError("样式未通过校验", 400, issues)
+        filename = f"{new_id()}.png"
+        target = Path(paths.previews) / filename
+        try:
+            figure_service.style_preview_png(target, merged)
+        except (OSError, ValueError) as error:
+            raise ApiError(f"无法生成样式预览：{error}", 422) from error
+        return success({"image_url": f"/api/previews/{filename}",
+                        "style": merged})
 
     # -- 项目 -----------------------------------------------------------
     @app.get("/api/projects")
@@ -538,7 +599,6 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
     @app.post("/api/projects/<project_id>/groups")
     def create_groups(project_id: str):
         body = _json_body()
-        created = []
         if "groups" in body:
             entries = body["groups"]
             if not isinstance(entries, list) or not entries:
@@ -551,9 +611,39 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
                                    [{"field": f"groups[{index}]", "message": "必须是对象"}])
                 names.append(entry.get("name"))
             created = store.create_groups(project_id, names)
+        elif "names" in body:
+            names = body["names"]
+            if not isinstance(names, list) or not names:
+                raise ApiError("names 必须是非空数组", 400,
+                               [{"field": "names", "message": "必须是非空数组"}])
+            created = store.create_groups(project_id, names)
         else:
             created = [store.create_group(project_id, body.get("name"))]
         return success({"groups": created}, 201)
+
+    def _batch_animals(body: Mapping[str, Any]) -> list[dict]:
+        """{group_id, prefix, start, count} → 连续命名的动物条目。"""
+
+        prefix = body.get("prefix", "M")
+        if not isinstance(prefix, str) or not prefix.strip():
+            raise ApiError("prefix 必须是非空文本", 400,
+                           [{"field": "prefix", "message": "必须是非空文本"}])
+        start = body.get("start", 1)
+        if not isinstance(start, int) or isinstance(start, bool):
+            raise ApiError("start 必须是整数", 400,
+                           [{"field": "start", "message": "必须是整数"}])
+        if start < 0:
+            raise ApiError("start 必须是非负整数", 400,
+                           [{"field": "start", "message": "必须是非负整数"}])
+        count = body.get("count")
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            raise ApiError("count 必须是正整数", 400,
+                           [{"field": "count", "message": "必须是正整数"}])
+        group_id = body.get("group_id")
+        return [
+            {"name": f"{prefix.strip()}{start + index}", "group_id": group_id}
+            for index in range(count)
+        ]
 
     @app.get("/api/projects/<project_id>/animals")
     def list_animals(project_id: str):
@@ -564,8 +654,14 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
     @app.post("/api/projects/<project_id>/animals")
     def create_animals(project_id: str):
         body = _json_body()
-        items = body.get("animals")
-        if items is None:
+        if "animals" in body:
+            items = body["animals"]
+            if not isinstance(items, list) or not items:
+                raise ApiError("animals 必须是非空数组", 400,
+                               [{"field": "animals", "message": "必须是非空数组"}])
+        elif "count" in body or "prefix" in body:
+            items = _batch_animals(body)
+        else:
             items = [body]
         created = store.create_animals(project_id, items)
         return success({"animals": created}, 201)
@@ -582,7 +678,10 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
     @app.post("/api/drafts")
     def create_draft():
         body = _json_body()
+        # 服务缺省是 oft；界面初始选择（注册表首项 TST）是另一条契约。
         assay = body.get("assay")
+        if assay is None:
+            assay = "oft"
         if not isinstance(assay, str) or not experiments.exists(assay):
             raise ApiError("未知实验", 400, [{"field": "assay", "message": "未知实验"}])
         project_id = body.get("project_id")
@@ -592,20 +691,17 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         if project_id is not None and store.get_project(project_id) is None:
             raise ApiError("项目不存在", 404)
 
-        saved_defaults = store.get_setting("settings.defaults", default={}) or {}
-        saved_detection = store.get_setting("settings.detection", default={}) or {}
-        if not isinstance(saved_defaults, Mapping):
-            saved_defaults = {}
-        if not isinstance(saved_detection, Mapping):
-            saved_detection = {}
-
-        snapshot = snapshot_draft(
-            assay,
-            defaults=saved_defaults.get(assay),
-            detection=saved_detection.get(assay),
-            output=store.get_setting("settings.output", default=None),
-            style=store.get_setting("settings.style", default=None),
-        )
+        # 只复制当时的设置快照：草稿不引用 settings 对象。
+        snapshot = snapshot_draft(assay, settings=_settings_snapshot(store))
+        for key in ("options", "detection", "output", "style"):
+            if key not in body:
+                continue
+            value = body[key]
+            if not isinstance(value, Mapping):
+                raise ApiError(f"{key} 必须是对象", 400,
+                               [{"field": key, "message": "必须是对象"}])
+            for field, item in value.items():
+                snapshot[key][field] = deepcopy(item)
 
         videos = _normalize_videos(body["videos"]) if "videos" in body else []
         draft = {
@@ -617,7 +713,7 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
             "output": snapshot["output"],
             "style": snapshot["style"],
         }
-        issues = validate_draft(draft)
+        issues = validate_draft(draft, settings=_settings_snapshot(store))
         if issues:
             raise ApiError("草稿未通过校验", 400, issues)
 
@@ -650,7 +746,7 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         if "videos" in changes:
             changes["videos"] = _normalize_videos(changes["videos"])
         candidate = {**existing, **changes}
-        issues = validate_draft(candidate)
+        issues = validate_draft(candidate, settings=_settings_snapshot(store))
         if issues:
             raise ApiError("草稿未通过校验", 400, issues)
         record = store.update_draft(draft_id, changes)
@@ -669,19 +765,22 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         draft = _require_draft(draft_id)
         # 最终校验：允许未画完的草稿保存，但不允许带着缺四角开始任务。
         return success({"issues": validate_draft(
-            draft, complete=True, animals=_project_animals(draft))})
+            draft, complete=True, animals=_project_animals(draft),
+            settings=_settings_snapshot(store))})
 
     @app.post("/api/drafts/<draft_id>/validate")
     def validate_draft_post(draft_id: str):
         draft = _require_draft(draft_id)
         return success({"issues": validate_draft(
-            draft, complete=True, animals=_project_animals(draft))})
+            draft, complete=True, animals=_project_animals(draft),
+            settings=_settings_snapshot(store))})
 
     def _run_draft(draft: dict):
         """校验通过才创建并执行任务；返回 run_id 与每个任务的结果。"""
 
         issues = validate_draft(draft, complete=True,
-                                animals=_project_animals(draft))
+                                animals=_project_animals(draft),
+                                settings=_settings_snapshot(store))
         if issues:
             raise ApiError("草稿未通过校验", 400, issues)
         assets = {}
@@ -741,7 +840,9 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         body = _json_body()
         unit_id = body.get("unit_id")
         try:
-            result = preview_service.create_preview(store, paths, draft_id, body)
+            result = preview_service.create_preview(
+                store, paths, draft_id, body,
+                settings=_settings_snapshot(store))
         except ValidationError as error:
             # 字段问题带上单位身份，界面才能定位到具体动物的人工输入。
             raise ApiError(error.message, 400, [error.as_issue(
@@ -750,6 +851,59 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
             raise ApiError(str(error), 422,
                            [{"field": "frame_index", "message": str(error)}])
         return success(result, 201)
+
+    # -- 模板 -----------------------------------------------------------
+    @app.get("/api/templates")
+    def list_templates():
+        assay = request.args.get("assay")
+        if assay is not None and not experiments.exists(assay):
+            raise ApiError("未知实验", 400,
+                           [{"field": "assay", "message": "未知实验"}])
+        return success({"templates": store.list_templates(assay)})
+
+    @app.post("/api/templates")
+    def create_template():
+        body = _json_body()
+        assay = body.get("assay")
+        if not experiments.exists(assay):
+            raise ApiError("未知实验", 400,
+                           [{"field": "assay", "message": "未知实验"}])
+        unit = body.get("unit")
+        if unit is None:
+            unit = {"geometry": body.get("geometry"),
+                    "options": body.get("options")}
+        if not isinstance(unit, Mapping):
+            raise ApiError("unit 必须是对象", 400,
+                           [{"field": "unit", "message": "必须是对象"}])
+        geometry = unit.get("geometry")
+        if not isinstance(geometry, Mapping) or not geometry:
+            raise ApiError("模板缺少场地", 400,
+                           [{"field": "geometry", "message": "至少需要一个场地步骤"}])
+        options = unit.get("options")
+        if options is not None and not isinstance(options, Mapping):
+            raise ApiError("options 必须是对象", 400,
+                           [{"field": "options", "message": "必须是对象"}])
+        payload = field_templates.build_template(assay, unit, options)
+        issues = field_templates.validate_template_payload(payload)
+        if issues:
+            raise ApiError("模板未通过校验", 400, issues)
+        template = store.create_template(
+            assay=assay, name=body.get("name"),
+            geometry=payload["geometry"], options=payload["options"],
+        )
+        return success({"template": template}, 201)
+
+    @app.get("/api/templates/<template_id>")
+    def get_template(template_id: str):
+        template = store.get_template(template_id)
+        if template is None:
+            raise ApiError("模板不存在", 404)
+        return success({"template": template})
+
+    @app.delete("/api/templates/<template_id>")
+    def delete_template(template_id: str):
+        store.delete_template(template_id)
+        return success({"deleted": True})
 
     # -- 页面 -----------------------------------------------------------
     @app.get("/")
@@ -764,6 +918,24 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
             "projects.html", active="projects", projects=store.list_projects()
         )
 
+    def _project_jobs(project_id: str) -> list[dict]:
+        """项目批次：冻结配置里的视频名是结果入口的说明，不改写历史。"""
+
+        rows = []
+        for job in store.list_jobs_for_project(project_id):
+            config = job.get("config") or {}
+            frozen = config.get("job") if isinstance(config, Mapping) else None
+            asset = (frozen or {}).get("asset") if isinstance(frozen, Mapping) else None
+            rows.append({
+                "id": job.get("id"),
+                "run_id": job.get("run_id"),
+                "assay": job.get("assay"),
+                "status": job.get("status"),
+                "created_at": job.get("created_at"),
+                "asset_name": (asset or {}).get("name"),
+            })
+        return rows
+
     @app.get("/projects/<project_id>")
     def page_project(project_id: str):
         project = store.get_project(project_id)
@@ -775,6 +947,10 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
             project=project,
             groups=store.list_groups(project_id),
             animals=store.list_animals(project_id),
+            assets=store.list_assets_for_scope(project_id),
+            drafts=store.list_drafts(project_id),
+            jobs=_project_jobs(project_id),
+            catalog=experiments.catalog(),
         )
 
     @app.get("/analyze")
@@ -822,13 +998,42 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
 
     @app.get("/settings")
     def page_settings():
-        values = {
-            section: store.get_setting(
-                f"settings.{section}", default=_defaults_for(section)
-            )
-            for section in SETTINGS_SECTIONS
-        }
-        return render_template("settings.html", active="settings", values=values)
+        values = {section: _settings_value(store, section)
+                  for section in SETTINGS_SECTIONS}
+        catalog = experiments.catalog()
+        assay_defaults = []
+        assay_detection = []
+        for entry in catalog:
+            merged = deepcopy(entry["defaults"])
+            saved = values["defaults"].get(entry["key"])
+            if isinstance(saved, Mapping):
+                merged.update(deepcopy(dict(saved)))
+            assay_defaults.append({
+                "key": entry["key"], "label": entry["label"],
+                "short": entry["short"], "parameters": entry["parameters"],
+                "current": merged,
+            })
+            detection_values = web_descriptors.detection_defaults(entry["key"])
+            saved_detection = values["detection"].get(entry["key"])
+            if isinstance(saved_detection, Mapping):
+                detection_values.update(deepcopy(dict(saved_detection)))
+            assay_detection.append({
+                "key": entry["key"], "label": entry["label"],
+                "short": entry["short"], "current": detection_values,
+                "overrides": deepcopy(
+                    getattr(experiments.get(entry["key"]),
+                            "DETECTION_DEFAULTS", {})),
+            })
+        return render_template(
+            "settings.html", active="settings",
+            assay_defaults=assay_defaults,
+            assay_detection=assay_detection,
+            output_values=values["output"],
+            style_values=values["style"],
+            detection_fields=web_descriptors.DETECTION_FIELDS,
+            style_fields=web_descriptors.STYLE_FIELDS,
+            output_fields=web_descriptors.OUTPUT_FIELDS,
+        )
 
     @app.get("/landmarks")
     def page_landmarks():

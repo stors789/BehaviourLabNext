@@ -17,6 +17,8 @@ const {
   persistSelection,
   previewContextAlive,
   removeUnit,
+  applyFieldTemplate,
+  templatePayload,
 } = require("../../behaviourlab/web/static/editor-core.js");
 
 const CONFIG = {
@@ -404,6 +406,60 @@ function ezmZoneNotes() {
   assert.ok(censored.text.includes("当前片段"), censored.text);
 }
 
+// 场地模板：保存只留允许尺寸，应用保留平台/非模板参数且互不共享引用。
+function fieldTemplates() {
+  const unit = {
+    geometry: {
+      arena: { type: "quad", points: [[0, 0], [5, 0], [5, 5], [0, 5]] },
+      platform: { type: "point", points: [[2, 2]] },
+      objects: [{ id: "o1", role: "familiar", target: "x", center: [1, 1] }],
+      mask: { type: "polygon", points: [[1, 1], [2, 1], [2, 2]] },
+    },
+    options: { arena_width_cm: 33, arena_height_cm: 44, bin_seconds: 7 },
+  };
+  const payload = templatePayload(unit, ["arena_width_cm", "arena_height_cm"]);
+  assert.deepStrictEqual(payload.options, {
+    arena_width_cm: 33, arena_height_cm: 44,
+  });
+  assert.ok(payload.geometry.mask, "遮罩属于场地几何");
+  assert.strictEqual(payload.geometry.platform, undefined, "平台不进入模板");
+  assert.strictEqual(payload.geometry.objects[0].role, undefined, "角色不进入模板");
+  assert.strictEqual(payload.geometry.objects[0].target, undefined, "目标不进入模板");
+
+  const applied = applyFieldTemplate("nor", payload, {
+    geometry: { platform: { type: "point", points: [[9, 9]] } },
+    options: { bin_seconds: 9, animal_id: "a" },
+  }, ["arena_width_cm", "arena_height_cm"]);
+  assert.strictEqual(applied.options.bin_seconds, 9, "非模板参数保留");
+  assert.strictEqual(applied.options.animal_id, "a");
+  assert.strictEqual(applied.options.arena_width_cm, 33, "模板尺寸合并");
+  assert.deepStrictEqual(applied.geometry.platform.points, [[9, 9]],
+    "平台属于当次试验，应用时保留");
+  assert.strictEqual(applied.geometry.objects[0].role, "familiar",
+    "NOR 无角色时按顺序补第一只 familiar");
+
+  applied.geometry.arena.points[0][0] = 99;
+  assert.strictEqual(payload.geometry.arena.points[0][0], 0, "深拷贝不回流模板");
+  assert.strictEqual(unit.geometry.arena.points[0][0], 0);
+
+  // NOR：沿用当前单位同序号的角色；没有时第一 familiar、第二 novel。
+  const norTemplate = {
+    geometry: { objects: [{ id: "o1", center: [1, 1] },
+                          { id: "o2", center: [9, 9] }] },
+    options: {},
+  };
+  const kept = applyFieldTemplate("nor", norTemplate, {
+    geometry: { objects: [{ role: "novel" }, { role: "familiar" }] },
+    options: {},
+  }, []);
+  assert.deepStrictEqual(kept.geometry.objects.map((item) => item.role),
+    ["novel", "familiar"]);
+  const fresh = applyFieldTemplate("nor", norTemplate,
+    { geometry: {}, options: {} }, []);
+  assert.deepStrictEqual(fresh.geometry.objects.map((item) => item.role),
+    ["familiar", "novel"]);
+}
+
 function mwmQuadrantGuides() {
   const arena = { type: "ellipse", center: [100, 100], radii: [60, 30], angle: 30 };
   const guides = mwmLines(arena, 120, 25);
@@ -731,6 +787,7 @@ function unitRemoval() {
   behaviorNote();
   ezmZoneNotes();
   mwmQuadrantGuides();
+  fieldTemplates();
   barnesScopeNotes();
   manualVisitsParsing();
   animalWindowValues();

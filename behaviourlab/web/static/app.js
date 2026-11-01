@@ -45,9 +45,29 @@
     if (box) box.textContent = describe(error);
   }
 
+  // 其他页面脚本复用同一套请求与错误文案。
+  window.BLApi = { request, describe, showError };
+
   request("/api/health")
     .then(() => setHealth("ok", "本地服务正常"))
     .catch(() => setHealth("off", "服务不可用"));
+
+  // 提交中锁定按钮，失败保留已填内容并给出原因。
+  function lockWhilePending(form, action) {
+    const button = form.querySelector('button[type="submit"]');
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (form.dataset.submitting === "1") return;
+      form.dataset.submitting = "1";
+      if (button) button.disabled = true;
+      try {
+        await action();
+      } finally {
+        form.dataset.submitting = "0";
+        if (button) button.disabled = false;
+      }
+    });
+  }
 
   const toggle = document.querySelector("#new-project-toggle");
   const projectForm = document.querySelector("#project-form");
@@ -60,20 +80,19 @@
       }
     });
 
-    projectForm.addEventListener("submit", async (event) => {
-      event.preventDefault();
+    lockWhilePending(projectForm, async () => {
       const errorBox = projectForm.querySelector(".form-error");
       if (errorBox) errorBox.textContent = "";
       const data = new FormData(projectForm);
       try {
-        await request("/api/projects", {
+        const result = await request("/api/projects", {
           method: "POST",
           body: JSON.stringify({
             name: data.get("name"),
             description: data.get("description") || "",
           }),
         });
-        window.location.reload();
+        window.location.href = `/projects/${result.project.id}`;
       } catch (error) {
         showError(errorBox, error);
       }
@@ -81,8 +100,7 @@
   }
 
   document.querySelectorAll('[data-form="group"]').forEach((form) => {
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
+    lockWhilePending(form, async () => {
       const errorBox = form.querySelector(".form-error");
       if (errorBox) errorBox.textContent = "";
       const data = new FormData(form);
@@ -99,12 +117,13 @@
   });
 
   document.querySelectorAll('[data-form="animal"]').forEach((form) => {
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
+    lockWhilePending(form, async () => {
       const errorBox = form.querySelector(".form-error");
       if (errorBox) errorBox.textContent = "";
       const data = new FormData(form);
       const payload = { name: data.get("name") };
+      const code = (data.get("code") || "").trim();
+      if (code) payload.code = code;
       const groupId = data.get("group_id");
       if (groupId) payload.group_id = groupId;
       try {
@@ -113,38 +132,6 @@
           body: JSON.stringify(payload),
         });
         window.location.reload();
-      } catch (error) {
-        showError(errorBox, error);
-      }
-    });
-  });
-
-  document.querySelectorAll("[data-settings-section]").forEach((form) => {
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const errorBox = form.querySelector(".form-error");
-      const note = form.querySelector(".form-note");
-      const textarea = form.querySelector("textarea");
-      if (errorBox) errorBox.textContent = "";
-      if (note) note.textContent = "";
-      let value;
-      try {
-        value = JSON.parse(textarea.value);
-      } catch (error) {
-        if (errorBox) errorBox.textContent = "JSON 格式有误";
-        return;
-      }
-      try {
-        await request(`/api/settings/${form.dataset.settingsSection}`, {
-          method: "PUT",
-          body: JSON.stringify({ value }),
-        });
-        if (note) {
-          note.textContent = "已保存";
-          window.setTimeout(() => {
-            note.textContent = "";
-          }, 2200);
-        }
       } catch (error) {
         showError(errorBox, error);
       }

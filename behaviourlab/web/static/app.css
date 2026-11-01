@@ -805,6 +805,107 @@ input[type="checkbox"] {
   margin-top: 20px;
 }
 
+/* -- 分区 tab 与设置 ------------------------------------------------ */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin: 18px 0 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.tab {
+  padding: 9px 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13.5px;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--ink);
+}
+
+.tab.is-current {
+  border-bottom-color: var(--accent);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.tabpanel {
+  margin-top: 18px;
+}
+
+.tabpanel .split {
+  margin-top: 0;
+}
+
+.plain-list.counted li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.animal-form {
+  margin-top: 16px;
+}
+
+.media-table .media-name {
+  font-weight: 500;
+}
+
+.media-table td:last-child {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.settings-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.settings-block .field-stack {
+  margin-top: 12px;
+}
+
+.settings-block .fold {
+  margin-top: 10px;
+}
+
+.settings-foot {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 18px;
+  font-size: 13px;
+}
+
+.style-preview {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.style-preview img {
+  display: block;
+  width: 100%;
+  max-width: 560px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.style-preview[data-state="stale"] img {
+  opacity: 0.55;
+}
+
 .settings-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

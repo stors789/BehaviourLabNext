@@ -1,33 +1,135 @@
 {% extends "base.html" %}
 {% block title %}设置 · {{ app_name }}{% endblock %}
 
+{% macro field(param, value, assay, scope) -%}
+{% set key = param.key %}
+{% set numeric = param.type == "number" %}
+<label class="field{{ ' inline' if param.type == 'checkbox' else '' }}">
+  <span>{{ param.label }}{% if param.unit %}（{{ param.unit }}）{% endif %}</span>
+  {% if param.type == "select" %}
+  <select data-scope="{{ scope }}"{% if assay %} data-assay="{{ assay }}"{% endif %}
+          data-param="{{ key }}">
+    {% for choice in param.choices %}
+    <option value="{{ choice.value }}"
+      {{ 'selected' if value is not none and value|string == choice.value|string else '' }}>{{ choice.label }}</option>
+    {% endfor %}
+  </select>
+  {% elif param.type == "checkbox" %}
+  <input type="checkbox" data-scope="{{ scope }}"
+         {% if assay %}data-assay="{{ assay }}"{% endif %} data-param="{{ key }}"
+         {{ 'checked' if value }}>
+  {% elif param.type == "color" %}
+  <input type="color" data-scope="{{ scope }}" data-param="{{ key }}"
+         value="{{ value or '#B86245' }}">
+  {% elif param.type == "text" %}
+  <input type="text" data-scope="{{ scope }}" data-param="{{ key }}"
+         value="{{ value if value is not none else '' }}">
+  {% else %}
+  <input type="number" data-scope="{{ scope }}"
+         {% if assay %}data-assay="{{ assay }}"{% endif %} data-param="{{ key }}"
+         {% if param.min is defined and param.min is not none %}min="{{ param.min }}"{% endif %}
+         {% if param.max is defined and param.max is not none %}max="{{ param.max }}"{% endif %}
+         step="{% if param.step is defined and param.step is not none %}{{ param.step }}{% else %}any{% endif %}"
+         value="{{ value if value is not none else '' }}">
+  {% endif %}
+</label>
+{%- endmacro %}
+
 {% block content %}
 <div class="section-head page-head">
   <h1>设置</h1>
+  <span class="meta">保存后只影响之后新建的草稿</span>
 </div>
 
-{% set labels = {
-  'defaults': '实验默认参数',
-  'detection': '检测默认',
-  'output': '输出',
-  'style': '图形样式'
-} %}
-
-<div class="settings-grid">
-  {% for section in ['defaults', 'detection', 'output', 'style'] %}
-  <section class="panel settings-block">
+<div class="settings-stack">
+  <form class="panel settings-block" data-settings-section="defaults" autocomplete="off">
     <div class="section-head">
-      <h2>{{ labels[section] }}</h2>
+      <h2>实验默认参数</h2>
+      <span class="form-note" role="status"></span>
     </div>
-    <form data-settings-section="{{ section }}">
-      <textarea name="value" rows="9" spellcheck="false">{{ values[section] | tojson(indent=2) }}</textarea>
-      <div class="form-actions">
-        <span class="form-error" role="alert"></span>
-        <span class="form-note" role="status"></span>
-        <button class="button primary" type="submit">保存</button>
+    {% for assay in assay_defaults %}
+    <details class="fold">
+      <summary>{{ assay.label }}</summary>
+      <div class="fold-body field-stack">
+        {% for param in assay.parameters %}
+        {{ field(param, assay.current.get(param.key, param.default), assay.key, 'defaults') }}
+        {% else %}
+        <p class="muted">该实验没有额外参数。</p>
+        {% endfor %}
       </div>
-    </form>
-  </section>
-  {% endfor %}
+    </details>
+    {% endfor %}
+    <div class="form-actions">
+      <span class="form-error" role="alert"></span>
+      <button class="button primary" type="submit">保存实验默认参数</button>
+    </div>
+  </form>
+
+  <form class="panel settings-block" data-settings-section="detection" autocomplete="off">
+    <div class="section-head">
+      <h2>检测默认</h2>
+      <span class="form-note" role="status"></span>
+    </div>
+    {% for assay in assay_detection %}
+    <details class="fold">
+      <summary>{{ assay.label }}{% if assay.overrides %} · 实验覆盖 {{ assay.overrides | length }} 项{% endif %}</summary>
+      <div class="fold-body field-stack">
+        {% for param in detection_fields %}
+        {{ field(param, assay.current.get(param.key), assay.key, 'detection') }}
+        {% endfor %}
+      </div>
+    </details>
+    {% endfor %}
+    <div class="form-actions">
+      <span class="form-error" role="alert"></span>
+      <button class="button primary" type="submit">保存检测默认</button>
+    </div>
+  </form>
+
+  <form class="panel settings-block" data-settings-section="output" autocomplete="off">
+    <div class="section-head">
+      <h2>输出</h2>
+      <span class="form-note" role="status"></span>
+    </div>
+    <div class="field-stack">
+      {% for param in output_fields %}
+      {{ field(param, output_values.get(param.key), None, 'output') }}
+      {% endfor %}
+    </div>
+    <div class="form-actions">
+      <span class="form-error" role="alert"></span>
+      <button class="button primary" type="submit">保存输出</button>
+    </div>
+  </form>
+
+  <form class="panel settings-block" data-settings-section="style" autocomplete="off">
+    <div class="section-head">
+      <h2>图形样式</h2>
+      <span class="form-note" role="status"></span>
+    </div>
+    <div class="field-stack">
+      {% for param in style_fields %}
+      {{ field(param, style_values.get(param.key), None, 'style') }}
+      {% endfor %}
+    </div>
+    <div class="form-actions">
+      <button class="button" type="button" id="style-preview">预览样式</button>
+      <span class="form-error" role="alert"></span>
+      <button class="button primary" type="submit">保存图形样式</button>
+    </div>
+    <div class="style-preview" id="style-preview-box" hidden>
+      <img id="style-preview-image" alt="图形样式预览">
+      <p class="muted" id="style-preview-note"></p>
+    </div>
+  </form>
 </div>
+
+<p class="settings-foot">
+  <a class="link" href="/landmarks">经典关键点验证</a>
+  <span class="muted">该入口在接通前不产生结果。</span>
+</p>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='settings.js') }}" defer></script>
 {% endblock %}

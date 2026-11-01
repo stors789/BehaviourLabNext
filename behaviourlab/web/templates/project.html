@@ -8,80 +8,208 @@
     <h1>{{ project.name }}</h1>
   </div>
   <div class="head-actions">
-    <span class="project-meta">{{ project.group_count }} 组 · {{ project.animal_count }} 只</span>
-    <a class="button" href="/analyze?mode=project&project={{ project.id }}">分析</a>
+    <span class="project-meta">{{ project.group_count }} 组 · {{ project.animal_count }} 只 · {{ project.updated_at[:16] | replace("T", " ") }}</span>
+    <a class="button" href="/analyze?mode=project&project={{ project.id }}">开始分析</a>
   </div>
 </div>
 
-{% if project.description %}
-<p class="lede">{{ project.description }}</p>
-{% endif %}
+<nav class="tabs" role="tablist" aria-label="项目分区">
+  <button class="tab is-current" type="button" role="tab" data-tab="org">组别与小鼠</button>
+  <button class="tab" type="button" role="tab" data-tab="media">视频库</button>
+  <button class="tab" type="button" role="tab" data-tab="analysis">分析与结果</button>
+</nav>
 
-<div class="split">
-  <section class="panel">
-    <div class="section-head">
-      <h2>分组</h2>
-    </div>
-    {% if groups %}
-    <ul class="plain-list">
-      {% for group in groups %}
-      <li>{{ group.name }}</li>
-      {% endfor %}
-    </ul>
-    {% else %}
-    <p class="muted">还没有分组。</p>
-    {% endif %}
-
-    <form class="form inline" data-form="group" data-project="{{ project.id }}" autocomplete="off">
-      <div class="field grow">
-        <label for="group-name">新分组</label>
-        <input id="group-name" name="name" type="text" maxlength="200" required>
+<section class="tabpanel" data-panel="org">
+  <div class="split">
+    <section class="panel">
+      <div class="section-head">
+        <h2>分组</h2>
+        <span class="meta">{{ groups | length }}</span>
       </div>
-      <button class="button" type="submit">添加</button>
-      <span class="form-error" role="alert"></span>
-    </form>
-  </section>
-
-  <section class="panel">
-    <div class="section-head">
-      <h2>动物</h2>
-    </div>
-    {% if animals %}
-    <table class="simple-table">
-      <thead>
-        <tr><th>名称</th><th>分组</th><th>性别</th></tr>
-      </thead>
-      <tbody>
-        {% for animal in animals %}
-        <tr>
-          <td>{{ animal.name }}</td>
-          <td>{{ animal.group_name or '—' }}</td>
-          <td>{{ animal.sex or '—' }}</td>
-        </tr>
+      {% if groups %}
+      <ul class="plain-list counted">
+        {% for group in groups %}
+        <li>
+          <span>{{ group.name }}</span>
+          <span class="meta">{{ animals | selectattr("group_id", "equalto", group.id) | list | length }} 只</span>
+        </li>
         {% endfor %}
-      </tbody>
-    </table>
-    {% else %}
-    <p class="muted">还没有动物。</p>
-    {% endif %}
+      </ul>
+      {% else %}
+      <p class="muted">还没有分组；小鼠也可以不分组。</p>
+      {% endif %}
 
-    <form class="form inline" data-form="animal" data-project="{{ project.id }}" autocomplete="off">
-      <div class="field grow">
-        <label for="animal-name">新动物</label>
-        <input id="animal-name" name="name" type="text" maxlength="120" required>
+      <form class="form inline" data-form="group" data-project="{{ project.id }}" autocomplete="off">
+        <div class="field grow">
+          <label for="group-name">新分组</label>
+          <input id="group-name" name="name" type="text" maxlength="200" required>
+        </div>
+        <button class="button" type="submit">添加组</button>
+        <span class="form-error" role="alert"></span>
+      </form>
+    </section>
+
+    <section class="panel">
+      <div class="section-head">
+        <h2>小鼠</h2>
+        <span class="meta">{{ animals | length }}</span>
       </div>
-      <div class="field">
-        <label for="animal-group">分组</label>
-        <select id="animal-group" name="group_id">
-          <option value="">未分组</option>
-          {% for group in groups %}
-          <option value="{{ group.id }}">{{ group.name }}</option>
+      {% if animals %}
+      <table class="simple-table">
+        <thead>
+          <tr><th>名称</th><th>编号</th><th>分组</th></tr>
+        </thead>
+        <tbody>
+          {% for animal in animals %}
+          <tr>
+            <td>{{ animal.name }}</td>
+            <td>{{ animal.code or '—' }}</td>
+            <td>{{ animal.group_name or '不分组' }}</td>
+          </tr>
           {% endfor %}
-        </select>
+        </tbody>
+      </table>
+      {% else %}
+      <p class="muted">还没有小鼠。添加后可在工作台按名称绑定。</p>
+      {% endif %}
+
+      <form class="form animal-form" data-form="animal" data-project="{{ project.id }}" autocomplete="off">
+        <div class="field-row">
+          <div class="field grow">
+            <label for="animal-name">名称</label>
+            <input id="animal-name" name="name" type="text" maxlength="120" required>
+          </div>
+          <div class="field">
+            <label for="animal-code">编号</label>
+            <input id="animal-code" name="code" type="text" maxlength="64" placeholder="可空">
+          </div>
+          <div class="field">
+            <label for="animal-group">分组</label>
+            <select id="animal-group" name="group_id">
+              <option value="">不分组</option>
+              {% for group in groups %}
+              <option value="{{ group.id }}">{{ group.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+        <div class="form-actions">
+          <span class="form-error" role="alert"></span>
+          <button class="button primary" type="submit">添加小鼠</button>
+        </div>
+      </form>
+    </section>
+  </div>
+</section>
+
+<section class="tabpanel" data-panel="media" hidden>
+  <section class="import-panel">
+    <section class="import-zone" id="project-dropzone" data-project="{{ project.id }}">
+      <p class="drop-title">拖入视频文件</p>
+      <p class="drop-hint">也可选择文件或整个文件夹</p>
+      <div class="import-actions">
+        <button class="button" type="button" id="project-pick-files">选择文件</button>
+        <button class="button" type="button" id="project-pick-folder">选择文件夹</button>
       </div>
-      <button class="button" type="submit">添加</button>
-      <span class="form-error" role="alert"></span>
-    </form>
+    </section>
+    <p class="import-status" id="import-status" hidden></p>
+    <ul class="error-list" id="import-errors" hidden></ul>
   </section>
-</div>
+
+  <div class="section-head">
+    <h2>本项目视频</h2>
+    <label class="field inline">
+      <span>实验</span>
+      <select id="media-assay">
+        {% for item in catalog %}
+        <option value="{{ item.key }}">{{ item.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </div>
+  {% if assets %}
+  <table class="simple-table media-table">
+    <thead>
+      <tr><th>文件</th><th>时长</th><th>分辨率</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for asset in assets %}
+      <tr>
+        <td class="media-name">{{ asset.name }}</td>
+        <td>{% if asset.metadata and asset.metadata.get("duration_s") is not none %}{{ "%.1f" | format(asset.metadata.get("duration_s")) }} s{% else %}—{% endif %}</td>
+        <td>{% if asset.metadata and asset.metadata.get("width") %}{{ asset.metadata.get("width") }}×{{ asset.metadata.get("height") }}{% else %}—{% endif %}</td>
+        <td><button class="button small" type="button" data-analyze-asset="{{ asset.id }}">分析此视频</button></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-state">
+    <p>本项目还没有视频。</p>
+    <p class="muted">导入后即可为每个视频选择小鼠并开始分析。</p>
+  </div>
+  {% endif %}
+</section>
+
+<section class="tabpanel" data-panel="analysis" hidden>
+  <div class="section-head">
+    <h2>未提交草稿</h2>
+    <span class="meta">{{ drafts | length }}</span>
+  </div>
+  {% if drafts %}
+  <table class="simple-table">
+    <thead>
+      <tr><th>实验</th><th>视频</th><th>更新时间</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for draft in drafts %}
+      <tr>
+        <td>
+          {% for item in catalog %}{% if item.key == draft.assay %}{{ item.label }}{% endif %}{% endfor %}
+        </td>
+        <td>{{ draft.videos | length }}</td>
+        <td>{{ draft.updated_at[:16] | replace("T", " ") }}</td>
+        <td><a class="link" href="/analyze?mode=project&project={{ project.id }}&draft_id={{ draft.id }}&step=range">继续设置</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-inline">
+    <p>还没有草稿。</p>
+    <a class="button" href="/analyze?mode=project&project={{ project.id }}">新建分析</a>
+  </div>
+  {% endif %}
+
+  <div class="section-head">
+    <h2>批次</h2>
+    <span class="meta">{{ jobs | length }}</span>
+  </div>
+  {% if jobs %}
+  <table class="simple-table">
+    <thead>
+      <tr><th>实验</th><th>视频</th><th>状态</th><th>创建时间</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for job in jobs %}
+      <tr>
+        <td>{{ job.assay }}</td>
+        <td>{{ job.asset_name or '—' }}</td>
+        <td>{{ job.status }}</td>
+        <td>{{ job.created_at[:16] | replace("T", " ") }}</td>
+        <td>{% if job.status == "done" %}<a class="link" href="/results/{{ job.run_id }}">查看结果</a>{% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">本项目还没有分析批次。</p>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='pickers.js') }}" defer></script>
+<script src="{{ url_for('static', filename='editor-core.js') }}" defer></script>
+<script src="{{ url_for('static', filename='project.js') }}" defer></script>
 {% endblock %}

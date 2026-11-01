@@ -160,7 +160,10 @@ def test_draft_creation_snapshots_saved_defaults(client):
 
     validate = client.get(f"/api/drafts/{draft['id']}/validate")
     assert validate.status_code == 200
-    assert validate.get_json()["data"]["issues"] == []
+    # 最终校验必须报出“还没有视频”；保存草稿本身仍然允许。
+    assert [(item["field"], item["message"])
+            for item in validate.get_json()["data"]["issues"]] == [
+        ("videos", "草稿还没有视频")]
 
 
 def test_draft_with_video_and_unit_defaults(client):

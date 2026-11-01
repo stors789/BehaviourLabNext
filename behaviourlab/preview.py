@@ -297,8 +297,13 @@ def create_preview(
     paths: DataPaths,
     draft_id: str,
     payload: Mapping[str, Any],
+    *,
+    settings: Mapping[str, Any] | None = None,
 ) -> dict:
-    """生成一张真实源帧预览；失败抛 ValidationError / media.MediaError。"""
+    """生成一张真实源帧预览；失败抛 ValidationError / media.MediaError。
+
+    ``settings`` 只作最底层：完整草稿字段（含快照默认）优先于它。
+    """
 
     draft = store.get_draft(draft_id)
     if draft is None:
@@ -339,8 +344,10 @@ def create_preview(
     geometry = unit.get("geometry") or {}
     # 检测区域、签名与行为核心必须用同一份最终配置：只叠显式覆盖会在
     # 稀疏 API 配置下漏掉默认 dark_box_visible，让检测区域少掉暗室。
-    options = resolve_options(draft["assay"], draft=draft, video=video, unit=unit)
-    settings = resolve_detection(draft["assay"], draft=draft, video=video, unit=unit)
+    options = resolve_options(draft["assay"], settings=settings, draft=draft,
+                              video=video, unit=unit)
+    detection_settings = resolve_detection(
+        draft["assay"], settings=settings, draft=draft, video=video, unit=unit)
     metadata = asset.get("metadata") or {}
     duration_s = metadata.get("duration_s")
     scope = _scope(draft.get("assay", ""), video, unit, options,
@@ -361,12 +368,12 @@ def create_preview(
             region, region_source = detection.geometry_region(
                 geometry, draft["assay"], options, width, height
             )
-            background = _background_for(settings, asset, video, orientation,
-                                         width, height)
+            background = _background_for(detection_settings, asset, video,
+                                         orientation, width, height)
             window_key = repr(video.get("window"))
             video_key = (asset.get("id"), orientation, window_key)
             detector = detection.shared_detector(
-                video_key, settings, background=background,
+                video_key, detection_settings, background=background,
             )
             session_key = (draft.get("id"),) + video_key
             # 证据随会话保留：视频被移出草稿、单位被删时才释放。
@@ -380,9 +387,10 @@ def create_preview(
             )
             result = observation.track(
                 session_key, unit.get("id") or id(unit),
-                image=info.image, region=region, settings=settings,
+                image=info.image, region=region, settings=detection_settings,
                 signature=observation.signature_of(
-                    geometry, settings, bool(options.get("dark_box_visible"))),
+                    geometry, detection_settings,
+                    bool(options.get("dark_box_visible"))),
                 assay=draft["assay"], frame_index=info.index,
                 time_s=float(info.time_s),
                 foreground=detector.foreground(info.image),
@@ -402,7 +410,7 @@ def create_preview(
             "window": unit.get("window"),
             "geometry": geometry,
             "options": dict(options),
-            "detection": settings,
+            "detection": detection_settings,
             # 人工记录按值传入：预览不得写回或改写草稿里的输入。
             "manual": deepcopy(unit.get("manual")),
         }

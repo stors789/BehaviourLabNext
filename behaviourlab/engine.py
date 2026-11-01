@@ -71,18 +71,43 @@ def _module(assay: str):
         raise ValidationError("未知实验", "assay") from error
 
 
+SETTING_SECTIONS = ("defaults", "detection", "output", "style")
+
+
+def setting_layer(settings: Mapping[str, Any] | None, assay: str,
+                  section: str) -> dict | None:
+    """取该实验的 section 层。
+
+    ``defaults``/``detection`` 在设置里按实验键保存，解析时必须只取该实验的
+    子对象，不能把整个实验映射当作参数；``output``/``style`` 是单对象。
+    """
+
+    if not isinstance(settings, Mapping):
+        return None
+    value = settings.get(section)
+    if not isinstance(value, Mapping):
+        return None
+    if section in ("defaults", "detection"):
+        sub = value.get(assay)
+        return deepcopy(dict(sub)) if isinstance(sub, Mapping) else None
+    return deepcopy(dict(value))
+
+
 def resolve_option_layers(
     factory: Mapping[str, Any],
     *,
+    settings: Mapping[str, Any] | None = None,
     saved: Mapping[str, Any] | None = None,
     draft: Mapping[str, Any] | None = None,
     video: Mapping[str, Any] | None = None,
     unit: Mapping[str, Any] | None = None,
+    assay: str = "",
 ) -> dict:
-    """实验工厂 → 保存默认 → draft → video → unit。"""
+    """实验工厂 → 设置默认 → 保存默认 → draft → video → unit。"""
 
     return merge_layers(
         factory,
+        setting_layer(settings, assay, "defaults"),
         saved,
         (draft or {}).get("options"),
         (video or {}).get("options"),
@@ -93,33 +118,37 @@ def resolve_option_layers(
 def resolve_options(
     assay: str,
     *,
+    settings: Mapping[str, Any] | None = None,
     saved: Mapping[str, Any] | None = None,
     draft: Mapping[str, Any] | None = None,
     video: Mapping[str, Any] | None = None,
     unit: Mapping[str, Any] | None = None,
 ) -> dict:
-    """实验工厂 → 保存默认 → draft → video → unit。"""
+    """实验工厂 → 设置默认 → 保存默认 → draft → video → unit。"""
 
     module = _module(assay)
     return resolve_option_layers(
-        module.DEFAULTS, saved=saved, draft=draft, video=video, unit=unit
+        module.DEFAULTS, settings=settings, saved=saved, draft=draft,
+        video=video, unit=unit, assay=assay,
     )
 
 
 def resolve_detection(
     assay: str,
     *,
+    settings: Mapping[str, Any] | None = None,
     saved: Mapping[str, Any] | None = None,
     draft: Mapping[str, Any] | None = None,
     video: Mapping[str, Any] | None = None,
     unit: Mapping[str, Any] | None = None,
 ) -> dict:
-    """公共工厂 → 实验检测默认 → 保存检测默认 → draft → video → unit。"""
+    """公共工厂 → 实验检测默认 → 设置检测 → draft → video → unit。"""
 
     module = _module(assay)
     return merge_layers(
         common_detection_defaults(),
         getattr(module, "DETECTION_DEFAULTS", {}),
+        setting_layer(settings, assay, "detection"),
         saved,
         (draft or {}).get("detection"),
         (video or {}).get("detection"),
@@ -128,29 +157,65 @@ def resolve_detection(
 
 
 def resolve_output(
-    *, saved: Mapping[str, Any] | None = None, draft: Mapping[str, Any] | None = None
+    *,
+    settings: Mapping[str, Any] | None = None,
+    saved: Mapping[str, Any] | None = None,
+    draft: Mapping[str, Any] | None = None,
 ) -> dict:
-    return merge_layers(COMMON_OUTPUT_DEFAULTS, saved, (draft or {}).get("output"))
+    return merge_layers(COMMON_OUTPUT_DEFAULTS, setting_layer(settings, "", "output"),
+                        saved, (draft or {}).get("output"))
 
 
 def resolve_style(
-    *, saved: Mapping[str, Any] | None = None, draft: Mapping[str, Any] | None = None
+    *,
+    settings: Mapping[str, Any] | None = None,
+    saved: Mapping[str, Any] | None = None,
+    draft: Mapping[str, Any] | None = None,
 ) -> dict:
-    return merge_layers(COMMON_STYLE_DEFAULTS, saved, (draft or {}).get("style"))
+    return merge_layers(COMMON_STYLE_DEFAULTS, setting_layer(settings, "", "style"),
+                        saved, (draft or {}).get("style"))
+
+
+def resolve_job(
+    assay: str,
+    *,
+    settings: Mapping[str, Any] | None = None,
+    draft: Mapping[str, Any] | None = None,
+    video: Mapping[str, Any] | None = None,
+    unit: Mapping[str, Any] | None = None,
+) -> dict:
+    """通用解析入口：一次给出 options/detection/output/style 四层结果。
+
+    后层优先；两侧都是对象时逐键递归合并，列表/标量/null 整体替换。
+    """
+
+    return {
+        "options": resolve_options(assay, settings=settings, draft=draft,
+                                   video=video, unit=unit),
+        "detection": resolve_detection(assay, settings=settings, draft=draft,
+                                       video=video, unit=unit),
+        "output": resolve_output(settings=settings, draft=draft),
+        "style": resolve_style(settings=settings, draft=draft),
+    }
 
 
 def snapshot_draft(
     assay: str,
     *,
+    settings: Mapping[str, Any] | None = None,
     defaults: Mapping[str, Any] | None = None,
     detection: Mapping[str, Any] | None = None,
     output: Mapping[str, Any] | None = None,
     style: Mapping[str, Any] | None = None,
 ) -> dict:
-    """创建草稿时的独立快照：工厂值被保存默认按顶层字段覆盖。"""
+    """创建草稿时的独立快照：工厂值叠加设置默认，再按顶层字段覆盖。
+
+    快照是深拷贝，草稿不引用 settings 对象；之后的设置修改不影响它。
+    """
 
     module = _module(assay)
-    options = deepcopy(module.DEFAULTS)
+    options = merge_layers(module.DEFAULTS,
+                           setting_layer(settings, assay, "defaults"))
     if defaults:
         if not isinstance(defaults, Mapping):
             raise ValidationError("默认参数必须是对象", "defaults")
@@ -161,10 +226,13 @@ def snapshot_draft(
         "detection": merge_layers(
             common_detection_defaults(),
             getattr(module, "DETECTION_DEFAULTS", {}),
+            setting_layer(settings, assay, "detection"),
             detection,
         ),
-        "output": merge_layers(COMMON_OUTPUT_DEFAULTS, output),
-        "style": merge_layers(COMMON_STYLE_DEFAULTS, style),
+        "output": merge_layers(COMMON_OUTPUT_DEFAULTS,
+                               setting_layer(settings, "", "output"), output),
+        "style": merge_layers(COMMON_STYLE_DEFAULTS,
+                              setting_layer(settings, "", "style"), style),
     }
 
 
@@ -313,7 +381,8 @@ def _window_issues(window: Any, field: str, *, video_window: bool) -> list[dict]
 
 def validate_draft(draft: Mapping[str, Any], *,
                    complete: bool = False,
-                   animals: Iterable[str] | None = None) -> list[dict]:
+                   animals: Iterable[str] | None = None,
+                   settings: Mapping[str, Any] | None = None) -> list[dict]:
     """草稿结构校验；实验专属参数由各实验模块校验。
 
     complete=False 允许未画完的草稿保存；complete=True 用于最终校验与开始
@@ -341,6 +410,9 @@ def validate_draft(draft: Mapping[str, Any], *,
     if not isinstance(videos, list):
         issues.append({"field": "videos", "message": "必须是数组"})
         return issues
+    if complete and not videos:
+        # 保存草稿可以还没有视频；最终校验必须明确报出来。
+        issues.append({"field": "videos", "message": "草稿还没有视频"})
 
     video_ranges: list[tuple[int, int, str | None]] = []
 
@@ -440,8 +512,9 @@ def validate_draft(draft: Mapping[str, Any], *,
                 manual_checker = getattr(experiments.get(assay),
                                          "validate_manual", None)
                 if manual_checker is not None:
-                    merged_options = resolve_options(assay, draft=draft,
-                                                     video=video, unit=unit)
+                    merged_options = resolve_options(
+                        assay, settings=settings, draft=draft,
+                        video=video, unit=unit)
                     for issue in manual_checker(unit, options=merged_options,
                                                 complete=complete):
                         entry = dict(issue)
@@ -457,7 +530,8 @@ def validate_draft(draft: Mapping[str, Any], *,
                               unit.get("options"))
                     provided = {key for layer in layers if isinstance(layer, Mapping)
                                 for key in layer}
-                    merged = resolve_options(assay, draft=draft, video=video,
+                    merged = resolve_options(assay, settings=settings,
+                                             draft=draft, video=video,
                                              unit=unit)
                     for issue in checker(merged, unit.get("geometry") or {}, provided,
                                          complete=complete):
@@ -472,7 +546,8 @@ def validate_draft(draft: Mapping[str, Any], *,
                                           "validate_unit_manual", None)
                                   if experiments.exists(assay) else None)
                 if manual_checker is not None:
-                    merged = resolve_options(assay, draft=draft, video=video,
+                    merged = resolve_options(assay, settings=settings,
+                                             draft=draft, video=video,
                                              unit=unit)
                     for issue in manual_checker(unit, options=merged,
                                                 complete=complete):
@@ -485,7 +560,8 @@ def validate_draft(draft: Mapping[str, Any], *,
                     # 自动单位按合并后的检测配置校验：draft/video 层的无效值
                     # 若被单位层覆盖，不应再单独报错。
                     merged_detection = resolve_detection(
-                        assay, draft=draft, video=video, unit=unit)
+                        assay, settings=settings, draft=draft,
+                        video=video, unit=unit)
                     prefix = f"{unit_prefix}.detection"
                     issues.extend(validate_detection(merged_detection, prefix))
                     issues.extend(_detection_gaps(merged_detection, prefix))
@@ -558,8 +634,13 @@ def build_resolved_job(
     job_id: str,
     run_id: str,
     project_id: str | None = None,
+    settings: Mapping[str, Any] | None = None,
 ) -> dict:
-    """为一个视频冻结一份完整解析结果；每个单位都带完整 options/detection。"""
+    """为一个视频冻结一份完整解析结果；每个单位都带完整 options/detection。
+
+    ``settings`` 只作为最底层补充；Jobs.submit 传 ``{}``，因为完整默认值在
+    草稿创建时已经快照，提交不得重新读取新的设置。
+    """
 
     assay = draft.get("assay")
     module = _module(assay)
@@ -590,9 +671,12 @@ def build_resolved_job(
                 "window": deepcopy(unit.get("window")),
                 "geometry": deepcopy(unit.get("geometry") or {}),
                 "manual": deepcopy(unit.get("manual")),
-                "options": resolve_options(assay, draft=draft, video=video, unit=unit),
-                "detection": resolve_detection(assay, draft=draft, video=video,
-                                               unit=unit),
+                "options": resolve_options(assay, settings=settings,
+                                           draft=draft, video=video,
+                                           unit=unit),
+                "detection": resolve_detection(assay, settings=settings,
+                                                draft=draft, video=video,
+                                                unit=unit),
             }
         )
 
@@ -613,11 +697,13 @@ def build_resolved_job(
         "orientation": video.get("orientation", 0),
         "fps_override": video.get("fps_override"),
         "sample_fps": video.get("sample_fps"),
-        "options": resolve_options(assay, draft=draft, video=video),
-        "detection": resolve_detection(assay, draft=draft, video=video),
+        "options": resolve_options(assay, settings=settings, draft=draft,
+                                   video=video),
+        "detection": resolve_detection(assay, settings=settings, draft=draft,
+                                        video=video),
         "units": units,
-        "output": resolve_output(draft=draft),
-        "style": resolve_style(draft=draft),
+        "output": resolve_output(settings=settings, draft=draft),
+        "style": resolve_style(settings=settings, draft=draft),
         "algorithm_version": ALGORITHM_VERSION,
     }
 

@@ -383,6 +383,83 @@
     };
   }
 
+  // 场地模板：只保留场地几何与允许的尺寸；平台/角色等试验相关字段不进模板。
+  const TEMPLATE_BLOCKED_KEYS = ["role", "target", "target_id", "target_hole",
+    "target_hole_id", "target_quadrant", "platform", "animal_id", "manual",
+    "window"];
+
+  function stripTemplateKeys(value) {
+    if (Array.isArray(value)) return value.map(stripTemplateKeys);
+    if (value && typeof value === "object") {
+      const result = {};
+      Object.keys(value).forEach((key) => {
+        if (TEMPLATE_BLOCKED_KEYS.indexOf(key) >= 0) return;
+        result[key] = stripTemplateKeys(value[key]);
+      });
+      return result;
+    }
+    return value;
+  }
+
+  function templatePayload(unit, templateKeys) {
+    const allowed = Array.isArray(templateKeys) ? templateKeys : [];
+    const geometry = unit && unit.geometry && typeof unit.geometry === "object"
+      ? unit.geometry : {};
+    const options = unit && unit.options && typeof unit.options === "object"
+      ? unit.options : {};
+    const picked = {};
+    allowed.forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(options, key)) {
+        picked[key] = clone(options[key]);
+      }
+    });
+    return { geometry: stripTemplateKeys(clone(geometry)), options: picked };
+  }
+
+  function applyFieldTemplate(assay, template, unit, templateKeys) {
+    const allowed = Array.isArray(templateKeys) ? templateKeys : [];
+    const source = template && template.geometry &&
+      typeof template.geometry === "object" ? template.geometry : {};
+    const geometry = stripTemplateKeys(clone(source));
+    const current = unit && unit.geometry && typeof unit.geometry === "object"
+      ? unit.geometry : {};
+    // 平台是当次试验的目标，模板里没有它：应用时保留当前值。
+    if (!geometry.platform && current.platform) {
+      geometry.platform = clone(current.platform);
+    }
+    if (assay === "nor" && Array.isArray(geometry.objects)) {
+      // 角色被剥离：优先沿用当前单位同序号的角色，否则第一 familiar、第二 novel。
+      const defaults = ["familiar", "novel"];
+      const previous = Array.isArray(current.objects) ? current.objects : [];
+      const roles = [];
+      geometry.objects.forEach((item, index) => {
+        if (!item || typeof item !== "object") return;
+        let role = item.role;
+        if (role !== "familiar" && role !== "novel") {
+          role = previous[index] && previous[index].role;
+        }
+        if (role !== "familiar" && role !== "novel") {
+          role = defaults[index % 2];
+        }
+        item.role = role;
+        roles.push(role);
+      });
+      if (roles.length === 2 && roles[0] === roles[1]) {
+        geometry.objects[1].role = roles[0] === "familiar" ? "novel" : "familiar";
+      }
+    }
+    const options = Object.assign({},
+      clone((unit && unit.options) || {}));
+    const templateOptions = template && template.options &&
+      typeof template.options === "object" ? template.options : {};
+    allowed.forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(templateOptions, key)) {
+        options[key] = clone(templateOptions[key]);
+      }
+    });
+    return { geometry, options };
+  }
+
   function SaveQueue(send) {
     this.send = send;
     this.editVersion = 0;
@@ -1239,6 +1316,8 @@
     moveRadius,
     mwmLines,
     ezmGuides,
+    applyFieldTemplate,
+    templatePayload,
     norObjects,
     norShape,
     norApply,
