@@ -407,17 +407,25 @@ def evaluate(paths: DataPaths, session: Mapping[str, Any], *,
         raise ValidationError(
             f"选中帧无法解码：{missing[0]}", "frames")
 
-    tolerance = float(session.get("tolerance_px") or 10)
+    evaluation = compute_evaluation(
+        session.get("records") or [], predicted, times,
+        tolerance=float(session.get("tolerance_px") or 10),
+        supported=supported)
+    return evaluation
+
+
+def compute_evaluation(records: Sequence[Mapping[str, Any]],
+                       predicted: Mapping[int, Mapping[str, Any]],
+                       times: Mapping[int, float], *, tolerance: float,
+                       supported: Sequence[str]) -> dict:
+    """只做误差统计：人工可见点、覆盖、容差内命中与匹配误差分位。"""
+
     by_point: dict[str, dict] = {
         name: {"visible": 0, "covered": 0, "hit": 0, "errors": []}
-        for name in PREDICTED
+        for name in POINTS
     }
-    for name in POINTS:
-        if name not in by_point:
-            by_point[name] = {"visible": 0, "covered": 0, "hit": 0,
-                              "errors": []}
     rows = []
-    for record in session.get("records") or []:
+    for record in records:
         frame_index = int(record["frame"])
         points_out = {}
         for name, mark in (record.get("points") or {}).items():
@@ -425,8 +433,8 @@ def evaluate(paths: DataPaths, session: Mapping[str, Any], *,
             visible = bool(mark.get("visible"))
             if visible:
                 stat["visible"] += 1
-            prediction = (predicted.get(frame_index) or {}).get(name) \
-                if name in supported else None
+            prediction = ((predicted.get(frame_index) or {}).get(name)
+                          if name in supported else None)
             error = None
             hit = None
             if visible and prediction is not None:
@@ -437,7 +445,7 @@ def evaluate(paths: DataPaths, session: Mapping[str, Any], *,
                 if hit:
                     stat["hit"] += 1
             elif visible:
-                # 人工可见但没有（或该点不支持）预测：明确未命中。
+                # 人工可见但没有（或该点不支持）预测：明确未命中，不缩小分母。
                 hit = False
             points_out[name] = {
                 "visible": visible,
@@ -445,8 +453,7 @@ def evaluate(paths: DataPaths, session: Mapping[str, Any], *,
                 "error_px": error,
                 "hit": hit,
             }
-        rows.append({"frame": frame_index,
-                     "time_s": times.get(frame_index),
+        rows.append({"frame": frame_index, "time_s": times.get(frame_index),
                      "points": points_out})
 
     total_visible = sum(stat["visible"] for stat in by_point.values())
@@ -467,8 +474,8 @@ def evaluate(paths: DataPaths, session: Mapping[str, Any], *,
     }
     for stat in by_point.values():
         stat.pop("errors", None)
-    evaluation = {
-        "tolerance_px": tolerance,
+    return {
+        "tolerance_px": float(tolerance),
         "metrics": metrics,
         "by_point": by_point,
         "records": rows,
@@ -477,7 +484,6 @@ def evaluate(paths: DataPaths, session: Mapping[str, Any], *,
         "matched_error_p90_px": p90,
         "note": "这是关键点像素误差，不是动物行为准确率。",
     }
-    return evaluation
 
 
 def save_evaluation(paths: DataPaths, session: Mapping[str, Any],

@@ -233,7 +233,8 @@ def _fmt(value: Any) -> str:
 def _unit_figures(target: Path, summary: Mapping[str, Any],
                   rows: Sequence[Mapping[str, Any]], stem: str,
                   style: Mapping[str, Any] | None, *,
-                  events: Sequence[Mapping[str, Any]] | None = None) -> dict:
+                  events: Sequence[Mapping[str, Any]] | None = None,
+                  bins: Sequence[Mapping[str, Any]] | None = None) -> dict:
     """每动物可用图形：活动曲线不依赖场地宽高，轨迹/热图才需要。"""
 
     missing_size_note = False
@@ -378,11 +379,13 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
             notes.append(f"区域时长图生成失败：{error}")
 
     if str(summary.get("mode")) == "ymaze":
-        # 序列图直接读最终 arm_entries/events，不重跑检测也不重算交替。
+        # 序列图直接读最终 arm_entries/events 与分箱计数，不重跑检测也不重算交替。
         sequence_figure = f"{stem}_sequence.png"
         try:
-            if figures.ymaze_sequence_png(target / sequence_figure, events,
-                                          title=name, style=style):
+            if figures.ymaze_sequence_png(
+                    target / sequence_figure, events, bins=bins,
+                    window_start_s=summary.get("analysis_window_start_s"),
+                    title=name, style=style):
                 figures_info["sequence"] = sequence_figure
             else:
                 notes.append("没有确认的入臂事件，未生成序列图")
@@ -396,7 +399,7 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
             notes.append("没有可用的场地尺寸，未生成图形")
 
     if isinstance(summary.get("objects"), list) and summary["objects"]:
-        objects_figure = f"{stem}_objects.png"
+        objects_figure = f"{stem}_exploration.png"
         try:
             if figures.nor_objects_png(target / objects_figure, summary,
                                        title=name, style=style):
@@ -518,7 +521,10 @@ def write_outputs(directory: str | Path, job: Mapping[str, Any],
                 if item.get("unit_id") == unit_id]
         events = [item for item in event_rows if item.get("unit_id") == unit_id]
         stem = unit_stem(index)
-        info = _unit_figures(target, row, rows, stem, style, events=events)
+        unit_bins = [item for item in bin_rows
+                     if item.get("unit_id") == unit_id]
+        info = _unit_figures(target, row, rows, stem, style, events=events,
+                             bins=unit_bins)
         names = [info[key] for key in ("trajectory", "heatmap", "activity",
                                        "objects", "zones", "sequence")
                  if info.get(key)]

@@ -66,8 +66,8 @@ RUN_FILES = ("observations.csv", "summary.csv", "events.csv", "bins.csv",
              "zones.csv", "frozen_job.json", "results.json",
              "result_manifest.json", "report.md")
 RUN_FIGURE = re.compile(
-    r"[A-Za-z0-9_-]+_(?:trajectory|heatmap|activity|objects|zones|sequence)"
-    r"\.png")
+    r"[A-Za-z0-9_-]+_(?:trajectory|heatmap|activity|objects|zones|sequence"
+    r"|exploration)\.png")
 RUN_VIDEO = re.compile(r"(?:[A-Za-z0-9_-]+_)?annotated\.mp4")
 
 
@@ -268,6 +268,19 @@ def _run_payloads(directory: Path) -> list[dict]:
     return [_run_payload(entry) for entry in entries]
 
 
+def _rail_groups(files: list[str]) -> dict:
+    """结果页文件栏分组：图、视频、表格、报告与配置。"""
+
+    lower = [(name, str(name).lower()) for name in files]
+    return {
+        "figures": [name for name, low in lower if low.endswith(".png")],
+        "videos": [name for name, low in lower if low.endswith(".mp4")],
+        "tables": [name for name, low in lower if low.endswith(".csv")],
+        "docs": [name for name, low in lower
+                 if not low.endswith((".png", ".mp4", ".csv"))],
+    }
+
+
 def _run_payload(job_dir: Path) -> dict:
     """单个视频的产物；缺失或损坏时如实标记，不假装成功。"""
 
@@ -340,6 +353,7 @@ def _run_payload(job_dir: Path) -> dict:
     entry["assay"] = assay
     entry["metrics"] = _assay_metrics(assay)
     entry["assay_label"] = _assay_label(assay)
+    entry["rail"] = _rail_groups([str(name) for name in entry["files"]])
     return entry
 
 

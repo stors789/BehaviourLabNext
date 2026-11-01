@@ -1979,6 +1979,78 @@ input[aria-invalid="true"] {
   font-size: 13px;
 }
 
+/* 结果页：主区 + 304px 文件栏，窄窗口转单列。 */
+.result-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 304px;
+  gap: 20px;
+  align-items: start;
+  margin-top: 8px;
+}
+
+.result-main {
+  min-width: 0;
+}
+
+.result-rail {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  align-self: start;
+}
+
+.result-rail .rail-group + .rail-group {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.rail-title {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.rail-list {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  font-size: 12.5px;
+}
+
+.rail-list a {
+  color: var(--ink);
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.rail-list a:hover {
+  color: var(--accent-dark);
+  text-decoration: underline;
+}
+
+.video-figure video {
+  display: block;
+  width: 100%;
+  max-width: 560px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #000;
+}
+
+.unit-switch {
+  margin: 0 0 8px;
+}
+
+.open-dir-note {
+  margin: -6px 0 10px;
+}
+
 .warn-list {
   margin: 8px 0 0;
   padding: 10px 14px 10px 28px;
@@ -2004,6 +2076,10 @@ input[aria-invalid="true"] {
   .stage {
     grid-template-columns: minmax(0, 1fr) 272px;
     gap: 14px;
+  }
+
+  .result-shell {
+    grid-template-columns: 1fr;
   }
 
   .range-grid {

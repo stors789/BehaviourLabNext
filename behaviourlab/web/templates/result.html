@@ -15,14 +15,40 @@
 </div>
 {%- endmacro %}
 
+{# 图形标题按清单声明文件推导；未知新图种直接显示文件名，不丢声明。 #}
+{% macro figure_caption(name, assay="") -%}
+{%- if name.endswith("_trajectory.png") -%}轨迹{% if assay == "ldb" %}（源像素轴）{% endif %}（仅连接完成的连续运动段）
+{%- elif name.endswith("_heatmap.png") -%}热图（40×40 箱，秒/箱，按有效曝光加权）
+{%- elif name.endswith("_activity.png") -%}活动曲线（最终状态按真实曝光段）
+{%- elif name.endswith("_objects.png") or name.endswith("_exploration.png") -%}物体探索与接近范围（秒）
+{%- elif name.endswith("_zones.png") -%}区域占用时长（秒，估计）
+{%- elif name.endswith("_sequence.png") -%}入臂序列（按确认顺序，A/B/C；横轴为入臂起点，秒）
+{%- else -%}{{ name }}
+{%- endif -%}
+{%- endmacro %}
+
 {% block content %}
+{% set head_entry = results[0] if results else None %}
+{% set head_job = head_entry.job if head_entry else None %}
+{% set head_name = ((run.asset.name if run and run.asset else None)
+                    or (head_job.asset.name if head_job and head_job.asset else None)) %}
 <div class="section-head page-head">
   <div>
     <a class="crumb" href="/tasks">任务</a>
-    <h1>分析结果</h1>
+    <h1>{{ head_name or "分析结果" }}</h1>
+    <p class="muted">
+      {% if head_entry and head_entry.assay_label %}{{ head_entry.assay_label }} · {% endif %}
+      <code class="code">{{ run_id }}</code>
+    </p>
   </div>
-  <code class="code">{{ run_id }}</code>
+  {% if run %}
+  <div class="head-actions">
+    <a class="button primary" href="/api/runs/{{ run_id }}/bundle">下载全部</a>
+    <button class="button" type="button" id="open-run-dir">打开目录</button>
+  </div>
+  {% endif %}
 </div>
+<p class="muted open-dir-note" id="open-dir-note" hidden></p>
 
 {% if not results %}
 <div class="empty-state">
@@ -59,9 +85,24 @@
   </ul>
   {% endif %}
 
+  <div class="result-shell">
+  <div class="result-main">
+  {% if entry.units | length > 1 %}
+  <div class="unit-switch">
+    <label class="field inline">
+      <span class="field-label">动物</span>
+      <select id="unit-switch">
+        {% for unit in entry.units %}
+        <option value="{{ unit.unit_id }}">{{ unit.unit_name or unit.unit_id }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </div>
+  {% endif %}
   {% for unit in entry.units %}
   {% set s = unit.summary %}
-  <article class="unit-block">
+  <article class="unit-block" data-unit-id="{{ unit.unit_id }}"
+           {% if entry.units | length > 1 and not loop.first %}hidden{% endif %}>
     <h3>{{ s.unit_name or s.unit_id }}</h3>
 
     {% if assay == "tst" %}
@@ -117,17 +158,6 @@
       </div>
     </details>
     <p class="muted">视觉运动规则使用可调经验阈值，请结合视频与人工复核。</p>
-    {% if unit.figures.activity %}
-    <div class="figure-row">
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.activity }}" alt="活动曲线">
-        <figcaption>活动曲线（最终时间线，秒）</figcaption>
-      </figure>
-    </div>
-    {% elif unit.figures.note %}
-    <p class="muted">{{ unit.figures.note }}</p>
-    {% endif %}
-    {% if unit.figures.note %}<p class="muted">{{ unit.figures.note }}</p>{% endif %}
 
     {% elif assay == "oft" %}
     <div class="metric-grid">
@@ -172,25 +202,6 @@
         </table>
       </div>
     </details>
-
-    {% if unit.figures.trajectory or unit.figures.heatmap %}
-    <div class="figure-row">
-      {% if unit.figures.trajectory %}
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.trajectory }}" alt="轨迹">
-        <figcaption>轨迹（cm，仅连接完成的连续运动段）</figcaption>
-      </figure>
-      {% endif %}
-      {% if unit.figures.heatmap %}
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.heatmap }}" alt="热图">
-        <figcaption>热图（40×40 箱，秒/箱，按有效曝光加权）</figcaption>
-      </figure>
-      {% endif %}
-    </div>
-    {% elif unit.figures.note %}
-    <p class="muted">{{ unit.figures.note }}</p>
-    {% endif %}
 
     {% elif assay == "fst" %}
     <div class="metric-grid">
@@ -258,16 +269,6 @@
       </div>
     </details>
     <p class="muted">视觉运动规则使用可调经验阈值，请结合视频与人工复核。</p>
-    {% if unit.figures.activity %}
-    <div class="figure-row">
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.activity }}" alt="活动曲线">
-        <figcaption>分数与状态（最终时间线，秒）</figcaption>
-      </figure>
-    </div>
-    {% elif unit.figures.note %}
-    <p class="muted">{{ unit.figures.note }}</p>
-    {% endif %}
 
     {% elif assay == "mwm" %}
     <div class="metric-grid">
@@ -367,24 +368,6 @@
       </div>
     </details>
     <p class="muted">探索性规则标签，不是经验证的行为分类。</p>
-    {% if unit.figures.trajectory or unit.figures.heatmap %}
-    <div class="figure-row">
-      {% if unit.figures.trajectory %}
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.trajectory }}" alt="轨迹">
-        <figcaption>轨迹（cm，仅连接完成的连续运动段）</figcaption>
-      </figure>
-      {% endif %}
-      {% if unit.figures.heatmap %}
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.heatmap }}" alt="热图">
-        <figcaption>热图（40×40 箱，秒/箱，按有效曝光加权）</figcaption>
-      </figure>
-      {% endif %}
-    </div>
-    {% elif unit.figures.note %}
-    <p class="muted">{{ unit.figures.note }}</p>
-    {% endif %}
 
     {% elif assay == "nor" %}
     <div class="metric-grid">
@@ -486,30 +469,6 @@
       </div>
     </details>
     <p class="muted">头向质量为启发式证据，不是准确概率；请结合视频与人工复核。</p>
-    {% if unit.figures.objects or unit.figures.trajectory or unit.figures.heatmap %}
-    <div class="figure-row">
-      {% if unit.figures.objects %}
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.objects }}" alt="物体探索">
-        <figcaption>物体探索与接近范围（秒）</figcaption>
-      </figure>
-      {% endif %}
-      {% if unit.figures.trajectory %}
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.trajectory }}" alt="轨迹">
-        <figcaption>轨迹（cm，仅连接完成的连续运动段）</figcaption>
-      </figure>
-      {% endif %}
-      {% if unit.figures.heatmap %}
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.heatmap }}" alt="热图">
-        <figcaption>热图（40×40 箱，秒/箱，按有效曝光加权）</figcaption>
-      </figure>
-      {% endif %}
-    </div>
-    {% elif unit.figures.note %}
-    <p class="muted">{{ unit.figures.note }}</p>
-    {% endif %}
 
     {% elif assay == "epm" %}
     <div class="metric-grid">
@@ -587,16 +546,6 @@
       </div>
     </details>
     <p class="muted">距离与速度为手画尺寸的估计值（cm_estimated），请结合视频与人工复核。</p>
-    {% if unit.figures.zones %}
-    <div class="figure-row">
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.zones }}" alt="区域时长">
-        <figcaption>区域占用时长（秒，估计）</figcaption>
-      </figure>
-    </div>
-    {% elif unit.figures.note %}
-    <p class="muted">{{ unit.figures.note }}</p>
-    {% endif %}
 
     {% elif assay == "ymaze" %}
     {% set unit_events = (entry.result.events or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
@@ -741,29 +690,6 @@
       </tbody>
     </table>
 
-    {% if unit.figures.sequence %}
-    <div class="figure-row">
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.sequence }}" alt="入臂序列">
-        <figcaption>入臂序列（按确认顺序，A/B/C；横轴为入臂起点，秒）</figcaption>
-      </figure>
-    </div>
-    {% elif unit.figures.note %}
-    <p class="muted">{{ unit.figures.note }}</p>
-    {% endif %}
-
-    {% if unit.annotated_video %}
-    <div class="figure-row">
-      <figure>
-        <video controls preload="metadata" style="max-width:100%;"
-               src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.annotated_video }}"></video>
-        <figcaption>标注视频（原始画面 + 源时间与人工入臂；
-          <a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.annotated_video }}?download=1">下载</a>）
-        </figcaption>
-      </figure>
-    </div>
-    {% endif %}
-
     {% if unit_candidates %}
     <details class="fold">
       <summary>候选（{{ unit_candidates | length }}）</summary>
@@ -900,40 +826,6 @@
         {% endif %}
       </div>
     </details>
-    {% set ldb_figures = [unit.figures.trajectory, unit.figures.heatmap,
-                          unit.figures.activity, unit.figures.objects]
-                         | select("string") | list %}
-    {% if ldb_figures %}
-    <div class="figure-row">
-      {% if unit.figures.trajectory %}
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.trajectory }}" alt="轨迹">
-        <figcaption>轨迹</figcaption>
-      </figure>
-      {% endif %}
-      {% if unit.figures.heatmap %}
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.heatmap }}" alt="热图">
-        <figcaption>热图</figcaption>
-      </figure>
-      {% endif %}
-      {% if unit.figures.activity %}
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.activity }}" alt="活动曲线">
-        <figcaption>活动曲线</figcaption>
-      </figure>
-      {% endif %}
-      {% if unit.figures.objects %}
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.objects }}" alt="物体探索">
-        <figcaption>物体探索</figcaption>
-      </figure>
-      {% endif %}
-    </div>
-    {% if unit.figures.note %}<p class="muted">{{ unit.figures.note }}</p>{% endif %}
-    {% else %}
-    <p class="muted" data-empty="figures">暂无图表（本次运行未生成本单位的图形，见下方文件列表）。</p>
-    {% endif %}
     {% if s.dark_box_visible == false %}
     <p class="muted">不可见暗室：明室未检测即推断在暗室；不输出可靠全场距离或速度。</p>
     {% elif s.coordinate_unit == "cm" %}
@@ -1074,27 +966,6 @@
         {% endif %}
       </div>
     </details>
-    {% set barnes_figures = [unit.figures.trajectory, unit.figures.heatmap,
-                             unit.figures.activity, unit.figures.objects]
-                            | select("string") | list %}
-    {% if barnes_figures %}
-    <div class="figure-row">
-      {% if unit.figures.trajectory %}
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.trajectory }}" alt="轨迹">
-        <figcaption>轨迹</figcaption>
-      </figure>
-      {% endif %}
-      {% if unit.figures.heatmap %}
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.heatmap }}" alt="热图">
-        <figcaption>热图</figcaption>
-      </figure>
-      {% endif %}
-    </div>
-    {% else %}
-    <p class="muted" data-empty="figures">暂无图表（本次运行未生成本单位的图形，见下方文件列表）。</p>
-    {% endif %}
     {% if s.visit_source == "manual" %}
     <p class="muted">主洞访问来自人工记录（本次评分序列）；身体/鼻尖覆盖与自动访问审计仍来自检测{% if s.total_latency_s is not none %}；入箱端点由人工确认{% endif %}。质量分数是证据指标，不是准确概率。</p>
     {% else %}
@@ -1246,27 +1117,6 @@
         {% endif %}
       </div>
     </details>
-    {% set ezm_figures = [unit.figures.trajectory, unit.figures.heatmap]
-                         | select("string") | list %}
-    {% if ezm_figures %}
-    <div class="figure-row">
-      {% if unit.figures.trajectory %}
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.trajectory }}" alt="轨迹">
-        <figcaption>轨迹（cm，内外圈与四条分界线；仅连接环内完成的连续运动段）</figcaption>
-      </figure>
-      {% endif %}
-      {% if unit.figures.heatmap %}
-      <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.heatmap }}" alt="热图">
-        <figcaption>热图（40×40 箱，秒/箱，按环内有效曝光加权）</figcaption>
-      </figure>
-      {% endif %}
-    </div>
-    {% if unit.figures.note %}<p class="muted">{{ unit.figures.note }}</p>{% endif %}
-    {% else %}
-    <p class="muted" data-empty="figures">暂无图表（本次运行未生成本单位的图形，见下方文件列表）。</p>
-    {% endif %}
     <p class="muted">从标记射线顺时针依次为 O1 开放、C1 封闭、O2 开放、C2 封闭；
       边界曝光不属于开放或封闭，未知表示没有合格身体（缺失或质量不足），不等于封闭区。</p>
 
@@ -1279,28 +1129,94 @@
       {% endfor %}
     </div>
     {% endif %}
+
+    {# -- 统一图形区：只按 manifest 声明的当前动物文件渲染 -- #}
+    {% if unit.figure_files %}
+    <div class="figure-row" data-figures>
+      {% for name in unit.figure_files %}
+      <figure>
+        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}"
+             alt="{{ figure_caption(name, assay) }}">
+        <figcaption>{{ figure_caption(name, assay) }}</figcaption>
+      </figure>
+      {% endfor %}
+    </div>
+    {% elif unit.figures.note %}
+    <p class="muted" data-empty="figures">{{ unit.figures.note }}</p>
+    {% else %}
+    <p class="muted" data-empty="figures">暂无图表（本次运行未生成本单位的图形，见右侧文件列表）。</p>
+    {% endif %}
+
+    {% if unit.annotated_video %}
+    <div class="figure-row">
+      <figure class="video-figure">
+        <video controls preload="metadata"
+               src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.annotated_video }}"></video>
+        <figcaption>标注视频（源画面与几何/轨迹/状态/事件叠画；时长 {{ num(unit.annotated_video_duration_s, 3) }} s ·
+          <a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.annotated_video }}?download=1">下载</a>）</figcaption>
+      </figure>
+    </div>
+    {% else %}
+    <p class="muted" data-empty="video">未生成本单位的标注视频（导出开关关闭或源不可用）。</p>
+    {% endif %}
   </article>
   {% endfor %}
 
   {% if assay == "oft" %}
   <p class="muted">中心、外围、场外三类互斥；壁区包含在外围内。</p>
   {% endif %}
+  </div>
 
-
-  {% if entry.files %}
-  <p class="muted">文件</p>
-  <ul class="file-list">
-    {% for name in entry.files %}
-    <li>
-      <a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}">{{ name }}</a>
-      {% if name.endswith(".png") %}
-      <a class="file-download" href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}?download=1">下载</a>
-      {% endif %}
-    </li>
-    {% endfor %}
-  </ul>
-  {% endif %}
+  <aside class="result-rail" data-file-rail>
+    {% set rail = entry.rail or {} %}
+    {% if rail.figures %}
+    <div class="rail-group">
+      <p class="rail-title">图</p>
+      <ul class="rail-list">
+        {% for name in rail.figures %}
+        <li><a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}?download=1">{{ name }}</a></li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% if rail.videos %}
+    <div class="rail-group">
+      <p class="rail-title">视频</p>
+      <ul class="rail-list">
+        {% for name in rail.videos %}
+        <li><a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}?download=1">{{ name }}</a></li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% if rail.tables %}
+    <div class="rail-group">
+      <p class="rail-title">表格</p>
+      <ul class="rail-list">
+        {% for name in rail.tables %}
+        <li><a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}?download=1">{{ name }}</a></li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% if rail.docs %}
+    <div class="rail-group">
+      <p class="rail-title">报告与配置</p>
+      <ul class="rail-list">
+        {% for name in rail.docs %}
+        <li><a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}?download=1">{{ name }}</a></li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+  </aside>
+  </div>
   {% endif %}
 </section>
 {% endfor %}
+{% endblock %}
+
+{% block scripts %}
+<script id="result-seed" type="application/json">{{ {"run_id": run_id} | tojson }}</script>
+<script src="{{ url_for('static', filename='result.js') }}" defer></script>
 {% endblock %}

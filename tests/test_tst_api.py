@@ -108,7 +108,7 @@ def test_tst_result_page_order_and_labels(client, store, tmp_path, monkeypatch):
     assert activity and activity.endswith("_activity.png")
     assert activity in manifest["files"]
     job_id = response.get_json()["data"]["jobs"][0]["job_id"]
-    assert f'alt="活动曲线"' in page
+    assert f'<img src="/runs/{run_id}/{job_id}/{activity}"' in page
     assert "没有可用的场地尺寸" not in page
     image = client.get(f"/runs/{run_id}/{job_id}/{activity}")
     assert image.status_code == 200

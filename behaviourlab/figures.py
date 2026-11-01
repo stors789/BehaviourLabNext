@@ -84,9 +84,8 @@ def _style(style: Mapping[str, Any] | None) -> tuple[str, str, float, int]:
 
 
 def _base_figure(width_cm: float, height_cm: float) -> tuple[Figure, Any]:
-    ratio = height_cm / width_cm if width_cm > 0 else 1.0
-    height = 4.2
-    figure = Figure(figsize=(4.2, max(2.6, min(6.0, height * ratio))))
+    # 空间图固定 6×5 英寸；等比例轴在画布内自适应，画布尺寸不随场地比例变。
+    figure = Figure(figsize=(6.0, 5.0))
     FigureCanvasAgg(figure)
     axes = figure.add_subplot(111)
     axes.set_xlim(0.0, width_cm)
@@ -192,7 +191,7 @@ def mwm_points(rows: Iterable[Mapping[str, Any]], radius_cm: float
 
 
 def _mwm_figure(radius_cm: float) -> tuple[Figure, Any]:
-    figure = Figure(figsize=(4.5, 4.5))
+    figure = Figure(figsize=(6.0, 5.0))
     FigureCanvasAgg(figure)
     axes = figure.add_subplot(111)
     axes.set_xlim(-radius_cm, radius_cm)
@@ -310,7 +309,7 @@ def _ezm_figure(diameter_cm: float, ring_width_cm: float,
 
     radius = max(0.1, float(diameter_cm) / 2.0)
     inner = max(0.0, radius - max(0.0, float(ring_width_cm)))
-    figure = Figure(figsize=(4.5, 4.5))
+    figure = Figure(figsize=(6.0, 5.0))
     FigureCanvasAgg(figure)
     axes = figure.add_subplot(111)
     axes.set_xlim(-radius, radius)
@@ -419,7 +418,7 @@ def nor_objects_png(path: str | Path, summary: Mapping[str, Any], *,
         zone.append(_finite(item.get("zone_time_s")) or 0.0)
     if not labels:
         return False
-    figure = Figure(figsize=(4.2, 2.8))
+    figure = Figure(figsize=(7.0, 4.0))
     FigureCanvasAgg(figure)
     axes = figure.add_subplot(111)
     positions = list(range(len(labels)))
@@ -505,38 +504,80 @@ def ymaze_sequence_points(events: Iterable[Mapping[str, Any]]) -> list[dict]:
 
 def ymaze_sequence_png(path: str | Path,
                        events: Iterable[Mapping[str, Any]], *,
+                       bins: Iterable[Mapping[str, Any]] | None = None,
+                       window_start_s: float | None = None,
                        title: str = "",
                        style: Mapping[str, Any] | None = None) -> bool:
-    """Y 迷宫入臂序列（臂 A/B/C × 秒）；没有确认事件就不出图。"""
+    """Y 迷宫入臂序列（臂 A/B/C × 绝对源秒）与每箱进入数。
+
+    事件按最终顺序画在绝对源时刻；bins 的 start_s/end_s 是相对单位窗
+    起点的偏移，须与窗口起点相加才是绝对时刻。没有确认事件不出图；
+    没有 bins 或窗口起点时只画序列，不伪造每箱计数。
+    """
 
     points = ymaze_sequence_points(events)
     if not points:
         return False
+    bin_edges: list[tuple[float, float, int]] = []
+    if window_start_s is not None:
+        origin = _finite(window_start_s)
+        if origin is not None:
+            for item in bins or ():
+                if not isinstance(item, Mapping):
+                    continue
+                low = _finite(item.get("start_s"))
+                high = _finite(item.get("end_s"))
+                if low is None or high is None or high <= low:
+                    continue
+                count = sum(1 for point in points
+                            if origin + low <= point["time_s"] < origin + high)
+                bin_edges.append((origin + low, origin + high, count))
     color, _, width, dpi = _style(style)
-    figure = Figure(figsize=(4.6, 2.6))
+    figure = Figure(figsize=(7.0, 5.0))
     FigureCanvasAgg(figure)
-    axes = figure.add_subplot(111)
+    if bin_edges:
+        seq_axes, bin_axes = figure.subplots(
+            2, 1, sharex=True, gridspec_kw={"height_ratios": [2.6, 1.0]})
+    else:
+        seq_axes = figure.add_subplot(111)
+        bin_axes = None
     rows = {arm: index for index, arm in enumerate(YMAZE_ARMS)}
     xs = [item["time_s"] for item in points]
     ys = [rows[item["arm"]] for item in points]
-    axes.plot(xs, ys, color=color, linewidth=max(1.0, width * 0.7),
-              marker="o", markersize=4, zorder=2)
+    seq_axes.plot(xs, ys, color=color, linewidth=max(1.0, width * 0.7),
+                  marker="o", markersize=4, zorder=2)
     for item, x, y in zip(points, xs, ys):
-        axes.annotate(f"{item['entry_index']} {item['arm']}", (x, y),
-                      textcoords="offset points", xytext=(0, 7), ha="center",
-                      fontsize=7, color="#333333")
-    axes.set_yticks(range(len(YMAZE_ARMS)))
-    axes.set_yticklabels(list(YMAZE_ARMS), fontsize=8)
-    axes.set_ylim(len(YMAZE_ARMS) - 0.4, -0.6)
+        seq_axes.annotate(f"{item['entry_index']} {item['arm']}", (x, y),
+                          textcoords="offset points", xytext=(0, 7),
+                          ha="center", fontsize=7, color="#333333")
+    seq_axes.set_yticks(range(len(YMAZE_ARMS)))
+    seq_axes.set_yticklabels(list(YMAZE_ARMS), fontsize=8)
+    seq_axes.set_ylim(len(YMAZE_ARMS) - 0.4, -0.6)
     low, high = min(xs), max(xs)
+    if bin_edges:
+        low = min(low, min(edge[0] for edge in bin_edges))
+        high = max(high, max(edge[1] for edge in bin_edges))
     padding = max(0.1, (high - low) * 0.08)
-    axes.set_xlim(low - padding, high + padding)
-    axes.set_xlabel("s", fontsize=8)
-    axes.tick_params(labelsize=8)
-    axes.spines["top"].set_visible(False)
-    axes.spines["right"].set_visible(False)
+    seq_axes.set_xlim(low - padding, high + padding)
+    seq_axes.set_ylabel("臂", fontsize=8)
+    seq_axes.tick_params(labelsize=8)
+    seq_axes.spines["top"].set_visible(False)
+    seq_axes.spines["right"].set_visible(False)
+    if bin_axes is not None:
+        centers = [(edge[0] + edge[1]) / 2.0 for edge in bin_edges]
+        counts = [edge[2] for edge in bin_edges]
+        span = min((edge[1] - edge[0] for edge in bin_edges), default=1.0)
+        bin_axes.bar(centers, counts, width=span * 0.7, color="#6F8F7C")
+        bin_axes.set_ylabel("进入（次）", fontsize=8)
+        bin_axes.set_xlabel("源时间（s）", fontsize=8)
+        bin_axes.set_ylim(0.0, max(1.0, max(counts) + 0.5))
+        bin_axes.spines["top"].set_visible(False)
+        bin_axes.spines["right"].set_visible(False)
+        bin_axes.tick_params(labelsize=8)
+    else:
+        seq_axes.set_xlabel("s", fontsize=8)
     if title:
-        axes.set_title(title, fontsize=9, color="#333333")
+        seq_axes.set_title(title, fontsize=9, color="#333333")
     figure.tight_layout()
     figure.savefig(path, format="png", dpi=dpi)
     return True
@@ -734,7 +775,7 @@ def activity_png(path: str | Path, rows: Iterable[Mapping[str, Any]], *,
             begin = min(begin, finite[0])
             finish = max(finish, finite[-1])
 
-    figure = Figure(figsize=(6.4, 3.4 if has_curves else 1.9))
+    figure = Figure(figsize=(8.0, 4.0))
     FigureCanvasAgg(figure)
     if has_curves:
         curve_axes, band_axes = figure.subplots(
