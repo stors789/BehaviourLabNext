@@ -43,12 +43,14 @@ RUN_FILES = ("observations.csv", "summary.csv", "events.csv", "bins.csv",
 RUN_FIGURE = re.compile(
     r"[A-Za-z0-9_-]+_(?:trajectory|heatmap|activity|objects|zones|sequence)"
     r"\.png")
+RUN_VIDEO = re.compile(r"[A-Za-z0-9_-]+_annotated\.mp4")
 
 
 def _is_run_file(name: str) -> bool:
-    """运行产物白名单：固定文件加上每动物图形。"""
+    """运行产物白名单：固定文件加上每动物图形与标注视频。"""
 
-    return name in RUN_FILES or bool(RUN_FIGURE.fullmatch(name))
+    return (name in RUN_FILES or bool(RUN_FIGURE.fullmatch(name))
+            or bool(RUN_VIDEO.fullmatch(name)))
 
 
 class ApiError(Exception):
@@ -194,7 +196,8 @@ def _run_payloads(directory: Path) -> list[dict]:
             units.append({"unit_id": unit.get("unit_id"),
                           "unit_name": unit.get("unit_name"),
                           "summary": unit.get("summary") or {},
-                          "figures": unit.get("figures") or {}})
+                          "figures": unit.get("figures") or {},
+                          "annotated_video": unit.get("annotated_video")})
         if not units:
             for row in entry["result"].get("summary") or []:
                 units.append({"unit_id": row.get("unit_id"),
@@ -446,12 +449,14 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         path = Path(paths.runs) / run_id / job_id / filename
         if not path.is_file():
             raise ApiError("结果文件不存在", 404)
-        if RUN_FIGURE.fullmatch(filename):
-            # 图形默认在结果页内联显示，带 download=1 时按附件下载。
+        if RUN_FIGURE.fullmatch(filename) or RUN_VIDEO.fullmatch(filename):
+            # 图形与标注视频默认在结果页内联显示，带 download=1 时按附件下载。
             if request.args.get("download"):
                 return send_file(path, as_attachment=True,
                                  download_name=filename)
-            return send_file(path, mimetype="image/png", conditional=True)
+            mimetype = ("video/mp4" if RUN_VIDEO.fullmatch(filename)
+                        else "image/png")
+            return send_file(path, mimetype=mimetype, conditional=True)
         return send_file(path, as_attachment=True, download_name=filename)
 
     @app.get("/api/previews/<filename>")
@@ -651,21 +656,32 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         record = store.update_draft(draft_id, changes)
         return success({"draft": record})
 
+    def _project_animals(draft: Mapping[str, Any]) -> set[str] | None:
+        """当前项目可绑定的动物 ID；独立分析没有项目上下文时不校验归属。"""
+
+        project_id = draft.get("project_id")
+        if not is_valid_id(project_id):
+            return None
+        return {item["id"] for item in store.list_animals(project_id)}
+
     @app.get("/api/drafts/<draft_id>/validate")
     def validate_draft_get(draft_id: str):
         draft = _require_draft(draft_id)
         # 最终校验：允许未画完的草稿保存，但不允许带着缺四角开始任务。
-        return success({"issues": validate_draft(draft, complete=True)})
+        return success({"issues": validate_draft(
+            draft, complete=True, animals=_project_animals(draft))})
 
     @app.post("/api/drafts/<draft_id>/validate")
     def validate_draft_post(draft_id: str):
         draft = _require_draft(draft_id)
-        return success({"issues": validate_draft(draft, complete=True)})
+        return success({"issues": validate_draft(
+            draft, complete=True, animals=_project_animals(draft))})
 
     def _run_draft(draft: dict):
         """校验通过才创建并执行任务；返回 run_id 与每个任务的结果。"""
 
-        issues = validate_draft(draft, complete=True)
+        issues = validate_draft(draft, complete=True,
+                                animals=_project_animals(draft))
         if issues:
             raise ApiError("草稿未通过校验", 400, issues)
         assets = {}

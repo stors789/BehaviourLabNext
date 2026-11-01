@@ -271,7 +271,7 @@ def _scope(assay: str, video: Mapping[str, Any], unit: Mapping[str, Any],
     unit_window = unit.get("window")
     relative = (isinstance(unit_window, Mapping)
                 and unit_window.get("mode") == "relative")
-    manual = is_manual_path(assay, options.get("mode"), unit.get("manual"))
+    manual = is_manual_path(assay, unit)
     if manual or relative:
         # 人工路径与相对单位窗都需要完整配置范围，不能只取 t±1/3 秒。
         scope_end = end_value if end_value is not None else max(start, time_s)
@@ -355,8 +355,7 @@ def create_preview(
 
     height, width = info.image.shape[:2]
     orientation = int(video.get("orientation", 0) or 0)
-    manual_scope = is_manual_path(
-        draft.get("assay", ""), options.get("mode"), unit.get("manual"))
+    manual_scope = is_manual_path(draft.get("assay", ""), unit)
     # 人工记录路径不运行自动检测，也不为它伪造检测区域。
     detect_here = not (kind == "behavior" and manual_scope)
     region_source = None
@@ -526,9 +525,7 @@ def create_preview(
                 "head_angle": result.head_angle,
                 "head_quality": float(result.head_quality),
             },
-            "manual_preserved": is_manual_path(draft.get("assay", ""),
-                                               options.get("mode"),
-                                               unit.get("manual")),
+            "manual_preserved": is_manual_path(draft.get("assay", ""), unit),
         },
         "warnings": warnings,
     }

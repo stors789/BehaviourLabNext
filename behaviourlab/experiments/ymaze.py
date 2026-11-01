@@ -307,9 +307,9 @@ def validate_unit(options: Mapping[str, Any] | None,
             issues.append({"field": "options.mode",
                            "message": "路径必须是自动或人工"})
 
-    # 人工 Y 用记录作证据，不要求中心/臂区；自动分支才校验五区几何。
-    if (values.get("mode") or "auto") != "manual":
-        issues.extend(validate_geometry(geometry, require=complete))
+    # 人工 Y 由 engine 按 unit.manual.mode 走 validate_manual，不会进入这里；
+    # options.mode 只是设置项，不能用来豁免自动几何。
+    issues.extend(validate_geometry(geometry, require=complete))
     return issues
 
 
@@ -1062,14 +1062,18 @@ def is_manual_unit(unit: Mapping[str, Any]) -> bool:
 
 
 def validate_manual(unit: Mapping[str, Any], *,
+                    options: Mapping[str, Any] | None = None,
                     complete: bool = False) -> list[dict]:
     """人工 Y：只校验时间箱、单位窗与有序非空入臂记录。
 
     几何、自动臂尺寸/追踪参数与检测参数在人工模式不参与运行，因此不校验。
+    options 传合并后的有效参数（draft → video → unit），保证校验的就是运行
+    时真正消费的 bin_seconds；不传时退回单位层。
     """
 
     issues: list[dict] = []
-    options = unit.get("options") or {}
+    if options is None:
+        options = unit.get("options") or {}
     if isinstance(options, Mapping) and "bin_seconds" in options:
         width = _finite(options.get("bin_seconds"))
         if width is None:
@@ -1175,6 +1179,9 @@ def _manual_bins(unit: Mapping[str, Any], window: timeline.Window,
             "start_s": start,
             "end_s": end,
             "duration_s": end - start,
+            # 原文键：本箱入臂总数与交替数；下面两个是同一数值的兼容字段。
+            "entries": total,
+            "alternations": bucket["alternation"],
             "total_arm_entries": total,
             "arm_A_entries": bucket["entries"]["A"],
             "arm_B_entries": bucket["entries"]["B"],

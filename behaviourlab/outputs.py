@@ -114,6 +114,9 @@ def _manifest_figures(manifest: Mapping[str, Any]) -> tuple[list[tuple], list[tu
         label = unit.get("unit_name") or unit.get("unit_id")
         names = [(caption, info[key]) for key, caption in FIGURE_LABELS
                  if isinstance(info.get(key), str) and info.get(key)]
+        video = unit.get("annotated_video")
+        if isinstance(video, str) and video:
+            names.append(("标注视频", video))
         if names:
             listed.append((label, names))
         else:
@@ -165,7 +168,8 @@ def _report_markdown(job: Mapping[str, Any], result: Any,
         lines.extend(["", "图片（与本报告同一目录）：", ""])
         for label, names in listed:
             for caption, name in names:
-                lines.append(f"![{label} · {caption}]({name})")
+                if str(name).lower().endswith(".png"):
+                    lines.append(f"![{label} · {caption}]({name})")
 
     lines.extend(["", "## 文件", ""])
     lines.extend(f"- {name}" for name in manifest.get("files", []))
@@ -323,6 +327,27 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
     return figures_info
 
 
+def _annotated_video(target: Path, job: Mapping[str, Any], result: Any,
+                     summary: Mapping[str, Any], stem: str,
+                     events: Sequence[Mapping[str, Any]]) -> str | None:
+    """人工 Y 的源图标注视频：开关关闭或无人工单位时不生成。"""
+
+    output = job.get("output")
+    if not isinstance(output, Mapping) or not output.get("annotated_video"):
+        return None
+    units = (getattr(result, "metadata", None) or {}).get("units") or {}
+    meta = units.get(summary.get("unit_id")) or {}
+    if meta.get("mode") != "manual":
+        return None
+    from . import annotated
+
+    name = f"{stem}_annotated.mp4"
+    # 编码失败让异常冒到导出层：作业会显示明确错误，不留半成品清单。
+    annotated.write_manual_y_video(target / name, job=job, summary=summary,
+                                   events=events)
+    return name
+
+
 def export_result(directory: str | Path, job: Mapping[str, Any],
                   result: Any) -> dict:
     """把一份 AnalysisResult 写成清单里的文件，返回 manifest。
@@ -364,8 +389,12 @@ def export_result(directory: str | Path, job: Mapping[str, Any],
                     "zones", "sequence"):
             if info.get(key):
                 files.append(info[key])
+        video = _annotated_video(target, job, result, row, stem, events)
+        if video:
+            files.append(video)
         units.append({"unit_id": unit_id, "unit_name": row.get("unit_name"),
-                      "summary": row, "figures": info})
+                      "summary": row, "figures": info,
+                      "annotated_video": video})
 
     manifest = {
         "run_id": job.get("run_id"),

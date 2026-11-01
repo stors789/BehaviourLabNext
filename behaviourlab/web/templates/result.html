@@ -694,8 +694,8 @@
             <tr>
               <td>{{ b.bin_index }}</td>
               <td>{{ num(b.start_s, 2) }}–{{ num(b.end_s, 2) }}</td>
-              <td>{{ b.total_arm_entries }}</td>
-              <td>{{ b.alternation_count }}</td>
+              <td>{{ b.entries }}</td>
+              <td>{{ b.alternations }}</td>
               <td>{{ b.alternation_opportunities }}</td>
               <td>{{ num(b.alternation_percent, 1) }} %</td>
             </tr>
@@ -749,6 +749,18 @@
     </div>
     {% elif unit.figures.note %}
     <p class="muted">{{ unit.figures.note }}</p>
+    {% endif %}
+
+    {% if unit.annotated_video %}
+    <div class="figure-row">
+      <figure>
+        <video controls preload="metadata" style="max-width:100%;"
+               src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.annotated_video }}"></video>
+        <figcaption>标注视频（原始画面 + 源时间与人工入臂；
+          <a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.annotated_video }}?download=1">下载</a>）
+        </figcaption>
+      </figure>
+    </div>
     {% endif %}
 
     {% if unit_candidates %}

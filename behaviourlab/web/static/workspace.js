@@ -25,6 +25,7 @@
     unitIndex: 0,
     frame: 0,
     lastFrame: 0,
+    shownFrame: 0,
     image: null,
     imageToken: 0,
     frameInfo: null,
@@ -41,12 +42,12 @@
     canvasMessage: "正在读取源帧…",
     navToken: 0,
     pendingNav: null,
-    positionTimer: null,
     applyingHistory: false,
     draftRequest: null,
     playing: false,
     playToken: 0,
     playTimer: null,
+    playWait: null,
     playLastTime: null,
     rate: 1,
     editCounter: 0,
@@ -271,26 +272,32 @@
     return "/analyze?" + params.toString();
   }
 
+  function pageKey() {
+    // 页面上下文身份：离开这个组合后，旧帧与旧预览响应都不能再写状态。
+    return [
+      state.draftId || "",
+      state.step || "",
+      state.videoIndex,
+      state.unitIndex,
+    ].join("|");
+  }
+
   function analysisState() {
     return {
       draftId: state.draftId || null,
       step: state.step,
       video: state.videoIndex,
       unit: state.unitIndex,
-      frame: state.frame,
+      // 记录实际显示过的帧；请求了但没显示出来的帧不写进历史。
+      frame: Number.isInteger(state.shownFrame) ? state.shownFrame : state.frame,
       arenaView: state.view,
     };
   }
 
   function rememberPosition() {
+    // 立即写当前历史项：没有延迟回调，后退/前进时不会被旧页写回。
     if (!state.draftId || state.applyingHistory) return;
     history.replaceState({ analysis: analysisState() }, "", location.href);
-  }
-
-  function schedulePosition() {
-    if (state.applyingHistory) return;
-    clearTimeout(state.positionTimer);
-    state.positionTimer = setTimeout(rememberPosition, 250);
   }
 
   async function goStep(step, options) {
@@ -534,6 +541,7 @@
         state.videoIndex = index;
         state.unitIndex = 0;
         state.frame = 0;
+        state.shownFrame = 0;
         renderRange();
       });
       el.rangeList.append(button);
@@ -861,58 +869,95 @@
   }
 
   // -- 源帧 -----------------------------------------------------------
-  async function loadFrame(index) {
+  // 取帧与提交分开：播放时先解码，再等到真正该显示的时刻才画上新帧。
+  function beginFrameLoad(index, options) {
     const video = currentVideo();
     if (!video) return null;
+    const keepInfo = Boolean(options && options.keepInfo);
     if (Number.isInteger(index)) {
       state.frame = Math.max(0, Math.min(state.lastFrame, index));
       el.frameRange.value = String(state.frame);
       el.frameNumber.value = String(state.frame);
     }
-    const token = ++state.imageToken;
+    const context = { ticket: ++state.imageToken, page: pageKey() };
     state.loading = true;
-    // 图片成功前不保留上一帧时间：记录不能借用旧帧的时刻。
+    if (keepInfo) {
+      // 播放时画面仍是上一帧：先保留它的时间，等新帧真的显示再换。
+      return context;
+    }
+    // 跳转时图片成功前不保留上一帧时间：记录不能借用旧帧的时刻。
     state.frameInfo = null;
     el.timeLabel.textContent = frameLabel(null);
     state.canvasMessage = "正在读取源帧…";
     status(STATUS.loading);
+    return context;
+  }
+
+  async function fetchFrame(video, context) {
+    const response = await fetch(framePath(video, state.frame), { cache: "no-store" });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new Error(payload && payload.error ? payload.error.message : "源帧不可读");
+    }
+    const time = Number(response.headers.get("X-Source-Time"));
+    const frameIndex = Number(response.headers.get("X-Source-Frame"));
+    const clock = response.headers.get("X-Clock-Source") || "";
+    const blob = await response.blob();
+    if (context.ticket !== state.imageToken) return null;
+    const url = URL.createObjectURL(blob);
+    let image;
     try {
-      const response = await fetch(framePath(video, state.frame), { cache: "no-store" });
-      if (!response.ok) {
-        const payload = await response.json().catch(() => null);
-        throw new Error(payload && payload.error ? payload.error.message : "源帧不可读");
-      }
-      const time = Number(response.headers.get("X-Source-Time"));
-      const frameIndex = Number(response.headers.get("X-Source-Frame"));
-      const clock = response.headers.get("X-Clock-Source") || "";
-      const blob = await response.blob();
-      if (token !== state.imageToken) return null;
-      const url = URL.createObjectURL(blob);
-      const image = new Image();
+      image = new Image();
       await new Promise((resolve, reject) => {
         image.onload = resolve;
         image.onerror = reject;
         image.src = url;
       });
+    } finally {
       URL.revokeObjectURL(url);
-      if (token !== state.imageToken) return null;
-      state.image = image;
-      state.canvasMessage = "";
-      invalidatePreview();
-      state.frameInfo = { time, frame: frameIndex, clock };
-      if (Number.isFinite(frameIndex) && frameIndex !== state.frame) state.frame = frameIndex;
-      el.frameRange.value = String(state.frame);
-      el.frameNumber.value = String(state.frame);
-      el.timeLabel.textContent = frameLabel(state.frameInfo);
-      syncRecordHint();
-      state.loading = false;
-      status("");
-      // 连续播放每帧不改 history；只有暂停/跳转/记录才记当前帧。
-      if (!state.playing) schedulePosition();
-      draw();
-      return state.frameInfo;
+    }
+    if (context.ticket !== state.imageToken) return null;
+    return { image, time, frame: frameIndex, clock };
+  }
+
+  function frameStillCurrent(context) {
+    // 提交画面前同时校验请求代号与页面上下文，不只是请求代号。
+    return window.BLFrameView.frameStillCurrent(
+      context, state.imageToken, pageKey());
+  }
+
+  function commitFrame(payload, context) {
+    if (!payload || !frameStillCurrent(context)) return null;
+    state.image = payload.image;
+    state.canvasMessage = "";
+    invalidatePreview();
+    state.frameInfo = { time: payload.time, frame: payload.frame, clock: payload.clock };
+    if (Number.isFinite(payload.frame) && payload.frame !== state.frame) {
+      state.frame = payload.frame;
+    }
+    if (Number.isInteger(payload.frame)) state.shownFrame = payload.frame;
+    el.frameRange.value = String(state.frame);
+    el.frameNumber.value = String(state.frame);
+    el.timeLabel.textContent = frameLabel(state.frameInfo);
+    syncRecordHint();
+    state.loading = false;
+    status("");
+    // 连续播放每帧不改 history；跳转成功立刻记下实际显示的帧。
+    if (!state.playing) rememberPosition();
+    draw();
+    return state.frameInfo;
+  }
+
+  async function loadFrame(index) {
+    const video = currentVideo();
+    if (!video) return null;
+    const context = beginFrameLoad(index);
+    if (!context) return null;
+    try {
+      const payload = await fetchFrame(video, context);
+      return commitFrame(payload, context);
     } catch (error) {
-      if (token !== state.imageToken) return null;
+      if (!frameStillCurrent(context)) return null;
       state.loading = false;
       state.image = null;
       state.frameInfo = null;
@@ -945,41 +990,88 @@
       : "正在读取源帧，稍后可记录";
   }
 
+  function waitPlayback(ms, token) {
+    // 可取消的等待：暂停、离页、销毁都会立刻让等待返回 false。
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        state.playWait = null;
+        resolve(token === state.playToken && state.playing);
+      }, Math.max(0, ms));
+      state.playWait = { timer, resolve };
+    });
+  }
+
   function stopPlayback() {
     state.playToken += 1;
     state.playing = false;
     state.playLastTime = null;
+    if (state.playWait) {
+      clearTimeout(state.playWait.timer);
+      const release = state.playWait.resolve;
+      state.playWait = null;
+      release(false);
+    }
     if (state.playTimer) {
       clearTimeout(state.playTimer);
       state.playTimer = null;
+    }
+    // 停播同时废弃尚未显示的帧请求：稍后释出的旧响应不能回写。
+    state.imageToken += 1;
+    if (Number.isInteger(state.shownFrame) && state.frame !== state.shownFrame) {
+      // 请求了但没显示的帧不算数：滑条、帧号与历史都回到实际画面。
+      state.frame = state.shownFrame;
+      el.frameRange.value = String(state.frame);
+      el.frameNumber.value = String(state.frame);
     }
     syncPlayButton();
   }
 
   async function playStep(token) {
     if (!state.playing || token !== state.playToken) return;
-    if (state.frame >= state.lastFrame) {
+    const video = currentVideo();
+    if (!video) {
+      stopPlayback();
+      return;
+    }
+    if (state.shownFrame >= state.lastFrame) {
       stopPlayback();
       rememberPosition();
       return;
     }
     const started = performance.now();
-    // 逐个请求下一源帧：真实时间差决定下次显示，不用名义 FPS 顶替 VFR。
-    const info = await loadFrame(state.frame + 1);
-    if (!state.playing || token !== state.playToken) return;
-    if (!info) {
-      stopPlayback();
+    // 逐个请求下一源帧：显示时刻由真实相邻时间差与倍率决定，不用名义 FPS。
+    const context = beginFrameLoad(state.shownFrame + 1, { keepInfo: true });
+    let payload;
+    try {
+      payload = await fetchFrame(video, context);
+    } catch (error) {
+      if (token === state.playToken && frameStillCurrent(context)) {
+        state.loading = false;
+        state.canvasMessage = "源帧不可读";
+        el.timeLabel.textContent = frameLabel(null);
+        syncRecordHint();
+        draw();
+        status("源帧不可读：" + ((assetById(video.asset_id) || {}).name || "视频"),
+          "error");
+        el.statusbar.title = error.message;
+        stopPlayback();
+      }
       return;
     }
-    let delay = 0;
-    const previous = state.playLastTime;
-    if (Number.isFinite(previous) && Number.isFinite(info.time)
-        && info.time > previous) {
-      delay = ((info.time - previous) * 1000) / state.rate
-        - (performance.now() - started);
+    if (!state.playing || token !== state.playToken) return;
+    if (!payload) return;
+    const delay = window.BLFrameView.frameDisplayDelay(
+      state.playLastTime, payload.time, state.rate,
+      performance.now() - started);
+    if (delay > 0) {
+      const ready = await waitPlayback(delay, token);
+      if (!ready) return;
     }
+    if (!state.playing || token !== state.playToken) return;
+    const info = commitFrame(payload, context);
+    if (!info) return;
     state.playLastTime = info.time;
-    state.playTimer = setTimeout(() => { playStep(token); }, Math.max(0, delay));
+    state.playTimer = setTimeout(() => { playStep(token); }, 0);
   }
 
   function togglePlayback() {
@@ -989,7 +1081,7 @@
       return;
     }
     if (!state.draft || !currentVideo()) return;
-    if (state.frame >= state.lastFrame) return;
+    if (state.shownFrame >= state.lastFrame) return;
     state.playing = true;
     state.playToken += 1;
     const token = state.playToken;
@@ -2230,7 +2322,8 @@
       kind: kind || "detection",
       assay: state.assay,
       asset_id: video.asset_id,
-      frame_index: state.frame,
+      // 绑定实际显示过的帧，而不是还在请求中的目标帧。
+      frame_index: Number.isInteger(state.shownFrame) ? state.shownFrame : state.frame,
       orientation: video.orientation || 0,
       fps_override: video.fps_override,
       sample_fps: video.sample_fps,
@@ -2262,6 +2355,8 @@
     status(extracting ? "提取运动特征中，状态待定"
       : (type === "behavior" ? "正在生成行为预览…" : "正在生成检测预览…"));
     let request = null;
+    // 页面上下文：离开这个页/视频/单位后，旧预览响应不能再确认或改新页状态。
+    const context = { page: pageKey(), edit: state.editCounter };
     try {
       // 先落盘，再核对页面仍指向同一个视频/小鼠，最后才请求预览。
       const result = await window.BLCore.saveThenPreview({
@@ -2271,7 +2366,7 @@
           const live = currentVideo();
           const liveUnit = currentUnit();
           return Boolean(live && liveUnit && live.asset_id === video.asset_id &&
-            liveUnit.id === unit.id);
+            liveUnit.id === unit.id && pageKey() === context.page);
         },
         config: () => previewConfig(type),
         send: (config) => {
@@ -2303,10 +2398,20 @@
         return;
       }
       const data = result.data;
+      if (pageKey() !== context.page) {
+        // 已经离开复核页：旧响应不得确认，也不得把图挂到新页面。
+        state.previewGate.invalidate();
+        state.previewAwaiting = false;
+        return;
+      }
       // 图片真正加载成功后才确认，加载失败不留下已确认状态。
       state.previewAwaiting = true;
       el.preview.onload = () => {
         state.previewAwaiting = false;
+        if (pageKey() !== context.page) {
+          el.preview.hidden = true;
+          return;
+        }
         if (!state.previewGate.accept(request, data)) {
           el.preview.hidden = true;
           return;
@@ -2318,6 +2423,10 @@
       };
       el.preview.onerror = () => {
         state.previewAwaiting = false;
+        if (pageKey() !== context.page) {
+          el.preview.hidden = true;
+          return;
+        }
         state.previewGate.fail(request);
         el.preview.hidden = true;
         setPreviewNote({ tone: "error", text: "预览图加载失败。" });
@@ -2381,37 +2490,75 @@
     stopPlayback();
     const kind = state.step === "review" ? "behavior"
       : (state.previewKind === "behavior" ? "behavior" : "detection");
-    if (!state.previewGate.confirmed(previewConfig(kind))) {
+    const config = previewConfig(kind);
+    if (!state.previewGate.confirmed(config)) {
       status("配置已改变，请重新预览", "warn");
       renderInspector();
       return;
     }
+    // 第一次异步等待之前冻结提交上下文：页面、单位、编辑代号与确认凭据。
+    const context = {
+      navToken: state.navToken,
+      draftId: state.draftId,
+      step: state.step,
+      videoIndex: state.videoIndex,
+      unitIndex: state.unitIndex,
+      edit: state.editCounter,
+      config,
+    };
+    const submission = () => {
+      if (state.navToken !== context.navToken
+          || state.draftId !== context.draftId
+          || state.step !== context.step
+          || state.videoIndex !== context.videoIndex
+          || state.unitIndex !== context.unitIndex) {
+        return "page";
+      }
+      if (state.editCounter !== context.edit
+          || !state.previewGate.confirmed(context.config)) {
+        return "config";
+      }
+      return "ok";
+    };
+    const abort = () => {
+      const stateNow = submission();
+      if (stateNow === "config") {
+        status("配置已改变，请重新预览", "warn");
+        renderInspector();
+      }
+      return stateNow !== "ok";
+    };
+
     const settled = await saveThen();
     if (!settled) {
       status(lastSaveText("保存失败，未开始分析"), "error");
       return;
     }
+    if (abort()) return;
     el.primary.disabled = true;
     status("正在校验草稿…");
     try {
       // 先取最终校验，issues 为空才创建任务，不留半个作业。
-      const checked = await send("POST", "/api/drafts/" + state.draftId + "/validate", {});
+      const checked = await send("POST", "/api/drafts/" + context.draftId + "/validate", {});
+      if (abort()) return;
       const issues = (checked && checked.issues) || [];
       if (issues.length) {
         status(issueText({ fields: issues }, "草稿未通过校验"), "error");
         renderInspector();
         return;
       }
-      const pageToken = state.navToken;
+      // 校验返回后、提交前再核对一次，旧校验不能当新配置通过。
+      if (abort()) return;
       status("正在分析…");
-      const data = await send("POST", "/api/jobs", { draft_id: state.draftId });
+      const data = await send("POST", "/api/jobs", { draft_id: context.draftId });
       const failed = (data.jobs || []).find((job) => job.status !== "done");
       if (failed) {
         status(failed.error || "分析失败", "error");
         return;
       }
       status("分析完成", "ok");
-      if (state.navToken !== pageToken) {
+      if (submission() !== "ok") {
+        // 已离开或已改配置：保留用户当前页面，只提示任务已开始。
         status("任务已开始，可在任务页查看", "ok");
         return;
       }
@@ -2520,9 +2667,11 @@
     el.confirmRange.addEventListener("click", confirmRange);
 
     el.videoSelect.addEventListener("change", () => {
+      stopPlayback();
       state.videoIndex = Number(el.videoSelect.value);
       state.unitIndex = 0;
       state.frame = 0;
+      state.shownFrame = 0;
       state.stepKey = null;
       state.editor.reset(null, null);
       ensureContext();
@@ -2530,6 +2679,7 @@
       renderInspector();
     });
     el.unitSelect.addEventListener("change", () => {
+      stopPlayback();
       state.unitIndex = Number(el.unitSelect.value);
       state.stepKey = null;
       state.view = "geometry";
@@ -2591,20 +2741,13 @@
     });
 
     el.frameRange.addEventListener("input", () => {
-      // 跳转先暂停，并清掉旧帧时间，等待新帧。
+      // 跳转先暂停；旧帧时间由 beginFrameLoad 清掉，等新帧显示后才记历史。
       stopPlayback();
-      state.frameInfo = null;
-      el.timeLabel.textContent = frameLabel(null);
-      state.frame = Number(el.frameRange.value);
-      loadFrame();
+      loadFrame(Number(el.frameRange.value));
     });
     el.frameRange.addEventListener("change", () => {
       stopPlayback();
-      state.frameInfo = null;
-      el.timeLabel.textContent = frameLabel(null);
-      state.frame = Number(el.frameRange.value);
-      loadFrame();
-      rememberPosition();
+      loadFrame(Number(el.frameRange.value));
     });
     el.frameNumber.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
@@ -2658,6 +2801,7 @@
         state.videoIndex = Number.isInteger(target.video) ? target.video : 0;
         state.unitIndex = Number.isInteger(target.unit) ? target.unit : 0;
         state.frame = Number.isInteger(target.frame) ? target.frame : 0;
+        state.shownFrame = state.frame;
         state.view = target.arenaView === "detection" ? "detection" : "geometry";
         showPanel();
         renderTasknav();
@@ -2707,8 +2851,9 @@
 
     window.addEventListener("pagehide", teardownPage);
     window.addEventListener("beforeunload", (event) => {
+      // 只记录位置并请求离页提醒；用户取消离页时页面仍然存活，
+      // 不能在这里解绑快捷键或停掉播放器。
       rememberPosition();
-      teardownPage();
       if (!isDirty()) return;
       event.preventDefault();
       event.returnValue = "";
@@ -2734,12 +2879,9 @@
     el.frameNumber.value = String(next);
     if (next === state.frame) return;
     stopPlayback();
-    state.frameInfo = null;
-    el.timeLabel.textContent = frameLabel(null);
-    state.frame = next;
     el.frameRange.value = String(next);
-    loadFrame();
-    rememberPosition();
+    // 实际显示成功后才更新历史帧。
+    loadFrame(next);
   }
 
   function manualHotkeys(event) {
@@ -2839,6 +2981,8 @@
       state.videoIndex = Number.isInteger(entry.video) ? entry.video : 0;
       state.unitIndex = Number.isInteger(entry.unit) ? entry.unit : 0;
       state.frame = Number.isInteger(entry.frame) ? entry.frame : 0;
+      // 恢复阶段还没显示新帧前，历史就按这个目标帧继续。
+      state.shownFrame = state.frame;
       if (state.step === "arena") {
         state.view = entry.arenaView === "detection" ? "detection" : "geometry";
       }

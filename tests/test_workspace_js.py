@@ -119,3 +119,67 @@ def test_tst_preview_modes_and_output_toggle():
     # 图片加载成功后才确认预览。
     assert "el.preview.onload" in source
     assert "state.previewAwaiting" in source
+
+
+def test_player_commits_only_after_viewport_checks():
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    # 提交画面前校验请求代号与页面上下文，暂停/离页都会废弃在途帧。
+    assert "frameStillCurrent(context)" in source
+    assert "window.BLFrameView.frameStillCurrent(" in source
+    commit = source.split("function commitFrame(payload, context)", 1)[1].split(
+        "\n  }", 1)[0]
+    assert commit.index("frameStillCurrent(context)") < commit.index(
+        "state.image = payload.image")
+    # 显示时刻由相邻真实时间差决定，且先等到点再提交。
+    assert "frameDisplayDelay(" in source
+    play = source.split("async function playStep(token)", 1)[1].split(
+        "\n  }", 1)[0]
+    assert play.index("frameDisplayDelay(") < play.index("commitFrame(")
+    assert "state.playWait" in source
+    # 历史记录实际显示过的帧，而不是请求中的目标帧。
+    analysis = source.split("function analysisState()", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "state.shownFrame" in analysis
+    assert "frame: state.frame," not in analysis
+    # 位置立即写当前历史项：没有延迟回调，后退目标不会被旧页写回。
+    assert "schedulePosition" not in source
+    assert "setTimeout(rememberPosition" not in source
+    assert source.count(
+        "history.replaceState({ analysis: analysisState() }") == 1
+    commit = source.split("function commitFrame(payload, context)", 1)[1].split(
+        "\n  }", 1)[0]
+    assert "if (!state.playing) rememberPosition();" in commit
+
+
+def test_beforeunload_keeps_page_alive_after_cancel():
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    handler = source.split('window.addEventListener("beforeunload"', 1)[1].split(
+        "});", 1)[0]
+    assert "teardownPage()" not in handler, "取消离页后快捷键必须仍可用"
+    assert "rememberPosition()" in handler
+    teardown = source.split("function teardownPage()", 1)[1].split("\n  }", 1)[0]
+    assert "stopPlayback()" in teardown
+    assert 'removeEventListener("keydown", manualHotkeys)' in teardown
+
+
+def test_analysis_submission_freezes_context_before_first_await():
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    body = source.split("async function startAnalysis()", 1)[1].split(
+        "\n  // -- 事件绑定", 1)[0]
+    assert body.index("const context = {") < body.index("await saveThen()")
+    assert "navToken: state.navToken," in body
+    assert "edit: state.editCounter," in body
+    assert body.count("abort()") >= 3
+    assert body.index("if (abort()) return;") < body.index("POST\", \"/api/jobs")
+    # 离开页面时只提示任务已开始，不强制跳转。
+    assert "任务已开始，可在任务页查看" in body
+    assert body.index("submission() !== \"ok\"") < body.index(
+        'window.location.href = "/results/"')
+    # 旧预览响应不能在新页面确认。
+    preview = source.split("async function runPreview(kind)", 1)[1].split(
+        "\n  async function primaryAction", 1)[0]
+    assert "const context = { page: pageKey(), edit: state.editCounter };" in preview
+    assert preview.count("pageKey() !== context.page") >= 3

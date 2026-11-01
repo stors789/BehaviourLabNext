@@ -16,6 +16,32 @@
     return Number.isFinite(parsed) ? parsed : fallback;
   }
 
+  function frameDisplayDelay(previousTime, nextTime, rate, elapsedMs) {
+    /* 距离“该显示下一帧”的剩余时间：真实相邻源时间差 ÷ 倍率 − 已耗时间。
+       解码慢于间隔时返回 0，立即显示。 */
+    if (previousTime === null || previousTime === undefined
+        || nextTime === null || nextTime === undefined) {
+      return 0;
+    }
+    const previous = Number(previousTime);
+    const next = Number(nextTime);
+    if (!Number.isFinite(previous) || !Number.isFinite(next) || next <= previous) {
+      return 0;
+    }
+    const speed = Number(rate);
+    const factor = Number.isFinite(speed) && speed > 0 ? speed : 1;
+    const spent = Number(elapsedMs);
+    const wait = ((next - previous) * 1000) / factor
+      - (Number.isFinite(spent) ? spent : 0);
+    return wait > 0 ? wait : 0;
+  }
+
+  function frameStillCurrent(context, ticket, page) {
+    /* 提交画面前的双重校验：请求代号仍是当前一个，且页面上下文没变。 */
+    return Boolean(context) && context.ticket === ticket
+      && context.page === page;
+  }
+
   function createFrameLoader(options) {
     const settings = options || {};
     const fetchImpl = settings.fetchImpl || fetch;
@@ -73,5 +99,5 @@
     return { load, invalidate, currentGeneration };
   }
 
-  return { createFrameLoader };
+  return { createFrameLoader, frameDisplayDelay, frameStillCurrent };
 });

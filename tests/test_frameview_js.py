@@ -19,3 +19,15 @@ def test_frame_loader_discards_stale_and_revokes_url():
     )
     assert result.returncode == 0, result.stderr
     assert "frameview-ok" in result.stdout
+
+
+def test_frame_playback_timing_and_commit_guard():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node 不可用")
+    script = Path(__file__).parent / "js" / "test_frame_playback.cjs"
+    result = subprocess.run(
+        [node, str(script)], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    assert "frame-playback OK" in result.stdout

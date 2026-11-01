@@ -9,7 +9,7 @@ import os
 import re
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from . import experiments, media
 from .config import ALGORITHM_VERSION, SCHEMA_VERSION
@@ -220,34 +220,38 @@ def _number(value: Any) -> bool:
     return is_number(value)
 
 
-def _merged_option(draft: Mapping[str, Any], video: Mapping[str, Any],
-                   unit: Mapping[str, Any], key: str) -> Any:
-    """draft → video → unit 的同一字段；用于按模式而不是按已有记录校验。"""
+def is_manual_unit(unit: Mapping[str, Any]) -> bool:
+    """严格人工判定：只有 unit.manual.mode == "manual" 才算人工。"""
 
-    value = None
-    for layer in (draft.get("options"), video.get("options"), unit.get("options")):
-        if isinstance(layer, Mapping) and key in layer:
-            value = layer[key]
-    return value
+    manual = unit.get("manual") if isinstance(unit, Mapping) else None
+    return isinstance(manual, Mapping) and manual.get("mode") == "manual"
 
 
-def is_manual_path(assay: str, mode: Any, manual: Any) -> bool:
-    """人工路径判定：预览的范围选择与窗口校验共用同一条规则。
+def is_manual_path(assay: str, unit: Mapping[str, Any]) -> bool:
+    """各层共用的人工路径判定。
 
-    mode=manual 无记录也算人工；已有记录且走人工路径同样算，两种都要拒绝
-    relative 窗口。
+    Y 迷宫只看 unit.manual.mode：options.mode 只是设置项，manual 为 null 或
+    mode=auto 时都按自动单位处理。Barnes 的人工记录仍按记录字段判定。
     """
 
-    if assay == "ymaze" and mode == "manual":
-        return True
-    if not isinstance(manual, Mapping):
-        return False
-    if assay == "barnes":
-        return any(manual.get(key) for key in
-                   ("events", "hole_sequence", "entry", "sequence"))
     if assay == "ymaze":
-        return bool(manual)
+        return is_manual_unit(unit)
+    if assay == "barnes":
+        manual = unit.get("manual")
+        return isinstance(manual, Mapping) and any(
+            manual.get(key) for key in
+            ("events", "hole_sequence", "entry", "sequence"))
     return False
+
+
+def _detection_gaps(values: Mapping[str, Any], prefix: str) -> list[dict]:
+    """自动单位运行时真正缺少的检测配置；字段路径与运行时一致。"""
+
+    issues: list[dict] = []
+    if values.get("bg_method") == "static" and not values.get("static_background"):
+        issues.append({"field": f"{prefix}.static_background",
+                       "message": "静态背景未设置"})
+    return issues
 
 
 def _exact_misses_video(window: Mapping[str, Any], video_start: float | None,
@@ -306,11 +310,13 @@ def _window_issues(window: Any, field: str, *, video_window: bool) -> list[dict]
 
 
 def validate_draft(draft: Mapping[str, Any], *,
-                   complete: bool = False) -> list[dict]:
+                   complete: bool = False,
+                   animals: Iterable[str] | None = None) -> list[dict]:
     """草稿结构校验；实验专属参数由各实验模块校验。
 
     complete=False 允许未画完的草稿保存；complete=True 用于最终校验与开始
-    任务，实验要求的必需几何（如 OFT 四角）缺失即报错。
+    任务，实验要求的必需几何（如 OFT 四角）缺失即报错。animals 是当前项目
+    可绑定的动物 ID；提供时校验跨项目绑定，None 表示没有项目上下文。
     """
 
     if not isinstance(draft, Mapping):
@@ -320,7 +326,12 @@ def validate_draft(draft: Mapping[str, Any], *,
     assay = draft.get("assay")
     if not experiments.exists(assay):
         issues.append({"field": "assay", "message": "未知实验"})
-    issues.extend(validate_detection(draft.get("detection"), "detection"))
+    # Y 迷宫的人工单位不消费检测配置：纯人工草稿各层都豁免，混合草稿按每个
+    # 自动单位合并后的配置校验，不能整层跳过。
+    ymaze = assay == "ymaze"
+    if not ymaze:
+        issues.extend(validate_detection(draft.get("detection"), "detection"))
+    allowed_animals = None if animals is None else set(animals)
 
     videos = draft.get("videos")
     if videos is None:
@@ -365,7 +376,7 @@ def validate_draft(draft: Mapping[str, Any], *,
         for field in ("options", "detection"):
             if not isinstance(video.get(field, {}), Mapping):
                 issues.append({"field": f"{prefix}.{field}", "message": "必须是对象"})
-        if isinstance(video.get("detection"), Mapping):
+        if not ymaze and isinstance(video.get("detection"), Mapping):
             issues.extend(validate_detection(video["detection"],
                                              f"{prefix}.detection"))
 
@@ -395,6 +406,11 @@ def validate_draft(draft: Mapping[str, Any], *,
             animal_id = unit.get("animal_id")
             if animal_id is not None and not is_valid_id(animal_id):
                 issues.append({"field": f"{unit_prefix}.animal_id", "message": "动物 ID 无效"})
+            elif animal_id is not None and allowed_animals is not None \
+                    and animal_id not in allowed_animals:
+                # 项目绑定：动物必须属于当前项目，跨项目绑定不能开始任务。
+                issues.append({"field": f"{unit_prefix}.animal_id",
+                               "message": "动物不属于当前项目"})
             issues.extend(_window_issues(unit.get("window"), f"{unit_prefix}.window",
                                          video_window=False))
             unit_window = unit.get("window")
@@ -406,10 +422,7 @@ def validate_draft(draft: Mapping[str, Any], *,
                          "message": "窗口与视频范围没有重叠"}
                     )
                 # 只有人工 Y 受窗口模式限制；Barnes 的人工路径仍可用 relative。
-                if (assay == "ymaze"
-                        and is_manual_path(assay,
-                                           _merged_option(draft, video, unit, "mode"),
-                                           unit.get("manual"))
+                if (ymaze and is_manual_path(assay, unit)
                         and unit_window.get("mode") == "relative"):
                     issues.append(
                         {"field": f"{unit_prefix}.window.mode",
@@ -418,15 +431,17 @@ def validate_draft(draft: Mapping[str, Any], *,
             for field in ("geometry", "options", "detection"):
                 if not isinstance(unit.get(field, {}), Mapping):
                     issues.append({"field": f"{unit_prefix}.{field}", "message": "必须是对象"})
-            # 专用人工 Y 只消费 bin_seconds 与记录：几何、自动参数与检测
-            # 参数都不参与运行，交给模块的人工校验，不在这里要求。
-            manual_y = assay == "ymaze" and isinstance(unit.get("manual"), Mapping) \
-                and unit["manual"].get("mode") == "manual"
+            # 专用人工 Y 只消费合并后的 bin_seconds 与记录：几何、自动参数与
+            # 检测参数都不参与运行，交给模块的人工校验，不在这里要求。
+            manual_y = ymaze and is_manual_unit(unit)
             if manual_y:
                 manual_checker = getattr(experiments.get(assay),
                                          "validate_manual", None)
                 if manual_checker is not None:
-                    for issue in manual_checker(unit, complete=complete):
+                    merged_options = resolve_options(assay, draft=draft,
+                                                     video=video, unit=unit)
+                    for issue in manual_checker(unit, options=merged_options,
+                                                complete=complete):
                         entry = dict(issue)
                         field = issue.get("field")
                         entry["field"] = (f"{unit_prefix}.{field}" if field
@@ -449,7 +464,15 @@ def validate_draft(draft: Mapping[str, Any], *,
                         entry["field"] = (f"{unit_prefix}.{field}" if field
                                           else unit_prefix)
                         issues.append(entry)
-                if isinstance(unit.get("detection"), Mapping):
+                if ymaze:
+                    # 自动单位按合并后的检测配置校验：draft/video 层的无效值
+                    # 若被单位层覆盖，不应再单独报错。
+                    merged_detection = resolve_detection(
+                        assay, draft=draft, video=video, unit=unit)
+                    prefix = f"{unit_prefix}.detection"
+                    issues.extend(validate_detection(merged_detection, prefix))
+                    issues.extend(_detection_gaps(merged_detection, prefix))
+                elif isinstance(unit.get("detection"), Mapping):
                     issues.extend(validate_detection(unit["detection"],
                                                      f"{unit_prefix}.detection"))
             manual = unit.get("manual")
