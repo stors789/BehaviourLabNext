@@ -15,6 +15,8 @@ from .schema import sanitize_json
 from .store import atomic_write_json
 
 SAFE_STEM = re.compile(r"[^A-Za-z0-9_-]+")
+# 只有七类明细是文件契约；其余表仍留在 results.json 里。
+EXPORTED_TABLES = ("zones",)
 
 
 def figure_stem(unit: Mapping[str, Any], used: set[str]) -> str:
@@ -101,6 +103,9 @@ ASSAY_NOTES = {
     "barnes": "自动模式的洞访问来自鼻尖进入洞半径的证据，人工模式以人工记录为"
               "主序列；覆盖率分母为完整动物窗曝光；逃避候选只是目标附近身体消失"
               "的未确认记录，不产生总逃避潜伏期。",
+    "ezm": "开放、封闭、边界、区外与未知五类互斥；开放时间占总时长以窗内全部"
+           "曝光为分母（含缺失），开放时间占开放+封闭只算两段跑道；进入需真实"
+           "更晚观测确认且只在环上相邻区之间成立，七类明细见 zones.csv。",
 }
 
 
@@ -263,6 +268,42 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
                                   ("heatmap", heatmap)):
                 if not (target / filename).is_file():
                     figures_info[key] = None
+    elif mode == "ezm":
+        diameter = summary.get("outer_diameter_cm")
+        ring = summary.get("ring_width_cm")
+        angle = summary.get("boundary_angle_deg")
+        usable = (isinstance(diameter, (int, float)) and diameter > 0
+                  and isinstance(ring, (int, float)) and ring >= 0
+                  and isinstance(angle, (int, float)))
+        if usable:
+            trajectory = f"{stem}_trajectory.png"
+            heatmap = f"{stem}_heatmap.png"
+            try:
+                if figures.ezm_trajectory_png(
+                        target / trajectory, rows,
+                        diameter_cm=float(diameter),
+                        ring_width_cm=float(ring),
+                        boundary_angle_deg=float(angle), title=name,
+                        style=style):
+                    figures_info["trajectory"] = trajectory
+                else:
+                    notes.append("没有完成的连续运动段，未生成轨迹图")
+                if figures.ezm_heatmap_png(
+                        target / heatmap, rows, diameter_cm=float(diameter),
+                        ring_width_cm=float(ring),
+                        boundary_angle_deg=float(angle), title=name,
+                        style=style):
+                    figures_info["heatmap"] = heatmap
+                else:
+                    notes.append("没有有效位置，未生成热图")
+            except (OSError, ValueError) as error:
+                notes.append(f"图形生成失败：{error}")
+                for key, filename in (("trajectory", trajectory),
+                                      ("heatmap", heatmap)):
+                    if not (target / filename).is_file():
+                        figures_info[key] = None
+        else:
+            missing_size_note = True
     elif has_size:
         center = figures.center_rect_for(summary)
         trajectory = f"{stem}_trajectory.png"
@@ -314,8 +355,8 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
 
     if missing_size_note and not any(
             figures_info.get(key) for key in ("zones", "objects", "sequence")):
-        # Y 迷宫 / LDB / Barnes 不用场地宽高描述图形空态，是否出图由各自逻辑说明。
-        if str(summary.get("mode")) not in ("ymaze", "ldb", "barnes"):
+        # Y 迷宫 / LDB / Barnes / EZM 不用场地宽高描述图形空态，是否出图由各自逻辑说明。
+        if str(summary.get("mode")) not in ("ymaze", "ldb", "barnes", "ezm"):
             notes.append("没有可用的场地尺寸，未生成图形")
 
     if isinstance(summary.get("objects"), list) and summary["objects"]:
@@ -380,6 +421,12 @@ def export_result(directory: str | Path, job: Mapping[str, Any],
     files.append("events.csv")
     write_csv(target / "bins.csv", result.bins)
     files.append("bins.csv")
+    for name in EXPORTED_TABLES:
+        rows = result.tables.get(name) or []
+        if not rows:
+            continue
+        write_csv(target / f"{name}.csv", rows)
+        files.append(f"{name}.csv")
     payload = result.as_dict()
     write_json_export(target / "results.json", payload)
     files.append("results.json")

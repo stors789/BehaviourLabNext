@@ -277,6 +277,125 @@ def mwm_heatmap_png(path: str | Path,
     return True
 
 
+EZM_OPEN_COLOR = "#16684e"
+EZM_CLOSED_COLOR = "#1c5f9e"
+EZM_ZONE_ORDER = ("O1", "C1", "O2", "C2")
+
+
+def ezm_ring_points(rows: Iterable[Mapping[str, Any]], radius_cm: float
+                    ) -> list[tuple[float, float, float]]:
+    """环带内有效位置的 (x, y, dt)：只有开放/封闭/边界的合格身体位置。"""
+
+    points: list[tuple[float, float, float]] = []
+    limit = float(radius_cm) + 1e-8
+    for row in rows:
+        if not row.get("in_window") or not row.get("detected"):
+            continue
+        if row.get("position_valid") is False or row.get("jump") is True:
+            continue
+        span = _finite(row.get("dt_s"))
+        x = _finite(row.get("motion_x"))
+        y = _finite(row.get("motion_y"))
+        if span is None or span <= 0 or x is None or y is None:
+            continue
+        if math.hypot(x, y) > limit:
+            continue
+        points.append((x, y, span))
+    return points
+
+
+def _ezm_figure(diameter_cm: float, ring_width_cm: float,
+                boundary_angle_deg: float) -> tuple[Figure, Any, float]:
+    """以外圈为半径 D/2 的圆画场地：内外圈、四条分界线与四个区名。"""
+
+    radius = max(0.1, float(diameter_cm) / 2.0)
+    inner = max(0.0, radius - max(0.0, float(ring_width_cm)))
+    figure = Figure(figsize=(4.5, 4.5))
+    FigureCanvasAgg(figure)
+    axes = figure.add_subplot(111)
+    axes.set_xlim(-radius, radius)
+    axes.set_ylim(radius, -radius)
+    axes.set_aspect("equal", adjustable="box")
+    axes.set_xlabel("x (cm)")
+    axes.set_ylabel("y (cm)")
+    axes.add_patch(patches.Circle((0.0, 0.0), radius, fill=False,
+                                  edgecolor="#8a8a8a", linewidth=0.9))
+    if inner > 0:
+        axes.add_patch(patches.Circle((0.0, 0.0), inner, fill=False,
+                                      edgecolor="#b0b0b0", linewidth=0.8,
+                                      linestyle="--"))
+    theta0 = math.radians(float(boundary_angle_deg))
+    for index in range(4):
+        angle = theta0 + index * math.pi / 2.0
+        axes.plot([inner * math.cos(angle), radius * math.cos(angle)],
+                  [inner * math.sin(angle), radius * math.sin(angle)],
+                  color="#8a8a8a", linewidth=0.8)
+    middle = inner + (radius - inner) / 2.0
+    for index, key in enumerate(EZM_ZONE_ORDER):
+        angle = theta0 + (index + 0.5) * math.pi / 2.0
+        color = EZM_OPEN_COLOR if index % 2 == 0 else EZM_CLOSED_COLOR
+        axes.text(middle * math.cos(angle), middle * math.sin(angle), key,
+                  fontsize=8, color=color, ha="center", va="center", zorder=5,
+                  bbox={"boxstyle": "round,pad=0.15", "facecolor": "white",
+                        "edgecolor": "none", "alpha": 0.72})
+    return figure, axes, radius
+
+
+def ezm_trajectory_png(path: str | Path,
+                       rows: Iterable[Mapping[str, Any]], *,
+                       diameter_cm: float, ring_width_cm: float,
+                       boundary_angle_deg: float, title: str = "",
+                       style: Mapping[str, Any] | None = None) -> bool:
+    """环带内轨迹：只连接完成运动段，缺失与区外自然断开。"""
+
+    segments = motion_segments(rows)
+    if not segments:
+        return False
+    color, _, line_width, dpi = _style(style)
+    figure, axes, _ = _ezm_figure(diameter_cm, ring_width_cm,
+                                  boundary_angle_deg)
+    for x0, y0, x1, y1 in segments:
+        axes.plot([x0, x1], [y0, y1], color=color, linewidth=line_width,
+                  solid_capstyle="round")
+    if title:
+        axes.set_title(title, fontsize=9, color="#333333")
+    figure.tight_layout()
+    figure.savefig(path, format="png", dpi=dpi)
+    return True
+
+
+def ezm_heatmap_png(path: str | Path,
+                    rows: Iterable[Mapping[str, Any]], *,
+                    diameter_cm: float, ring_width_cm: float,
+                    boundary_angle_deg: float, bins: int = HEATMAP_BINS,
+                    title: str = "",
+                    style: Mapping[str, Any] | None = None) -> bool:
+    """环带内 40×40 空间箱按秒加权；没有有效位置不出图。"""
+
+    radius = max(0.1, float(diameter_cm) / 2.0)
+    points = ezm_ring_points(rows, radius)
+    if not points:
+        return False
+    grid = [[0.0] * bins for _ in range(bins)]
+    for x, y, span in points:
+        column = min(bins - 1, max(0, int((x + radius) / (2.0 * radius) * bins)))
+        row_index = min(bins - 1, max(
+            0, int((y + radius) / (2.0 * radius) * bins)))
+        grid[row_index][column] += span
+    _, colormap, _, dpi = _style(style)
+    figure, axes, _ = _ezm_figure(diameter_cm, ring_width_cm,
+                                  boundary_angle_deg)
+    image = axes.imshow(grid, cmap=colormap, origin="upper",
+                        extent=(-radius, radius, radius, -radius),
+                        aspect="equal", interpolation="nearest")
+    figure.colorbar(image, ax=axes, fraction=0.046, pad=0.03, label="s")
+    if title:
+        axes.set_title(title, fontsize=9, color="#333333")
+    figure.tight_layout()
+    figure.savefig(path, format="png", dpi=dpi)
+    return True
+
+
 def nor_objects_png(path: str | Path, summary: Mapping[str, Any], *,
                     title: str = "",
                     style: Mapping[str, Any] | None = None) -> bool:

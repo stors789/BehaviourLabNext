@@ -99,11 +99,12 @@ def test_health_reports_explicit_data_root_and_no_owner(tmp_path):
     assert (data_root / "logs").is_dir()
 
 
-def test_unfinished_experiment_reports_not_implemented():
-    # TST、FST、MWM、NOR、EPM、Y 迷宫、明暗箱与 Barnes 已接入；用未实现的高架零迷宫守住契约。
-    context = AnalysisContext(job={"assay": "ezm"})
+def test_all_registered_assays_implement_analysis():
+    # 十项实验都已接入分析；占位异常只为之后新增的实验保留。
+    for key in EXPECTED_ORDER:
+        assert callable(getattr(experiments.get(key), "analyze", None)), key
     with pytest.raises(ExperimentNotImplemented) as captured:
-        experiments.get("ezm").analyze(context)
+        raise ExperimentNotImplemented("future", "未接入的实验")
     assert "尚未实现" in str(captured.value)
 
 

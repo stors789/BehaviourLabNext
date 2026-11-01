@@ -1517,6 +1517,7 @@
     });
     if (state.assay === "barnes") drawBarnesTarget(unit);
     if (state.assay === "mwm") drawMwmGuides(unit);
+    if (state.assay === "ezm") drawEzmGuides(unit);
     const shape = stepShape(unit, state.stepKey);
     if (shape) drawShape(shape, "#ffd26f", 2.8, true);
     drawEditor();
@@ -1558,6 +1559,52 @@
       ctx.moveTo(center[0] - dx * length, center[1] - dy * length);
       ctx.lineTo(center[0] + dx * length, center[1] + dy * length);
       ctx.stroke();
+    });
+    ctx.restore();
+  }
+
+  // EZM 环上方向：内圈、四条分界线与 O1/C1/O2/C2 文字都由保存的
+  // arena/open_boundary 与当前有效外径、跑道宽算出；开放绿、封闭蓝只做标识。
+  function drawEzmGuides(unit) {
+    if (!unit || !unit.geometry) return;
+    const view = viewport();
+    if (!view) return;
+    const guides = (typeof BLCore !== "undefined" && BLCore.ezmGuides)
+      ? BLCore.ezmGuides(
+        stepShape(unit, "arena"),
+        stepShape(unit, "open_boundary"),
+        Number(effectiveOption(unit, "outer_diameter_cm", 0)),
+        Number(effectiveOption(unit, "ring_width_cm", 0)))
+      : null;
+    if (!guides) return;
+    const center = toCss(guides.center);
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = "rgba(255, 210, 111, 0.62)";
+    ctx.lineWidth = 1.2;
+    if (guides.inner_radii[0] > 0 && guides.inner_radii[1] > 0) {
+      ctx.beginPath();
+      ctx.ellipse(center[0], center[1], guides.inner_radii[0] * view.scale,
+        guides.inner_radii[1] * view.scale,
+        ((Number(guides.angle_deg) || 0) * Math.PI) / 180, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    guides.rays.forEach((ray) => {
+      const from = toCss(ray.from);
+      const to = toCss(ray.to);
+      ctx.beginPath();
+      ctx.moveTo(from[0], from[1]);
+      ctx.lineTo(to[0], to[1]);
+      ctx.stroke();
+    });
+    ctx.font = "11px 'Segoe UI', 'Microsoft YaHei', sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    guides.labels.forEach((item) => {
+      const point = toCss(item.point);
+      ctx.fillStyle = item.open ? "#6fd0a8" : "#7ab2e8";
+      ctx.fillText(item.zone, point[0], point[1]);
     });
     ctx.restore();
   }

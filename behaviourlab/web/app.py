@@ -38,8 +38,8 @@ SETTINGS_SECTIONS = ("defaults", "detection", "output", "style")
 BACKGROUND_NAME = re.compile(r"[0-9a-f]{32}\.png")
 PREVIEW_NAME = re.compile(r"[0-9a-f]{32}\.(?:png|jpg|jpeg)")
 RUN_FILES = ("observations.csv", "summary.csv", "events.csv", "bins.csv",
-             "frozen_job.json", "results.json", "result_manifest.json",
-             "report.md")
+             "zones.csv", "frozen_job.json", "results.json",
+             "result_manifest.json", "report.md")
 RUN_FIGURE = re.compile(
     r"[A-Za-z0-9_-]+_(?:trajectory|heatmap|activity|objects|zones|sequence)"
     r"\.png")

@@ -354,6 +354,56 @@ function behaviorNote() {
   assert.ok(epmMissing.text.includes("入臂 — 次"), "缺字段仍显示 —");
 }
 
+// EZM：五类时长与两个潜伏期分开显示；删失不写成 0。
+function ezmZoneNotes() {
+  const confirmed = previewNoteFor({
+    time_s: 0,
+    preview_scope: { mode: "configured", start_s: 0, end_s: 11 },
+    summary: {
+      detection_available: true,
+      detection: { candidates: 1, missing_reason: null },
+      behavior: {
+        mode: "ezm", total_time_s: 11.0, open_time_s: 4.0, closed_time_s: 4.0,
+        boundary_time_s: 1.0, outside_time_s: 1.0, unknown_time_s: 1.0,
+        open_entries: 1, closed_entries: 1,
+        first_open_observation_latency_s: 0.0,
+        first_open_entry_latency_s: 5.0, first_open_entry_censored: false,
+      },
+    },
+    warnings: [],
+  });
+  assert.ok(confirmed.text.includes("开放 4.00 / 封闭 4.00 / 边界 1.00"),
+    confirmed.text);
+  assert.ok(confirmed.text.includes("区外 1.00 / 未知 1.00 s"), confirmed.text);
+  assert.ok(confirmed.text.includes("进入 开放 1 / 封闭 1 次"), confirmed.text);
+  assert.ok(confirmed.text.includes("首次观察开放 0.00 s"), confirmed.text);
+  assert.ok(confirmed.text.includes("首次确认进入开放 5.00 s"), confirmed.text);
+  assert.ok(confirmed.text.includes("完整配置范围 0.00–11.00 s"),
+    confirmed.text);
+  assert.ok(!confirmed.text.includes("开放臂"), "EZM 不套用 EPM 标签");
+
+  const censored = previewNoteFor({
+    preview_scope: { mode: "range", start_s: 0, end_s: 2 },
+    summary: {
+      detection_available: true,
+      detection: { candidates: 1, missing_reason: null },
+      behavior: {
+        mode: "ezm", total_time_s: 2.0, open_time_s: 1.0, closed_time_s: 0.0,
+        boundary_time_s: 0.0, outside_time_s: 0.0, unknown_time_s: 1.0,
+        open_entries: 0, closed_entries: 0,
+        first_open_observation_latency_s: 0.0,
+        first_open_entry_latency_s: null, first_open_entry_censored: true,
+      },
+    },
+    warnings: [],
+  });
+  assert.ok(censored.text.includes("首次确认进入开放 未确认（删失）"),
+    censored.text);
+  assert.ok(!censored.text.includes("首次确认进入开放 0.00"),
+    "删失不能写成 0");
+  assert.ok(censored.text.includes("当前片段"), censored.text);
+}
+
 function mwmQuadrantGuides() {
   const arena = { type: "ellipse", center: [100, 100], radii: [60, 30], angle: 30 };
   const guides = mwmLines(arena, 120, 25);
@@ -679,6 +729,7 @@ function unitRemoval() {
   fieldReasonsWin();
   fieldNamesFromDescriptors();
   behaviorNote();
+  ezmZoneNotes();
   mwmQuadrantGuides();
   barnesScopeNotes();
   manualVisitsParsing();

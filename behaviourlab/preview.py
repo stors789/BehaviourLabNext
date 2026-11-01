@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import math
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
@@ -184,8 +183,6 @@ def _draw_guides(canvas, assay: str, options: Mapping[str, Any],
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, _bgr("#1c5f9e"), 1,
                         cv2.LINE_AA)
         return
-    if assay not in ("mwm", "ezm"):
-        return
     if assay == "mwm":
         module = experiments.get("mwm")
         guides = module.quadrant_guides(unit_geometry, options)
@@ -200,39 +197,36 @@ def _draw_guides(canvas, assay: str, options: Mapping[str, Any],
                    int(round(center[1] + dy * length)))
             cv2.line(canvas, start, end, GUIDE_COLOR, 1, cv2.LINE_AA)
         return
-    arena = unit_geometry.get("arena") or unit_geometry.get("outer")
-    if not arena:
+    if assay != "ezm":
         return
-    if arena.get("type") == "ellipse" and arena.get("center") and arena.get("radii"):
-        center = arena["center"]
-        rx, ry = float(arena["radii"][0]), float(arena["radii"][1])
-        angle = float(arena.get("angle", 0.0))
-    elif arena.get("points"):
-        fitted = geo.fit_ellipse(arena["points"])
-        center = fitted["center"]
-        rx, ry = fitted["radii"]
-        angle = fitted["angle"]
-    else:
+    # EZM：内圈、四条分界线与四个区名都由保存几何与当前有效尺寸算出；
+    # 开放绿、封闭蓝只做标识，统计仍在 Python 端按同一物理变换判定。
+    guides = experiments.get("ezm").boundary_guides(unit_geometry, options)
+    if not guides:
         return
+    center = guides["center"]
+    radii = guides["radii"]
+    scale = float(guides["inner_scale"])
+    if scale > 0:
+        cv2.ellipse(
+            canvas,
+            (int(round(center[0])), int(round(center[1]))),
+            (max(1, int(round(float(radii[0]) * scale))),
+             max(1, int(round(float(radii[1]) * scale)))),
+            float(guides["angle_deg"]), 0, 360, GUIDE_COLOR, 1, cv2.LINE_AA)
+    for ray in guides["rays"]:
+        cv2.line(canvas, _round_point(ray["from"]), _round_point(ray["to"]),
+                 GUIDE_COLOR, max(1, thickness - 1), cv2.LINE_AA)
+    for item in guides["labels"]:
+        color = _bgr("#16684e") if item.get("open") else _bgr("#1c5f9e")
+        point = _round_point(item["point"])
+        cv2.putText(canvas, str(item["zone"]),
+                    (point[0] + 3, point[1] + 4), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, color, 1, cv2.LINE_AA)
 
-    if assay == "ezm":
-        ring = float(options.get("ring_width", 0.0) or 0.0)
-        diameter = float(options.get("outer_diameter", 0.0) or 0.0)
-        if ring <= 0 or diameter <= 0:
-            return
-        outer_px = max(rx, ry)
-        inner_px = outer_px * max(0.0, (diameter / 2.0 - ring) / (diameter / 2.0))
-        labels = ("O1", "C1", "O2", "C2")
-        colors = (_bgr("#16684e"), _bgr("#1c5f9e"),
-                  _bgr("#16684e"), _bgr("#1c5f9e"))
-        for index, label in enumerate(labels):
-            theta = math.radians(angle + 45.0 + index * 90.0)
-            dx, dy = math.cos(theta), math.sin(theta)
-            start = (int(center[0] + dx * inner_px), int(center[1] + dy * inner_px))
-            end = (int(center[0] + dx * outer_px), int(center[1] + dy * outer_px))
-            cv2.line(canvas, start, end, colors[index], 1, cv2.LINE_AA)
-            cv2.putText(canvas, label, (end[0] + 3, end[1] - 3),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, colors[index], 1, cv2.LINE_AA)
+
+def _round_point(point) -> tuple[int, int]:
+    return (int(round(float(point[0]))), int(round(float(point[1]))))
 
 
 def _find_video(draft: Mapping[str, Any], asset_id: str | None) -> Mapping[str, Any]:
@@ -456,8 +450,8 @@ def create_preview(
     # 已绘制判定与画布、最终校验同源：NOR 的物体步骤落在 geometry.objects 里。
     drawn = [step["key"] for step in steps
              if in_scope(step) and is_drawn(step)]
-    _draw_guides(canvas, draft.get("assay", ""), unit.get("options") or {},
-                 geometry, thickness)
+    # 辅助线读合并后的有效参数：只给显式覆盖会在默认尺寸下漏画内外圈。
+    _draw_guides(canvas, draft.get("assay", ""), options, geometry, thickness)
 
     for other in video.get("units") or []:
         if other.get("id") == unit.get("id"):

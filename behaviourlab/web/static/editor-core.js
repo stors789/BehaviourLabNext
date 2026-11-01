@@ -308,6 +308,81 @@
     };
   }
 
+  // EZM 环上方向：内圈、四条分界线与四个区名都由保存的 arena/open_boundary
+  // 与当前有效外径、跑道宽算出；只读几何，不把显示坐标写回草稿。
+  const EZM_ZONES = ["O1", "C1", "O2", "C2"];
+  const EZM_OPEN = ["O1", "O2"];
+
+  function ezmGuides(arena, boundary, diameterCm, ringWidthCm) {
+    if (!arena || !Array.isArray(arena.center) || !Array.isArray(arena.radii)) {
+      return null;
+    }
+    const rx = Number(arena.radii[0]);
+    const ry = Number(arena.radii[1]);
+    const diameter = Number(diameterCm);
+    const width = Number(ringWidthCm);
+    if (!(rx > 0) || !(ry > 0) || !(diameter > 0) || !(width >= 0)) return null;
+    const angle = Number(arena.angle) || 0;
+    const theta = (angle * Math.PI) / 180;
+    const ct = Math.cos(theta);
+    const st = Math.sin(theta);
+    const a = diameter / (2 * rx);
+    const b = diameter / (2 * ry);
+    const m00 = a * ct * ct + b * st * st;
+    const m01 = (a - b) * ct * st;
+    const m11 = a * st * st + b * ct * ct;
+    const det = m00 * m11 - m01 * m01;
+    if (Math.abs(det) < 1e-12) return null;
+    const i00 = m11 / det;
+    const i01 = -m01 / det;
+    const i11 = m00 / det;
+    const center = [Number(arena.center[0]), Number(arena.center[1])];
+    const point = boundary && Array.isArray(boundary.points) &&
+      boundary.points.length === 1 ? boundary.points[0] : null;
+    if (!point) return null;
+    const dx = Number(point[0]) - center[0];
+    const dy = Number(point[1]) - center[1];
+    const vx = m00 * dx + m01 * dy;
+    const vy = m01 * dx + m11 * dy;
+    if (!Number.isFinite(vx) || !Number.isFinite(vy)) return null;
+    if (Math.hypot(vx, vy) < 1e-8) return null;
+    const start = Math.atan2(vy, vx);
+    const radius = diameter / 2;
+    const inner = Math.max(0, radius - width);
+    const at = (unitAngle, distance) => {
+      const ux = distance * Math.cos(unitAngle);
+      const uy = distance * Math.sin(unitAngle);
+      return [center[0] + i00 * ux + i01 * uy,
+        center[1] + i01 * ux + i11 * uy];
+    };
+    const rays = [];
+    const labels = [];
+    for (let index = 0; index < 4; index += 1) {
+      const rayAngle = start + (index * Math.PI) / 2;
+      rays.push({
+        angle_deg: ((rayAngle * 180) / Math.PI % 360 + 360) % 360,
+        from: at(rayAngle, inner),
+        to: at(rayAngle, radius),
+      });
+      const middle = rayAngle + Math.PI / 4;
+      labels.push({
+        zone: EZM_ZONES[index],
+        open: EZM_OPEN.indexOf(EZM_ZONES[index]) >= 0,
+        point: at(middle, inner + (radius - inner) / 2),
+      });
+    }
+    return {
+      center,
+      radii: [rx, ry],
+      angle_deg: angle,
+      inner_radii: [rx * inner / radius, ry * inner / radius],
+      rings: { outer: radius, inner },
+      rays,
+      labels,
+      boundary_angle_deg: ((start * 180) / Math.PI % 360 + 360) % 360,
+    };
+  }
+
   function SaveQueue(send) {
     this.send = send;
     this.editVersion = 0;
@@ -654,6 +729,24 @@
         if (behavior.dark_box_visible === false) {
           lines.push("不可见暗室：明室失检按推断暗室计");
         }
+      } else if (behavior.mode === "ezm") {
+        const count = (number) => (typeof number === "number" && isFinite(number)
+          ? String(number) : "—");
+        const entryLatency = behavior.first_open_entry_censored
+          ? "未确认（删失）"
+          : value(behavior.first_open_entry_latency_s) + " s";
+        lines.push("行为 " + value(behavior.total_time_s) + " s：开放 "
+          + value(behavior.open_time_s) + " / 封闭 "
+          + value(behavior.closed_time_s) + " / 边界 "
+          + value(behavior.boundary_time_s) + " / 区外 "
+          + value(behavior.outside_time_s) + " / 未知 "
+          + value(behavior.unknown_time_s) + " s");
+        lines.push("进入 开放 " + count(behavior.open_entries) + " / 封闭 "
+          + count(behavior.closed_entries) + " 次 · 首次观察开放 "
+          + value(behavior.first_open_observation_latency_s) + " s · 首次确认进入开放 "
+          + entryLatency);
+        // 行为统计范围按实际请求范围标注：configured 为完整配置窗。
+        lines.push(previewFramePrefix(frameTime) + previewScopeNote(scope));
       } else if (behavior.mode === "barnes") {
         const count = (number) => (typeof number === "number" && isFinite(number)
           ? String(number) : "—");
@@ -1145,6 +1238,7 @@
     moveEllipseCenter,
     moveRadius,
     mwmLines,
+    ezmGuides,
     norObjects,
     norShape,
     norApply,

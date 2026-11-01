@@ -1101,6 +1101,175 @@
     <p class="muted">主洞访问来自鼻尖进入洞半径的自动证据{% if s.total_latency_s is not none %}；入箱端点由人工确认{% else %}；未确认入箱不产生总逃避潜伏期{% endif %}。质量分数是证据指标，不是准确概率。</p>
     {% endif %}
 
+    {% elif assay == "ezm" %}
+    {% set unit_events = (entry.result.events or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
+    {% set unit_zones = ((entry.result.tables or {}).get("zones") or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
+    <div class="metric-grid">
+      {{ metric("开放区时间", num(s.open_time_s, 3), "s") }}
+      {{ metric("封闭区时间", num(s.closed_time_s, 3), "s") }}
+      {{ metric("边界时间", num(s.boundary_time_s, 3), "s") }}
+      {{ metric("区外时间", num(s.outside_time_s, 3), "s") }}
+      {{ metric("未知时间", num(s.unknown_time_s, 3), "s") }}
+      {{ metric("开放区时间占总时长", num(s.open_time_percent_total, 1), "%") }}
+      {{ metric("开放区时间占开放+封闭", num(s.open_time_percent_known, 1), "%") }}
+      {{ metric("开放区进入", s.open_entries if s.open_entries is not none else "—", "次") }}
+      {{ metric("封闭区进入", s.closed_entries if s.closed_entries is not none else "—", "次") }}
+      {{ metric("首次观察开放区潜伏期", num(s.first_open_observation_latency_s, 3), "s") }}
+      {% if s.first_open_entry_censored %}
+      {{ metric("首次确认进入开放区潜伏期", "未确认（删失）") }}
+      {% else %}
+      {{ metric("首次确认进入开放区潜伏期", num(s.first_open_entry_latency_s, 3), "s") }}
+      {% endif %}
+    </div>
+
+    <details class="fold">
+      <summary>全部指标</summary>
+      <div class="fold-body">
+        <table class="simple-table">
+          <tbody>
+            <tr><th>初始区域</th><td>
+              {{ s.initial_zone or "—" }}（首个有效主区域，不产生进入事件）·
+              坐标单位 {{ s.coordinate_unit or "—" }}（厘米，椭圆仿射映射）
+            </td></tr>
+            <tr><th>时间</th><td>
+              窗口 {{ num(s.total_time_s, 3) }} s · 检测 {{ num(s.observed_time_s, 3) }} s ·
+              缺失 {{ num(s.missing_time_s, 3) }} s · 已知区域 {{ num(s.known_zone_time_s, 3) }} s
+              （{{ s.detected_frames }} / {{ s.window_frames }} 行）
+            </td></tr>
+            <tr><th>七类占用</th><td>
+              O1 {{ num(s.zone_seconds.O1, 3) }} · C1 {{ num(s.zone_seconds.C1, 3) }} ·
+              O2 {{ num(s.zone_seconds.O2, 3) }} · C2 {{ num(s.zone_seconds.C2, 3) }} ·
+              边界 {{ num(s.boundary_time_s, 3) }} · 区外 {{ num(s.outside_time_s, 3) }} ·
+              未知 {{ num(s.unknown_time_s, 3) }} s
+            </td></tr>
+            <tr><th>开放比例</th><td>
+              占总时长 {{ num(s.open_time_percent_total, 2) }} %（分母为窗内全部曝光，含缺失）·
+              占开放+封闭 {% if s.open_time_percent_known is not none %}{{ num(s.open_time_percent_known, 2) }} %{% else %}—{% endif %}（分母不含边界、区外与未知）
+            </td></tr>
+            <tr><th>进入</th><td>
+              开放 {{ s.open_entries }} 次 · 封闭 {{ s.closed_entries }} 次 ·
+              {% if s.first_open_observation_latency_s is not none %}
+              首次观察开放区 {{ num(s.first_open_observation_latency_s, 3) }} s ·
+              {% else %}
+              首次观察开放区 — ·
+              {% endif %}
+              {% if s.first_open_entry_censored %}
+              首次确认进入开放区未确认（删失）
+              {% else %}
+              首次确认进入开放区 {{ num(s.first_open_entry_latency_s, 3) }} s
+              {% endif %}
+            </td></tr>
+            <tr><th>运动</th><td>
+              总距离 {{ num(s.total_distance_cm, 3) }} cm ·
+              平均速度 {{ num(s.mean_speed_cm_s, 3) }} / 最大 {{ num(s.max_speed_cm_s, 3) }} cm/s ·
+              可测 {{ num(s.measurable_motion_time_s, 3) }} s（只连接环内连续真实位置）
+            </td></tr>
+            <tr><th>几何</th><td>
+              外径 {{ num(s.outer_diameter_cm, 2) }} cm · 跑道宽 {{ num(s.ring_width_cm, 2) }} cm ·
+              内圈半径 {{ num(s.inner_radius_cm, 2) }} cm ·
+              起始射线方向 {{ num(s.boundary_angle_deg, 1) }}°（0° 为图像 +x）
+            </td></tr>
+            <tr><th>参数</th><td>
+              边界余量 {{ num(s.boundary_margin_cm, 2) }} cm ·
+              进入确认 {{ num(s.confirm_s, 2) }} s ·
+              身体质量阈值 {{ num(s.quality_threshold, 2) }} ·
+              箱宽 {{ num(s.bin_seconds, 2) }} s
+            </td></tr>
+            <tr><th>窗口</th><td>
+              {% if s.analysis_window_start_s is not none %}
+              {{ num(s.analysis_window_start_s, 3) }}–{{ num(s.analysis_window_end_s, 3) }} s
+              {% else %}未确定{% endif %}
+            </td></tr>
+          </tbody>
+        </table>
+
+        {% if unit_zones %}
+        <table class="simple-table">
+          <thead>
+            <tr><th>区域</th><th>时间（s）</th><th>进入（次）</th></tr>
+          </thead>
+          <tbody>
+            {% for z in unit_zones %}
+            <tr>
+              <td>{{ z.zone }}</td>
+              <td>{{ num(z.time_s, 3) }}</td>
+              <td>{{ z.entries }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+
+        {% if unit_events %}
+        <table class="simple-table">
+          <thead>
+            <tr><th>#</th><th>目标</th><th>来自</th><th>起点（s）</th><th>确认（s）</th></tr>
+          </thead>
+          <tbody>
+            {% for e in unit_events %}
+            <tr>
+              <td>{{ loop.index }}</td>
+              <td>{{ e.target }}</td>
+              <td>{{ e.from_zone or "—" }}</td>
+              <td>{{ num(e.time_s, 3) }}</td>
+              <td>{{ num(e.confirmed_s, 3) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="muted">本次动物窗没有确认的相邻区域进入。</p>
+        {% endif %}
+
+        {% set unit_bins = (entry.result.bins or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
+        {% if unit_bins %}
+        <table class="simple-table">
+          <thead>
+            <tr><th>箱</th><th>时间（s）</th><th>开放</th><th>封闭</th><th>边界</th><th>区外</th><th>未知</th><th>距离</th><th>均速</th></tr>
+          </thead>
+          <tbody>
+            {% for b in unit_bins %}
+            <tr>
+              <td>{{ b.bin_index }}</td>
+              <td>{{ num(b.start_s, 2) }}–{{ num(b.end_s, 2) }}</td>
+              <td>{{ num(b.open_time_s, 2) }}</td>
+              <td>{{ num(b.closed_time_s, 2) }}</td>
+              <td>{{ num(b.boundary_time_s, 2) }}</td>
+              <td>{{ num(b.outside_time_s, 2) }}</td>
+              <td>{{ num(b.unknown_time_s, 2) }}</td>
+              <td>{{ num(b.distance_cm, 2) }}</td>
+              <td>{{ num(b.mean_speed_cm_s, 2) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+    </details>
+    {% set ezm_figures = [unit.figures.trajectory, unit.figures.heatmap]
+                         | select("string") | list %}
+    {% if ezm_figures %}
+    <div class="figure-row">
+      {% if unit.figures.trajectory %}
+      <figure>
+        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.trajectory }}" alt="轨迹">
+        <figcaption>轨迹（cm，内外圈与四条分界线；仅连接环内完成的连续运动段）</figcaption>
+      </figure>
+      {% endif %}
+      {% if unit.figures.heatmap %}
+      <figure>
+        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.heatmap }}" alt="热图">
+        <figcaption>热图（40×40 箱，秒/箱，按环内有效曝光加权）</figcaption>
+      </figure>
+      {% endif %}
+    </div>
+    {% if unit.figures.note %}<p class="muted">{{ unit.figures.note }}</p>{% endif %}
+    {% else %}
+    <p class="muted" data-empty="figures">暂无图表（本次运行未生成本单位的图形，见下方文件列表）。</p>
+    {% endif %}
+    <p class="muted">从标记射线顺时针依次为 O1 开放、C1 封闭、O2 开放、C2 封闭；
+      边界曝光不属于开放或封闭，未知表示没有合格身体（缺失或质量不足），不等于封闭区。</p>
+
     {% else %}
     <div class="metric-grid">
       {% for item in entry.metrics[:6] %}
