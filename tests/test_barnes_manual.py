@@ -466,7 +466,8 @@ def test_manual_result_page_marks_confirmed_entry(client, store):
                            "units": {}, "warnings": []}}
     (job_dir / "results.json").write_text(json.dumps(result),
                                           encoding="utf-8")
-    manifest = {"units": [{"unit_id": UNIT, "unit_name": "小鼠 1",
+    manifest = {"status": "completed", "run_id": run_id, "job_id": "d" * 32,
+                "units": [{"unit_id": UNIT, "unit_name": "小鼠 1",
                            "summary": summary,
                            "figures": {"stem": "u"}}],
                 "files": ["results.json"]}
@@ -502,7 +503,8 @@ def test_automatic_result_page_keeps_nose_evidence(client, store):
                            "units": {}, "warnings": []}}
     (job_dir / "results.json").write_text(json.dumps(result),
                                           encoding="utf-8")
-    manifest = {"units": [{"unit_id": UNIT, "unit_name": "小鼠 1",
+    manifest = {"status": "completed", "run_id": run_id, "job_id": "f" * 32,
+                "units": [{"unit_id": UNIT, "unit_name": "小鼠 1",
                            "summary": summary, "figures": {"stem": "u"}}],
                 "files": ["results.json"]}
     (job_dir / "result_manifest.json").write_text(json.dumps(manifest),

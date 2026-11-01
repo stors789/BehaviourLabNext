@@ -235,23 +235,33 @@ def test_service_chooses_free_port(tmp_path):
 
 
 def test_stop_callback_failure_keeps_owner_until_complete(tmp_path):
-    """关闭回调失败=尚未完成：继续关闭资源，但不提前释放数据根所有权。"""
+    """任务未停完=尚未完成：不关 Store、不放锁，重试后才能完成收尾。"""
 
     events: list[str] = []
+    fail = {"on": True}
 
     def broken_callback() -> None:
-        raise RuntimeError("工作进程停止失败")
+        if fail["on"]:
+            raise RuntimeError("工作进程停止失败")
+        events.append("worker-stop-ok")
 
     service, server, paths = make_service(
         tmp_path,
-        callbacks=[broken_callback, lambda: events.append("after")],
+        callbacks=[broken_callback],
     )
+    service._final_callbacks.append(lambda: events.append("after"))
     service.start()
     service.stop()
 
-    assert events == ["after"], "一个回调失败不能跳过其余收尾"
-    assert server.closed is True
+    assert server.closed is True, "HTTP 排空仍要执行"
+    assert events == [], "任务未收尾时不能进入 Store.close"
     assert (paths.logs / "job_owner.json").exists(), "未完成关闭不能放锁"
+
+    # 解除阻塞后再次关闭：继续收尾并最终释放所有权。
+    fail["on"] = False
+    assert service.stop() is True
+    assert events == ["worker-stop-ok", "after"]
+    assert not (paths.logs / "job_owner.json").exists()
 
 
 def test_startup_log_preserves_original_error(tmp_path):

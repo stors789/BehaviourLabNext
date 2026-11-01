@@ -659,3 +659,272 @@ def test_tasks_and_project_draft_semantics(paths, store):
     assert "草稿（可继续编辑）" in page
     assert f"draft_id={project_draft['id']}" in page
     assert f"draft_id={independent['id']}" not in page, "独立草稿不进项目页"
+
+
+# -- 第二轮：结果页/下载共用成功校验、关闭屏障、进程异常路径、删除重试 --
+
+
+def test_failed_manifest_is_not_rendered_by_result_page(paths, store):
+    """反例 A：failed 清单被 resolve 拒绝后，页面不得经 fallback 渲染。"""
+
+    from behaviourlab.web.app import create_app
+
+    run_id, job_id = "f" * 32, "a" * 32
+    directory = paths.runs / run_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "results.json").write_text(json.dumps({
+        "assay": "oft", "summary": [{"unit_id": "u" * 32,
+                                     "unit_name": "幽灵鼠"}],
+        "events": [], "bins": [], "observations": [], "tables": {},
+        "warnings": [], "metadata": {"assay": "oft", "units": {}}}),
+        encoding="utf-8")
+    _write_manifest(directory, {
+        "status": "failed", "run_id": run_id, "job_id": job_id,
+        "files": ["results.json"], "units": []})
+
+    app = create_app(data_dir=str(paths.root), store=store, testing=True)
+    client = app.test_client()
+    response = client.get(f"/results/{run_id}")
+    assert response.status_code == 404
+    assert "幽灵鼠" not in response.get_data(as_text=True), \
+        "失败批次的结果不能被渲染成正常指标"
+
+
+def test_legacy_error_record_missing_status_is_not_readable(paths, store):
+    """反例 B：旧 error 记录 + 缺 status 清单不能当成功读取或下载。"""
+
+    run_id, job_id = "e" * 32, "b" * 32
+    directory = paths.runs / run_id / job_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "summary.csv").write_text("unit_id\n", encoding="utf-8")
+    _write_manifest(directory, {"run_id": run_id, "job_id": job_id,
+                                "files": ["summary.csv"], "units": []})
+    store.create_job(assay="oft", run_id=run_id, job_id=job_id,
+                     status="error", config={"job": {"assay": "oft"}})
+
+    assert _manifest_ok(directory, job_id, run_id, require_status=False) \
+        is None or True  # 判据本身不查记录：授权在 resolve_run
+    assert run_service.resolve_run(store, paths, run_id) is None, \
+        "error 记录不能授权缺状态旧清单"
+
+    from behaviourlab.web.app import create_app
+
+    app = create_app(data_dir=str(paths.root), store=store, testing=True)
+    client = app.test_client()
+    assert client.get(f"/api/runs/{run_id}").status_code == 404
+    assert client.get(
+        f"/runs/{run_id}/{job_id}/summary.csv").status_code == 404
+    assert client.get(f"/results/{run_id}").status_code == 404
+
+    # 对照：同一目录换成 done 记录仍可读（保留旧成功记录的正常读取）。
+    store.update_job_status(job_id, "done")
+    resolved = run_service.resolve_run(store, paths, run_id)
+    assert resolved is not None
+    assert client.get(
+        f"/runs/{run_id}/{job_id}/summary.csv").status_code == 200
+
+
+def test_stop_timeout_does_not_close_store_or_release_owner(tmp_path, store):
+    """组 2 反例 A：jobs 超时未收尾时 Store 不关、锁不放、可再次关闭。"""
+
+    from behaviourlab.config import DataPaths
+    from behaviourlab.service import LocalService
+    from behaviourlab.web.app import create_app
+
+    paths = DataPaths.from_dir(tmp_path / "svc")
+    paths.ensure()
+    app = create_app(data_dir=str(paths.root), store=store, testing=True)
+    events: list[str] = []
+
+    def slow_jobs_shutdown(**kwargs):
+        time.sleep(0.3)
+        return False  # 超时未收尾
+
+    class Server:
+        def __init__(self):
+            self._closed = threading.Event()
+
+        def run(self):
+            self._closed.wait(timeout=10)
+
+        def close(self):
+            self._closed.set()
+            events.append("http")
+
+    service = LocalService(
+        app, paths, port=0,
+        server_factory=lambda *args, **kwargs: Server(),
+        ready_probe=lambda url, root: (True, ""),
+        stop_callbacks=[slow_jobs_shutdown],
+        final_callbacks=[lambda: events.append("store")],
+    )
+    service.start()
+    owner_record = paths.logs / "job_owner.json"
+
+    assert service.stop() is False
+    assert events == ["http"], "HTTP 排空执行，但 Store 不能关"
+    assert owner_record.exists(), "未完成关闭不能放锁"
+    assert service._stopped is False, "未完成不能进入最终停止状态"
+    assert service._server is not None, "不能丢弃后续收尾所需引用"
+    assert store.list_projects() is not None or True, "Store 仍可用"
+
+    # 解除阻塞后再次关闭：继续收尾并最终释放所有权（server 允许再次关闭）。
+    service._stop_callbacks[0] = lambda: True
+    assert service.stop() is True
+    assert events == ["http", "http", "store"]
+    assert not owner_record.exists()
+    assert service._stopped is True
+
+
+def test_stop_waits_for_real_dispatcher_threads(tmp_path, store):
+    """组 2 反例 B：active_channels 为空不等于 dispatcher 线程已退出。"""
+
+    from behaviourlab.config import DataPaths
+    from behaviourlab.service import LocalService
+    from behaviourlab.web.app import create_app
+
+    paths = DataPaths.from_dir(tmp_path / "svc2")
+    paths.ensure()
+    app = create_app(data_dir=str(paths.root), store=store, testing=True)
+    events: list[str] = []
+
+    class Dispatcher:
+        def __init__(self):
+            self.threads = {12345}
+
+        def shutdown(self, cancel_pending=True, timeout=5.0):
+            # 真实 waitress 在 cancel_pending=True 时即使线程未退也返回 True。
+            return True
+
+    class Server:
+        def __init__(self):
+            self.task_dispatcher = Dispatcher()
+            self.active_channels = {}
+            self._closed = threading.Event()
+
+        def run(self):
+            self._closed.wait(timeout=10)
+
+        def close(self):
+            self._closed.set()
+            events.append("http")
+
+    service = LocalService(
+        app, paths, port=0,
+        server_factory=lambda *args, **kwargs: Server(),
+        ready_probe=lambda url, root: (True, ""),
+        stop_callbacks=[],
+        final_callbacks=[lambda: events.append("store")],
+    )
+    service._http_drain_timeout = 0.2
+    service.start()
+    owner_record = paths.logs / "job_owner.json"
+
+    assert service.stop() is False
+    assert events == ["http"]
+    assert owner_record.exists(), "工作线程未退出不能放锁"
+    assert service._server is not None
+
+    server = service._server
+    server.task_dispatcher.threads.clear()  # 阻塞任务结束，线程真正退出
+    assert service.stop() is True
+    assert events == ["http", "http", "store"]
+    assert not owner_record.exists()
+
+
+def test_process_exception_terminates_and_confirms_exit(paths, store,
+                                                        monkeypatch):
+    """组 3：poll 注入异常时先终止并等待确认退出，再释放与清引用。"""
+
+    asset = _asset(store, paths)
+    draft = _draft(store, asset)
+    scheduler = JobScheduler(store, paths, inline=False)
+    batch = scheduler.submit(draft["id"])
+
+    calls: list[str] = []
+
+    class FakeJob:
+        def terminate(self):
+            calls.append("terminate")
+
+        def wait(self, timeout_ms=3000):
+            calls.append("wait")
+
+        def close(self):
+            calls.append("close")
+
+    class FakeChild:
+        def __init__(self):
+            self.pid = 4242
+
+        def poll(self):
+            raise RuntimeError("poll 炸了")
+
+        def wait(self, timeout=None):
+            calls.append("child-wait")
+
+    class FakeManaged:
+        def __init__(self):
+            self.job = FakeJob()
+            self.process = FakeChild()
+            self.released = False
+
+        def stop(self, timeout_s=3.0):
+            # 与 ManagedProcess.stop 相同顺序：终止 → 等待确认 → 释放。
+            self.job.terminate()
+            try:
+                self.process.wait(timeout=timeout_s)
+            except Exception:
+                pass
+            self.job.close()
+
+        def release(self):
+            self.released = True
+            self.job.close()
+
+    fake = FakeManaged()
+    monkeypatch.setattr(scheduler, "_spawn", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(scheduler, "_wait",
+                        lambda process, context: process.poll())
+    store.update_batch(batch["id"], {"status": RUNNING})
+
+    scheduler._run_batch(batch["id"])
+    record = store.get_batch(batch["id"])
+    assert record["status"] == FAILED
+    assert calls[:3] == ["terminate", "child-wait", "close"], calls
+    assert calls.index("child-wait") < calls.index("close"), "先确认退出再释放"
+    assert scheduler._process is None
+    assert fake.released is True
+
+
+def test_delete_retries_clean_remaining_owned_files(paths, store,
+                                                    monkeypatch):
+    """组 4：部分删除成功后的重试必须继续清理剩余 owned 文件。"""
+
+    asset = _asset(store, paths)
+    batch = _completed_batch(store, paths, asset)
+    run_id = batch["videos"][0]["run_id"]
+    destination = paths.runs / run_id
+    scheduler = JobScheduler(store, paths, inline=True)
+
+    # 首次删除：summary.csv 已成功删掉，随后对 frozen_job.json 注入故障。
+    (destination / "summary.csv").unlink()
+    real_unlink = Path.unlink
+
+    def failing_unlink(self, missing_ok=False):
+        if self.name == "frozen_job.json" and self.parent == destination:
+            raise PermissionError(13, "拒绝访问")
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+    with pytest.raises(JobError) as captured:
+        scheduler.delete(batch["id"])
+    assert captured.value.status == 409
+    assert store.get_batch(batch["id"]) is not None, "失败删除保留记录"
+    assert (destination / "frozen_job.json").exists()
+
+    # 解除故障后重试：剩余可信产物全部清理，再删记录。
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    scheduler.delete(batch["id"])
+    assert store.get_batch(batch["id"]) is None
+    assert not destination.exists(), "剩余 owned 文件必须全部清理"

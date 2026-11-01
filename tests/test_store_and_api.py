@@ -209,11 +209,13 @@ def test_catalog_endpoint(client):
 def test_page_routes_render(client, store):
     project = store.create_project("页面项目")
     for path in ("/", "/projects", f"/projects/{project['id']}", "/analyze",
-                 "/tasks", "/results/abc", "/settings", "/landmarks"):
+                 "/tasks", "/settings", "/landmarks"):
         response = client.get(path)
         assert response.status_code == 200, path
         assert "text/html" in response.content_type
 
+    # 未发布的 run 与未知页面一样返回 404：页面与下载共用同一成功校验。
+    assert client.get("/results/abc").status_code == 404
     assert client.get("/projects/missing").status_code == 404
     assert client.get("/api/nope").status_code == 404
 

@@ -20,6 +20,7 @@ LOGGER = logging.getLogger("behaviourlab.service")
 READY_ATTEMPTS = 60
 READY_TIMEOUT_S = 1.0
 READY_INTERVAL_S = 0.1
+HTTP_DRAIN_TIMEOUT_S = 5.0
 
 
 class ServiceError(RuntimeError):
@@ -101,6 +102,7 @@ class LocalService:
         self._thread: threading.Thread | None = None
         self._owner_acquired = False
         self._stopped = False
+        self._http_drain_timeout = HTTP_DRAIN_TIMEOUT_S
         self._lock = threading.RLock()
 
     def start(self) -> str:
@@ -182,12 +184,41 @@ class LocalService:
             complete = False
         return complete
 
-    def stop(self) -> None:
+    def _drain_http(self, server: Any) -> bool:
+        """关监听、关连接，并等待真实 HTTP 工作线程退出。
+
+        ``active_channels`` 清空不等于工作线程已退出：阻塞中的任务不在
+        channels 里。只有 dispatcher 的 ``threads`` 集合清空，才能确认
+        没有线程还在使用数据库。返回是否确认排空。
+        """
+
+        complete = self._shutdown_server(server)
+        dispatcher = getattr(server, "task_dispatcher", None)
+        threads = getattr(dispatcher, "threads", None)
+        if isinstance(threads, (set, frozenset)) and threads:
+            deadline = time.monotonic() + float(self._http_drain_timeout)
+            while threads:
+                if time.monotonic() >= deadline:
+                    LOGGER.warning("HTTP 工作线程 %.1f 秒内未退出（%d 个）",
+                                   float(self._http_drain_timeout),
+                                   len(threads))
+                    return False
+                time.sleep(0.05)
+        return complete
+
+    def stop(self) -> bool:
+        """统一清理：任务收尾 → HTTP 排空 → Store.close → 释放所有权。
+
+        返回是否完成全部收尾。任务未停完或仍有工作线程在使用数据时，
+        不关闭 Store、不释放所有权、不丢弃引用，也不进入最终停止状态；
+        解除阻塞后可再次调用 ``stop()`` 继续收尾。
+        """
+
         with self._lock:
             if self._stopped:
-                return
-            self._stopped = True
+                return True
             complete = True
+            # 1. 停任务与工作进程；False/异常 = 未在时限内收尾。
             for callback in self._stop_callbacks:
                 try:
                     result = callback()
@@ -196,18 +227,21 @@ class LocalService:
                 except Exception:
                     LOGGER.exception("停止任务/工作进程失败")
                     complete = False
+            # 2. 排空真实 HTTP 使用者：监听、连接与 dispatcher 线程。
             server = self._server
-            self._server = None
-            if server is not None:
-                if not self._shutdown_server(server):
-                    complete = False
+            if server is not None and not self._drain_http(server):
+                complete = False
             thread = self._thread
-            self._thread = None
             if thread is not None and thread.is_alive():
                 thread.join(timeout=3.0)
                 if thread.is_alive():
                     LOGGER.warning("服务线程在 3 秒内未退出")
                     complete = False
+            if not complete:
+                # 仍被使用的 Store 不能关：保留引用与所有权，允许再次关闭。
+                LOGGER.warning("关闭未完成，保留引用与数据根所有权")
+                return False
+            # 3. 所有使用者已退出，才执行收尾回调（例如 Store.close）。
             for callback in self._final_callbacks:
                 try:
                     result = callback()
@@ -216,11 +250,14 @@ class LocalService:
                 except Exception:
                     LOGGER.exception("关闭收尾失败")
                     complete = False
+            if not complete:
+                return False
+            # 4. 释放数据根所有权；5. 最后才标记停止，保证幂等与可重试。
             if self._owner_acquired:
-                if complete:
-                    self._owner.release()
-                    self._owner_acquired = False
-                else:
-                    # 未完成关闭：保留数据根所有权，等旧线程真正退出。
-                    LOGGER.warning("关闭未完成，保留数据根所有权")
-            LOGGER.info("本地服务已停止（complete=%s）", complete)
+                self._owner.release()
+                self._owner_acquired = False
+            self._server = None
+            self._thread = None
+            self._stopped = True
+            LOGGER.info("本地服务已停止")
+            return True

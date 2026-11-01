@@ -106,11 +106,14 @@ def _batch_progress(videos: Sequence[Mapping[str, Any]], index: int,
 
 
 def _manifest_ok(directory: Path, job_id: str, run_id: str, *,
-                 require_status: bool = True) -> dict | None:
+                 require_status: bool = True,
+                 tolerate_missing: bool = False) -> dict | None:
     """已发布清单：身份一致、显式成功、声明文件都在本目录内。
 
     新布局与恢复共用这一判据（``require_status=True``）；只有旧嵌套记录经
     可信 job 记录核对时才允许缺状态，显式 failed 永远不算成功。
+    ``tolerate_missing`` 只用于删除重试：容许本流程先前已删掉的声明文件
+    缺失，仍然核对身份、状态与越界路径，不放宽发布/恢复判据。
     """
 
     from . import runs as run_service
@@ -123,7 +126,7 @@ def _manifest_ok(directory: Path, job_id: str, run_id: str, *,
         return None
     issues = run_service.manifest_issues(
         directory, manifest, run_id, require_status=require_status,
-        job_id=job_id)
+        job_id=job_id, tolerate_missing=tolerate_missing)
     if issues:
         return None
     return dict(manifest)
@@ -775,7 +778,11 @@ class JobScheduler:
             if not destination.exists() or not _under(self.paths.runs,
                                                       destination):
                 continue
-            manifest = _manifest_ok(destination, batch_id, run_id)
+            # 删除可重试：本流程先前已成功删掉的声明文件允许缺失，只要
+            # 清单仍自称本任务、状态为 completed 且没有越界声明，剩余
+            # owned 文件继续清理。发布/恢复的判据不放宽。
+            manifest = _manifest_ok(destination, batch_id, run_id,
+                                    tolerate_missing=True)
             if manifest is None:
                 # 清单自称呼别的任务或不可核对：不按名字猜归属。
                 continue
@@ -1094,7 +1101,13 @@ class JobScheduler:
                               f"无法启动工作进程：{error}")
             return 1
         finally:
-            # 引用先清掉，再释放本对象句柄；异常路径上的活进程由调用方终止。
+            failing = sys.exc_info()[0] is not None
+            if process is not None and failing:
+                # 异常路径：所属进程必须先终止并等待确认退出，再释放句柄与
+                # 清引用。JobObject.close 可能触发终止，但不等于已等待确认；
+                # 引用在确认前保持可用，外层 _stop_active_process 重复调用
+                # 是安全兜底。正常返回时 _wait 已确认进程退出，只需释放。
+                self._terminate(process)
             self._process = None
             if process is not None:
                 release = getattr(process, "release", None)

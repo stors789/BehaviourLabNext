@@ -1170,7 +1170,11 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
         if not is_valid_id(run_id):
             return render_template("not_found.html"), 404
         run = run_service.resolve_run(store, paths, run_id)
-        results = _run_payloads(run["dir"] if run else Path(paths.runs) / run_id)
+        if run is None:
+            # 页面与下载共用同一发布/状态校验：失败或未发布的清单不进
+            # fallback，不能因为 results.json 可读就渲染成正常结果。
+            return render_template("not_found.html"), 404
+        results = _run_payloads(run["dir"])
         return render_template(
             "result.html", active="tasks", run_id=run_id, results=results,
             run=run,

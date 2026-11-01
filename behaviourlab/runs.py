@@ -40,12 +40,14 @@ def _legacy_dir(store: Store, paths: DataPaths, run_id: str) -> Path | None:
 
 def manifest_issues(directory: Path, manifest: Mapping[str, Any],
                     run_id: str, *, require_status: bool = True,
-                    job_id: str | None = None) -> list[str]:
+                    job_id: str | None = None,
+                    tolerate_missing: bool = False) -> list[str]:
     """清单有效性：身份一致、显式成功状态、声明文件都在本目录内。
 
     ``require_status`` 对**新布局**为真：失败或缺状态的清单不能因为目录存在
     就被当成已发布结果。旧嵌套布局由可信记录核对时允许缺状态（见调用方），
-    但显式 ``failed`` 永远不是成功。
+    但显式 ``failed`` 永远不是成功。``tolerate_missing`` 只用于删除重试：
+    允许本流程先前已成功删掉的声明文件缺失，越界/符号链接仍然拒绝。
     """
 
     issues: list[str] = []
@@ -69,9 +71,33 @@ def manifest_issues(directory: Path, manifest: Mapping[str, Any],
         if not isinstance(name, str) or not name:
             issues.append("清单包含非法文件名")
             continue
-        if safe_file(directory, name) is None:
+        problem = declared_name_issue(directory, name)
+        if problem is not None:
+            issues.append(f"声明文件{problem}：{name}")
+            continue
+        if not tolerate_missing and safe_file(directory, name) is None:
             issues.append(f"声明文件缺失或不在本 run 目录内：{name}")
     return issues
+
+
+def declared_name_issue(directory: Path, relative: str) -> str | None:
+    """声明名必须能安全落到本目录内；返回问题说明或 None。
+
+    与 ``safe_file`` 的差别：这里不要求文件当前存在，只拒绝越界路径、
+    绝对路径与符号链接，供删除重试区分“已删”与“越界”。
+    """
+
+    if not isinstance(relative, str) or not relative:
+        return "名不是非空文本"
+    if relative.startswith(("/", "\\")) or ".." in Path(relative).parts:
+        return "路径越界"
+    root = Path(directory).resolve()
+    candidate = (root / relative).resolve()
+    if candidate == root or root not in candidate.parents:
+        return "路径越界"
+    if candidate.is_symlink():
+        return "是符号链接"
+    return None
 
 
 def _record_job_id(store: Store, run_id: str, directory: Path) -> str | None:
@@ -84,6 +110,24 @@ def _record_job_id(store: Store, run_id: str, directory: Path) -> str | None:
         for video in batch.get("videos") or []:
             if video.get("run_id") == run_id and video.get("job_id"):
                 return str(video["job_id"])
+    return None
+
+
+# 缺状态旧清单只能由这些可信记录状态授权读取；error/running 一律不算。
+_SUCCESS_RECORD_STATUS = {"done", "completed"}
+
+
+def _record_status(store: Store, run_id: str, directory: Path) -> str | None:
+    """可信记录里该目录对应任务的状态；找不到记录返回 None。"""
+
+    for job in store.list_jobs(run_id):
+        if directory.name == str(job.get("id")):
+            return str(job.get("status") or "")
+    for batch in store.list_batches():
+        for video in batch.get("videos") or []:
+            if (video.get("run_id") == run_id
+                    and directory.name == str(video.get("job_id") or "")):
+                return str(video.get("status") or "")
     return None
 
 
@@ -108,6 +152,12 @@ def resolve_run(store: Store, paths: DataPaths, run_id: str) -> dict | None:
     record_job = _record_job_id(store, run_id, directory)
     issues = manifest_issues(directory, manifest, run_id,
                              require_status=not legacy, job_id=record_job)
+    if not issues and legacy and manifest.get("status") is None:
+        # 缺状态旧清单必须由可信的旧成功记录授权：done/completed 才算旧成功；
+        # error 记录（旧失败）与无名记录一律不能当成功结果读取或下载。
+        record_status = _record_status(store, run_id, directory)
+        if record_status not in _SUCCESS_RECORD_STATUS:
+            issues = ["旧清单缺少完成状态，且没有可信的成功记录授权"]
     if issues:
         # 未通过有效性检查：当作未发布，页面与下载都不引用它。
         return None

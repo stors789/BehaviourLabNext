@@ -767,6 +767,7 @@ def test_ldb_result_page_lists_manifest_figures(client, store):
                            "units": {}, "warnings": []}}
     (job_dir / "results.json").write_text(json.dumps(result), encoding="utf-8")
     manifest = {
+        "status": "completed", "run_id": run_id, "job_id": "b" * 32,
         "units": [{"unit_id": UNIT, "unit_name": "小鼠 1",
                    "summary": facts["summary"],
                    "figures": {"stem": "u", "trajectory": "u_trajectory.png"}}],
