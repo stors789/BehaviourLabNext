@@ -51,25 +51,25 @@ SPEC = {
                   section="场地",
                   help="不可见时明室未检测即推断在暗室，不输出全场距离"),
         parameter("door_open_delay_s", "开门延迟", "number", 3.0, unit="s",
-                  minimum=0, section="统计"),
+                  minimum=0, step="any", section="统计"),
         parameter("transition_min_dwell_s", "主室转换确认时间", "number",
-                  0.12, unit="s", minimum=0, section="统计"),
+                  0.12, unit="s", minimum=0, step="any", section="统计"),
         parameter("doorway_reset_s", "门区候选重置时间", "number", 0.2,
-                  unit="s", minimum=0, section="统计"),
+                  unit="s", minimum=0, step="any", section="统计"),
         parameter("bin_seconds", "时间箱长度", "number", 60.0, unit="s",
-                  minimum=0, section="统计"),
+                  minimum=0, step="any", section="统计"),
         parameter("light_box_length_cm", "明室长度", "number", 40.0,
-                  unit="cm", minimum=0, section="场地"),
+                  unit="cm", minimum=0, step="any", section="场地"),
         parameter("light_box_width_cm", "明室宽度", "number", 20.0,
-                  unit="cm", minimum=0, section="场地"),
+                  unit="cm", minimum=0, step="any", section="场地"),
         parameter("dark_box_length_cm", "暗室长度", "number", 40.0,
-                  unit="cm", minimum=0, section="场地"),
+                  unit="cm", minimum=0, step="any", section="场地"),
         parameter("dark_box_width_cm", "暗室宽度", "number", 20.0,
-                  unit="cm", minimum=0, section="场地"),
+                  unit="cm", minimum=0, step="any", section="场地"),
         parameter("shared_edge_length_cm", "相邻公共边重合长度", "number",
-                  40.0, unit="cm", minimum=0, section="场地"),
+                  40.0, unit="cm", minimum=0, step="any", section="场地"),
         parameter("movement_threshold_cm_s", "移动速度阈值", "number", 1.0,
-                  unit="cm/s", minimum=0, section="统计"),
+                  unit="cm/s", minimum=0, step="any", section="统计"),
     ],
     "geometry": [
         geometry_field("light", "明室边界", "polygon", min_points=3),
@@ -190,28 +190,28 @@ def validate_geometry(geometry: Mapping[str, Any] | None, *,
     zones = geometry.get("zones")
     issues: list[dict] = []
     if not isinstance(zones, Mapping):
+        # 未画完的几何仍可暂存；但已填的遮罩照常校验，不因缺 zones 提前退出。
         if require:
             issues.append({"field": "geometry.zones.light",
                            "message": "缺少明室区域"})
             if visible:
                 issues.append({"field": "geometry.zones.dark",
                                "message": "缺少暗室区域"})
-        return issues
-
-    for key in ZONE_KEYS:
-        field = f"geometry.zones.{key}"
-        shape = zones.get(key)
-        if shape is None:
-            if key == "light" and require:
-                issues.append({"field": field, "message": "缺少明室区域"})
-            elif key == "dark" and visible and require:
-                issues.append({"field": field, "message": "缺少暗室区域"})
-            continue
-        if _polygon(shape) is None:
-            strict = "需要 4 个有限点、凸、正面积且不交叉" \
-                if isinstance(shape, Mapping) and shape.get("type") == "quad" \
-                else "需要至少 3 个有限点、正面积且不自交"
-            issues.append({"field": field, "message": strict})
+    else:
+        for key in ZONE_KEYS:
+            field = f"geometry.zones.{key}"
+            shape = zones.get(key)
+            if shape is None:
+                if key == "light" and require:
+                    issues.append({"field": field, "message": "缺少明室区域"})
+                elif key == "dark" and visible and require:
+                    issues.append({"field": field, "message": "缺少暗室区域"})
+                continue
+            if _polygon(shape) is None:
+                strict = "需要 4 个有限点、凸、正面积且不交叉" \
+                    if isinstance(shape, Mapping) and shape.get("type") == "quad" \
+                    else "需要至少 3 个有限点、正面积且不自交"
+                issues.append({"field": field, "message": strict})
     mask = geometry.get("mask")
     if mask is not None and _polygon(mask) is None:
         issues.append({"field": "geometry.mask",
@@ -267,15 +267,21 @@ def validate_unit(options: Mapping[str, Any] | None,
             issues.append({"field": "options.movement_threshold_cm_s",
                            "message": "速度阈值必须 ≥ 0"})
 
-    if visible and all(sizes[key] is not None for key in SIZE_KEYS):
-        # 公共边重合长度不能超过两箱各自最长边中较小的一个。
-        limit = min(max(sizes["light_box_length_cm"], sizes["light_box_width_cm"]),
-                    max(sizes["dark_box_length_cm"], sizes["dark_box_width_cm"]))
-        if sizes["shared_edge_length_cm"] > limit + 1e-12:
-            issues.append({
-                "field": "options.shared_edge_length_cm",
-                "message": f"公共边重合长度不能超过 {limit:g} cm",
-            })
+    if visible:
+        # 公共边约束用最终合并后的有效尺寸：某个值来自默认也不能跳过比较。
+        effective = {key: _finite(values.get(key)) for key in SIZE_KEYS}
+        if all(value is not None and value > 0
+               for value in effective.values()):
+            # 公共边重合长度不能超过两箱各自最长边中较小的一个。
+            limit = min(max(effective["light_box_length_cm"],
+                            effective["light_box_width_cm"]),
+                        max(effective["dark_box_length_cm"],
+                            effective["dark_box_width_cm"]))
+            if effective["shared_edge_length_cm"] > limit + 1e-12:
+                issues.append({
+                    "field": "options.shared_edge_length_cm",
+                    "message": f"公共边重合长度不能超过 {limit:g} cm",
+                })
 
     issues.extend(validate_geometry(geometry, visible=visible,
                                     require=complete))
@@ -290,6 +296,16 @@ def step_drawn(geometry: Mapping[str, Any] | None, key: str) -> bool:
         zones = geometry.get("zones")
         return _polygon((zones or {}).get(key)) is not None
     return geometry.get(key) is not None
+
+
+def step_applies(step: Mapping[str, Any],
+                 options: Mapping[str, Any] | None) -> bool:
+    """当前可见性下的步骤集合：不可见暗室既不要求画，也不列为当前步骤。"""
+
+    if step.get("key") == "dark":
+        visible = (options or {}).get("dark_box_visible")
+        return True if not isinstance(visible, bool) else visible
+    return True
 
 
 # -- 区域定位 -----------------------------------------------------------
@@ -498,7 +514,8 @@ class _ChamberState:
                     self.doorway_since = moment
                     # 门区时段不计入停留；保留起点与已积累时间。
                     self.pending_last = None
-                elif moment - self.doorway_since >= reset - 1e-9:
+                # 起始时刻本身也要判阈值：reset=0 时首个门区点即清空候选。
+                if moment - self.doorway_since >= reset - 1e-9:
                     self._clear_pending()
             return None
 
@@ -609,7 +626,9 @@ def _bin_rows(rows: Sequence[Mapping[str, Any]], window: timeline.Window,
             bucket = buckets[index]
             span = high - low
             zone = row.get("zone")
-            bucket[zone if zone in bucket else "unknown"] += span
+            # 只有真实 zone=unknown 才计入 unknown；None（可见缺失）只计缺失。
+            if zone in bucket:
+                bucket[zone] += span
             if row.get("detected"):
                 bucket["observed"] += span
             else:
@@ -778,7 +797,8 @@ def process_unit(unit: Mapping[str, Any], captured: Sequence[Mapping[str, Any]],
         x_key = "x_cm" if mode == "cm" else "x_px"
         y_key = "y_cm" if mode == "cm" else "y_px"
         segments = timeline.motion_segments(rows, window, x_key=x_key,
-                                            y_key=y_key)
+                                            y_key=y_key,
+                                            require_continuity=True)
         timeline.attach_motion(rows, segments)
 
     measurable = sum(float(item["end_s"]) - float(item["start_s"])

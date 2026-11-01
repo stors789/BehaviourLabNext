@@ -899,6 +899,40 @@
         {% endif %}
       </div>
     </details>
+    {% set ldb_figures = [unit.figures.trajectory, unit.figures.heatmap,
+                          unit.figures.activity, unit.figures.objects]
+                         | select("string") | list %}
+    {% if ldb_figures %}
+    <div class="figure-row">
+      {% if unit.figures.trajectory %}
+      <figure>
+        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.trajectory }}" alt="轨迹">
+        <figcaption>轨迹</figcaption>
+      </figure>
+      {% endif %}
+      {% if unit.figures.heatmap %}
+      <figure>
+        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.heatmap }}" alt="热图">
+        <figcaption>热图</figcaption>
+      </figure>
+      {% endif %}
+      {% if unit.figures.activity %}
+      <figure>
+        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.activity }}" alt="活动曲线">
+        <figcaption>活动曲线</figcaption>
+      </figure>
+      {% endif %}
+      {% if unit.figures.objects %}
+      <figure>
+        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.figures.objects }}" alt="物体探索">
+        <figcaption>物体探索</figcaption>
+      </figure>
+      {% endif %}
+    </div>
+    {% if unit.figures.note %}<p class="muted">{{ unit.figures.note }}</p>{% endif %}
+    {% else %}
+    <p class="muted" data-empty="figures">暂无图表（本次运行未生成本单位的图形，见下方文件列表）。</p>
+    {% endif %}
     {% if s.dark_box_visible == false %}
     <p class="muted">不可见暗室：明室未检测即推断在暗室；不输出可靠全场距离或速度。</p>
     {% elif s.coordinate_unit == "cm" %}

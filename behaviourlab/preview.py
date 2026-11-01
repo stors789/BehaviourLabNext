@@ -342,10 +342,9 @@ def create_preview(
         )
 
     geometry = unit.get("geometry") or {}
-    options: dict = {}
-    for layer in (draft.get("options"), video.get("options"), unit.get("options")):
-        if isinstance(layer, Mapping):
-            options.update(layer)
+    # 检测区域、签名与行为核心必须用同一份最终配置：只叠显式覆盖会在
+    # 稀疏 API 配置下漏掉默认 dark_box_visible，让检测区域少掉暗室。
+    options = resolve_options(draft["assay"], draft=draft, video=video, unit=unit)
     settings = resolve_detection(draft["assay"], draft=draft, video=video, unit=unit)
     metadata = asset.get("metadata") or {}
     duration_s = metadata.get("duration_s")
@@ -405,8 +404,7 @@ def create_preview(
             "animal_id": unit.get("animal_id"),
             "window": unit.get("window"),
             "geometry": geometry,
-            "options": resolve_options(draft["assay"], draft=draft,
-                                       video=video, unit=unit),
+            "options": dict(options),
             "detection": settings,
             "manual": unit.get("manual"),
         }
@@ -423,7 +421,6 @@ def create_preview(
     thickness = _thickness(width, height)
     if result is not None:
         _draw_candidates(canvas, result, thickness)
-    drawn = []
     for key, shape in geometry.items():
         if key == "zones" and isinstance(shape, Mapping):
             # EPM 的五个区域嵌在 zones 下，逐个叠画而不是当成一个形状。
@@ -434,13 +431,22 @@ def create_preview(
         if not isinstance(shape, Mapping):
             continue
         _draw_shape(canvas, shape, _bgr("#ffd26f"), thickness)
-        drawn.append(key)
+    steps = module.SPEC.get("geometry", [])
+    # 步骤集合随当前配置变化：暗室不可见时不把 dark 当成待绘制步骤。
+    step_applies = getattr(module, "step_applies", None)
+
+    def in_scope(step: Mapping[str, Any]) -> bool:
+        return bool(step_applies(step, options)) if step_applies else True
+
     step_checker = getattr(module, "step_drawn", None)
-    if step_checker is not None:
-        # 步骤键可能不是顶层几何键（NOR 的物体存在 objects 数组里），
-        # 已绘制列表按同一步骤判定重算，顺序与画布一致。
-        drawn = [step["key"] for step in module.SPEC.get("geometry", [])
-                 if step_checker(geometry, step["key"])]
+
+    def is_drawn(step: Mapping[str, Any]) -> bool:
+        return (bool(step_checker(geometry, step["key"])) if step_checker
+                else step.get("key") in geometry)
+
+    # 已绘制判定与画布、最终校验同源：NOR 的物体步骤落在 geometry.objects 里。
+    drawn = [step["key"] for step in steps
+             if in_scope(step) and is_drawn(step)]
     _draw_guides(canvas, draft.get("assay", ""), unit.get("options") or {},
                  geometry, thickness)
 
@@ -465,14 +471,9 @@ def create_preview(
     if not cv2.imwrite(str(target), canvas):
         raise ValidationError("无法保存预览图", "preview")
 
-    steps = experiments.get(draft["assay"]).SPEC.get("geometry", [])
-    # 已绘制判定与画布、最终校验同源：NOR 的物体步骤落在 geometry.objects 里。
-    checker = getattr(module, "step_drawn", None)
     missing = [
         step["label"] for step in steps
-        if step.get("required") and not (
-            checker(geometry, step["key"]) if checker
-            else step.get("key") in geometry)
+        if step.get("required") and in_scope(step) and not is_drawn(step)
     ]
     warnings: list[str] = []
     if result is None:
