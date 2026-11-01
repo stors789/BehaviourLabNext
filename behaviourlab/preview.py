@@ -342,6 +342,12 @@ def create_preview(
         )
 
     geometry = unit.get("geometry") or {}
+    module = experiments.get(draft["assay"])
+    # 已提供但类型错误的几何不能进入检测：缺步骤仍算未完成，照常预览。
+    geometry_checker = getattr(module, "preview_geometry_issues", None)
+    if geometry_checker is not None:
+        for issue in geometry_checker(geometry):
+            raise ValidationError(issue["message"], issue["field"])
     # 检测区域、签名与行为核心必须用同一份最终配置：只叠显式覆盖会在
     # 稀疏 API 配置下漏掉默认 dark_box_visible，让检测区域少掉暗室。
     options = resolve_options(draft["assay"], settings=settings, draft=draft,
@@ -401,7 +407,6 @@ def create_preview(
             raise ValidationError(str(error), "detection") from error
 
     behavior = None
-    module = experiments.get(draft["assay"])
     if kind == "behavior" and hasattr(module, "preview_analysis"):
         core_unit = {
             "id": unit.get("id"),

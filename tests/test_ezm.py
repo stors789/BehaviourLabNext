@@ -542,3 +542,261 @@ def test_workspace_and_preview_wire_ezm_guides():
         in preview_source
     assert "_draw_guides(canvas, draft.get(\"assay\", \"\"), options" \
         in preview_source
+
+
+# -- 有限修正一：已提供但类型错误的几何在四个入口都被拒绝 ----------------
+
+WRONG_ARENA = {"type": "polygon", "center": [100.0, 100.0],
+               "radii": [60.0, 30.0], "angle": 0.0}
+WRONG_MASK = {"type": "line", "points": [[10, 10], [90, 10], [90, 90], [10, 90]]}
+GOOD_MASK = {"type": "polygon", "points": [[10, 10], [90, 10], [90, 90], [10, 90]]}
+
+
+def test_wrong_geometry_types_are_rejected_everywhere(client, store):
+    from behaviourlab import engine
+    from behaviourlab.schema import AnalysisContext, ValidationError
+
+    bad_arena = geometry(arena=WRONG_ARENA)
+    issues = ezm.validate_unit(dict(OPTIONS), bad_arena, complete=True)
+    assert [item["field"] for item in issues] == ["geometry.arena"]
+    assert "ellipse" in issues[0]["message"]
+    # 未完成的草稿（缺几何）仍可保存；类型错误与“尚未绘制”不同。
+    assert ezm.validate_unit(dict(OPTIONS), {}) == []
+    assert ezm.validate_unit(dict(OPTIONS), {"arena": WRONG_ARENA}) == [
+        {"field": "geometry.arena", "message": "外缘必须是 ellipse 类型"}]
+
+    bad_mask = geometry(mask=WRONG_MASK)
+    assert ezm.validate_unit(dict(OPTIONS), bad_mask, complete=True) == [
+        {"field": "geometry.mask", "message": "检测遮罩必须是 polygon 类型"}]
+    # 正确的可选遮罩保持原行为。
+    assert ezm.validate_unit(dict(OPTIONS), geometry(mask=GOOD_MASK),
+                             complete=True) == []
+
+    # 保存：POST/PUT 都拒绝，字段指向具体步骤。
+    created = client.post("/api/drafts", json={
+        "assay": "ezm",
+        "videos": [{"asset_id": "a" * 32,
+                    "units": [{"name": "小鼠 1", "geometry": bad_arena}]}],
+    })
+    assert created.status_code == 400
+    assert created.get_json()["error"]["fields"][0]["field"].endswith(
+        "geometry.arena")
+
+    draft = store.create_draft("ezm", videos=[{
+        "asset_id": "a" * 32,
+        "units": [{"id": "e" * 32, "name": "小鼠 1", "geometry": geometry()}],
+    }])
+    updated = client.put(f"/api/drafts/{draft['id']}", json={"videos": [{
+        "asset_id": "a" * 32,
+        "units": [{"id": "e" * 32, "name": "小鼠 1",
+                   "geometry": geometry(arena=WRONG_ARENA)}],
+    }]})
+    assert updated.status_code == 400
+    assert updated.get_json()["error"]["fields"][0]["field"].endswith(
+        "geometry.arena")
+
+    # 未完成草稿仍可保存并进入预览。
+    incomplete = store.create_draft("ezm", videos=[{
+        "asset_id": "a" * 32,
+        "units": [{"id": "e" * 32, "name": "小鼠 1", "geometry": {}}],
+    }])
+    assert client.put(f"/api/drafts/{incomplete['id']}",
+                      json={"videos": incomplete["videos"]}).status_code == 200
+
+    # 最终校验与分析入口同样拒绝。
+    validate = client.get(f"/api/drafts/{draft['id']}/validate")
+    assert validate.status_code == 200
+    bad_draft = {**draft, "videos": [{
+        "asset_id": "a" * 32,
+        "units": [{"id": "e" * 32, "name": "小鼠 1",
+                   "geometry": geometry(arena=WRONG_ARENA)}],
+    }]}
+    assert [item["field"] for item in engine.validate_draft(
+        bad_draft, complete=True)] == ["videos[0].units[0].geometry.arena"]
+
+    context = AnalysisContext(job={"assay": "ezm", "units": [unit(
+        geometric=bad_arena)]})
+    with pytest.raises(ValidationError) as captured:
+        ezm.analyze(context)
+    assert captured.value.field == "geometry.arena"
+
+    context_mask = AnalysisContext(job={"assay": "ezm", "units": [unit(
+        geometric=bad_mask)]})
+    with pytest.raises(ValidationError) as captured_mask:
+        ezm.analyze(context_mask)
+    assert captured_mask.value.field == "geometry.mask"
+
+
+# -- 有限修正一：已提供但类型错误的几何在四个入口都被拒绝 ----------------
+
+WRONG_ARENA = {"type": "polygon", "center": [100.0, 100.0],
+               "radii": [60.0, 30.0], "angle": 0.0}
+WRONG_MASK = {"type": "line", "points": [[10, 10], [90, 10], [90, 90], [10, 90]]}
+GOOD_MASK = {"type": "polygon", "points": [[10, 10], [90, 10], [90, 90], [10, 90]]}
+
+
+def test_wrong_geometry_types_are_rejected_everywhere(client, store):
+    from behaviourlab import engine
+    from behaviourlab.schema import AnalysisContext, ValidationError
+
+    bad_arena = geometry(arena=WRONG_ARENA)
+    issues = ezm.validate_unit(dict(OPTIONS), bad_arena, complete=True)
+    assert [item["field"] for item in issues] == ["geometry.arena"]
+    assert "ellipse" in issues[0]["message"]
+    # 未完成的草稿（缺几何）仍可保存；类型错误与“尚未绘制”不同。
+    assert ezm.validate_unit(dict(OPTIONS), {}) == []
+    assert ezm.validate_unit(dict(OPTIONS), {"arena": WRONG_ARENA}) == [
+        {"field": "geometry.arena", "message": "外缘必须是 ellipse 类型"}]
+
+    bad_mask = geometry(mask=WRONG_MASK)
+    assert ezm.validate_unit(dict(OPTIONS), bad_mask, complete=True) == [
+        {"field": "geometry.mask", "message": "检测遮罩必须是 polygon 类型"}]
+    # 正确的可选遮罩保持原行为。
+    assert ezm.validate_unit(dict(OPTIONS), geometry(mask=GOOD_MASK),
+                             complete=True) == []
+
+    # 保存：POST/PUT 都拒绝，字段指向具体步骤。
+    created = client.post("/api/drafts", json={
+        "assay": "ezm",
+        "videos": [{"asset_id": "a" * 32,
+                    "units": [{"name": "小鼠 1", "geometry": bad_arena}]}],
+    })
+    assert created.status_code == 400
+    assert created.get_json()["error"]["fields"][0]["field"].endswith(
+        "geometry.arena")
+
+    draft = store.create_draft("ezm", videos=[{
+        "asset_id": "a" * 32,
+        "units": [{"id": "e" * 32, "name": "小鼠 1", "geometry": geometry()}],
+    }])
+    updated = client.put(f"/api/drafts/{draft['id']}", json={"videos": [{
+        "asset_id": "a" * 32,
+        "units": [{"id": "e" * 32, "name": "小鼠 1",
+                   "geometry": geometry(arena=WRONG_ARENA)}],
+    }]})
+    assert updated.status_code == 400
+    assert updated.get_json()["error"]["fields"][0]["field"].endswith(
+        "geometry.arena")
+
+    # 未完成草稿仍可保存并进入预览。
+    incomplete = store.create_draft("ezm", videos=[{
+        "asset_id": "a" * 32,
+        "units": [{"id": "e" * 32, "name": "小鼠 1", "geometry": {}}],
+    }])
+    assert client.put(f"/api/drafts/{incomplete['id']}",
+                      json={"videos": incomplete["videos"]}).status_code == 200
+
+    # 最终校验与分析入口同样拒绝。
+    validate = client.get(f"/api/drafts/{draft['id']}/validate")
+    assert validate.status_code == 200
+    bad_draft = {**draft, "videos": [{
+        "asset_id": "a" * 32,
+        "units": [{"id": "e" * 32, "name": "小鼠 1",
+                   "geometry": geometry(arena=WRONG_ARENA)}],
+    }]}
+    assert [item["field"] for item in engine.validate_draft(
+        bad_draft, complete=True)] == ["videos[0].units[0].geometry.arena"]
+
+    context = AnalysisContext(job={"assay": "ezm", "units": [unit(
+        geometric=bad_arena)]})
+    with pytest.raises(ValidationError) as captured:
+        ezm.analyze(context)
+    assert captured.value.field == "geometry.arena"
+
+    context_mask = AnalysisContext(job={"assay": "ezm", "units": [unit(
+        geometric=bad_mask)]})
+    with pytest.raises(ValidationError) as captured_mask:
+        ezm.analyze(context_mask)
+    assert captured_mask.value.field == "geometry.mask"
+
+
+# -- 有限修正二：近圆心判据统一按 D=1 ------------------------------------
+
+LEGAL_START = {"type": "point", "points": [[100.0000024, 100.0]]}
+ILLEGAL_START = {"type": "point", "points": [[100.0000006, 100.0]]}
+SMALL = {"outer_diameter_cm": 0.1, "ring_width_cm": 1.0 / 120.0}
+
+
+@pytest.mark.parametrize("sizes,zone", [
+    # 0.5 cm 的边界余量在 0.05 cm 半径的环上覆盖全程：占用结果不同是物理事实，
+    # 本轮只要求“有效性判据与方向”不随外径改变。
+    (SMALL, "boundary"),
+    ({"outer_diameter_cm": 60.0, "ring_width_cm": 5.0}, "O1"),
+])
+def test_near_center_rule_is_independent_of_outer_diameter(sizes, zone):
+    from behaviourlab.schema import ValidationError
+
+    options = dict(OPTIONS, **sizes)
+    legal = geometry(start=LEGAL_START)
+    illegal = geometry(start=ILLEGAL_START)
+
+    # D=1 映射下范数约 2e-8：任何实际外径下都合法，方向恒为 +x。
+    assert ezm.validate_unit(options, legal, complete=True) == []
+    assert ezm.boundary_angle(legal) == pytest.approx(0.0, abs=1e-15)
+    guides = ezm.boundary_guides(legal, options)
+    assert guides is not None
+    assert guides["boundary_angle_deg"] == pytest.approx(0.0, abs=1e-12)
+    facts = ezm.process_unit(unit(options=options, geometric=legal),
+                             source_rows([ring_point(45)]), window(1), 0.0)
+    assert facts["rows"][0]["zone"] == zone
+    assert facts["summary"]["boundary_angle_deg"] == pytest.approx(
+        0.0, abs=1e-12)
+
+    # 范数约 5e-9：两组尺寸下都拒绝，字段指向起始边界。
+    fields = [item["field"] for item in ezm.validate_unit(
+        options, illegal, complete=True)]
+    assert fields == ["geometry.open_boundary"]
+    assert ezm.boundary_angle(illegal) is None
+    assert ezm.boundary_guides(illegal, options) is None
+    with pytest.raises(ValidationError) as captured:
+        ezm.process_unit(unit(options=options, geometric=illegal),
+                         source_rows([ring_point(45)]), window(1), 0.0)
+    assert captured.value.field == "geometry.open_boundary"
+
+
+def test_preview_rejects_wrong_geometry_types(client, store, tmp_path,
+                                              monkeypatch):
+    from behaviourlab import preview
+    from behaviourlab.media import FrameInfo
+
+    monkeypatch.setattr(
+        preview.media, "read_frame_info",
+        lambda *args, **kwargs: FrameInfo(
+            image=np.full((200, 200, 3), 255, dtype=np.uint8), index=0,
+            time_s=0.0, pts=None, time_base=None, clock_source="pts"))
+
+    source = tmp_path / "ezm-types.mp4"
+    source.write_bytes(b"placeholder")
+    asset = store.create_asset(name="ezm-types.mp4", path=str(source),
+                               project_id=None,
+                               metadata={"width": 200, "height": 200,
+                                         "duration_s": 1.0, "fps": 10.0,
+                                         "frame_count": 10})
+
+    def make(bad_geometry):
+        return store.create_draft("ezm", videos=[{
+            "asset_id": asset["id"],
+            "units": [{"id": "e" * 32, "name": "小鼠 1",
+                       "geometry": bad_geometry}],
+        }])
+
+    for bad_geometry, field in (
+            (geometry(arena=WRONG_ARENA), "geometry.arena"),
+            (geometry(mask=WRONG_MASK), "geometry.mask")):
+        draft = make(bad_geometry)
+        for kind in ("detection", "behavior"):
+            response = client.post(
+                f"/api/drafts/{draft['id']}/preview",
+                json={"asset_id": asset["id"], "unit_id": "e" * 32,
+                      "frame_index": 0, "kind": kind})
+            assert response.status_code == 400, (kind, response.get_json())
+            assert response.get_json()["error"]["fields"][0]["field"] == field
+
+    # 正确类型与“尚未绘制”都能正常预览。
+    for good in (geometry(), geometry(mask=GOOD_MASK)):
+        draft = make(good)
+        response = client.post(
+            f"/api/drafts/{draft['id']}/preview",
+            json={"asset_id": asset["id"], "unit_id": "e" * 32,
+                  "frame_index": 0, "kind": "detection"})
+        assert response.status_code == 201, response.get_json()

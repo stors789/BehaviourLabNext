@@ -143,6 +143,17 @@ function guideFlow(geometry) {
   assert.strictEqual(ezmGuides(
     { type: "ellipse", points: [[160, 100], [100, 130], [40, 100],
       [100, 70], [130, 85]] }, geometry.open_boundary, 60, 5), null);
+
+  // 近圆心判据固定 D=1：有效性不随实际外径改变，方向恒为 +x。
+  const nearStart = { type: "point", points: [[100.0000024, 100]] };
+  const tooClose = { type: "point", points: [[100.0000006, 100]] };
+  for (const [diameter, width] of [[0.1, 1 / 120], [60, 5]]) {
+    const kept = ezmGuides(geometry.arena, nearStart, diameter, width);
+    assert.ok(kept, "D=1 范数约 2e-8 在任何外径下都合法");
+    close(kept.boundary_angle_deg, 0, 1e-9);
+    assert.strictEqual(ezmGuides(geometry.arena, tooClose, diameter, width),
+      null, "D=1 范数约 5e-9 在任何外径下都拒绝");
+  }
 }
 
 geometryFlow();

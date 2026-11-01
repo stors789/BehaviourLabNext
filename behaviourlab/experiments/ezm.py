@@ -140,6 +140,10 @@ def _shape_points(shape: Any) -> list[tuple[float, float]] | None:
 
 
 def _simple_polygon(shape: Any) -> list[tuple[float, float]] | None:
+    """遮罩必须是 type=polygon 的简单多边形；其他类型一律不认。"""
+
+    if not isinstance(shape, Mapping) or shape.get("type") != "polygon":
+        return None
     points = _shape_points(shape)
     if points is None or len(points) < 3:
         return None
@@ -152,10 +156,13 @@ def _simple_polygon(shape: Any) -> list[tuple[float, float]] | None:
 
 def arena_params(geometry: Mapping[str, Any] | None
                  ) -> tuple[list[float], list[float], float] | None:
-    """外缘椭圆 (center, radii, angle)；中心与半轴，或至少五点拟合。"""
+    """外缘椭圆 (center, radii, angle)；中心与半轴，或至少五点拟合。
+
+    类型必须是 ``ellipse``：错误的类型不会被就地改写，也不会当成椭圆解析。
+    """
 
     arena = (geometry or {}).get("arena")
-    if not isinstance(arena, Mapping):
+    if not isinstance(arena, Mapping) or arena.get("type") != "ellipse":
         return None
     center = arena.get("center")
     radii = arena.get("radii")
@@ -222,6 +229,24 @@ def to_cm(point: Sequence[float], center: Sequence[float],
             matrix[1] * dx + matrix[2] * dy)
 
 
+def boundary_angle(geometry: Mapping[str, Any] | None) -> float | None:
+    """起始边界的方向：只用 D=1 映射判有效并取角。
+
+    ``A_1`` 把相对 arena 中心的向量按半轴归一；范数 < 1e-8 即太接近圆心。
+    这条判据与 ``outer_diameter_cm`` 无关，方向在任意 D>0 下都相同。
+    """
+
+    params = arena_params(geometry)
+    point = boundary_point(geometry)
+    if params is None or point is None:
+        return None
+    center, radii, angle = params
+    vector = to_cm(point, center, affine_matrix(center, radii, angle, 1.0))
+    if math.hypot(vector[0], vector[1]) < CENTER_EPS:
+        return None
+    return math.atan2(vector[1], vector[0])
+
+
 def _inverse(matrix: Sequence[float]) -> tuple[float, ...] | None:
     m00, m01, m11 = float(matrix[0]), float(matrix[1]), float(matrix[2])
     det = m00 * m11 - m01 * m01
@@ -283,16 +308,26 @@ def validate_unit(options: Mapping[str, Any] | None,
 
 def validate_geometry(geometry: Mapping[str, Any] | None,
                       *, require: bool = False) -> list[dict]:
-    """外缘为合法椭圆、起始边界为一个非圆心的有限点、遮罩为简单多边形。"""
+    """外缘必须是 ellipse、起始边界是一个非圆心点、遮罩必须是 polygon。
+
+    已提供但类型错误的几何一律报错，且不会被就地改写成合法类型；完全缺失
+    的步骤只在 ``require`` 时报告，未完成草稿仍可保存。
+    """
 
     geometry = geometry or {}
     issues: list[dict] = []
-    arena = arena_params(geometry)
-    if arena is None:
-        if geometry.get("arena") is None:
-            if require:
-                issues.append({"field": "geometry.arena", "message": "缺少外缘"})
-        else:
+    raw_arena = geometry.get("arena")
+    arena: tuple[list[float], list[float], float] | None = None
+    if raw_arena is None:
+        if require:
+            issues.append({"field": "geometry.arena", "message": "缺少外缘"})
+    elif not isinstance(raw_arena, Mapping) \
+            or raw_arena.get("type") != "ellipse":
+        issues.append({"field": "geometry.arena",
+                       "message": "外缘必须是 ellipse 类型"})
+    else:
+        arena = arena_params(geometry)
+        if arena is None:
             issues.append({"field": "geometry.arena",
                            "message": "外缘需要中心与两个正半轴，或至少 5 个有限边缘点"})
 
@@ -307,17 +342,19 @@ def validate_geometry(geometry: Mapping[str, Any] | None,
             issues.append({"field": "geometry.open_boundary",
                            "message": "需要 1 个有限源像素点"})
         elif arena is not None:
-            center, radii, angle = arena
-            matrix = affine_matrix(center, radii, angle, 1.0)
-            vector = to_cm(point, center, matrix)
-            if math.hypot(vector[0], vector[1]) < CENTER_EPS:
+            theta = boundary_angle(geometry)
+            if theta is None:
                 issues.append({"field": "geometry.open_boundary",
                                "message": "起始边界太接近圆心，无法定义方向"})
 
     mask = geometry.get("mask")
-    if mask is not None and _simple_polygon(mask) is None:
-        issues.append({"field": "geometry.mask",
-                       "message": "检测遮罩需要至少 3 个有限点、正面积且不自交"})
+    if mask is not None:
+        if not isinstance(mask, Mapping) or mask.get("type") != "polygon":
+            issues.append({"field": "geometry.mask",
+                           "message": "检测遮罩必须是 polygon 类型"})
+        elif _simple_polygon(mask) is None:
+            issues.append({"field": "geometry.mask",
+                           "message": "检测遮罩需要至少 3 个有限点、正面积且不自交"})
     return issues
 
 
@@ -329,7 +366,16 @@ def step_drawn(geometry: Mapping[str, Any] | None, key: str) -> bool:
         return arena_params(geometry) is not None
     if key == "open_boundary":
         return boundary_point(geometry) is not None
+    if key == "mask":
+        # 类型错误的遮罩不算已绘制，避免它被当成检测区域。
+        return _simple_polygon(geometry.get("mask")) is not None
     return geometry.get(key) is not None
+
+
+def preview_geometry_issues(geometry: Mapping[str, Any] | None) -> list[dict]:
+    """预览入口的最小几何检查：已提供但类型错误的几何不继续运行。"""
+
+    return validate_geometry(geometry, require=False)
 
 
 # -- 环上几何 -----------------------------------------------------------
@@ -350,14 +396,14 @@ class _Ring:
         self.diameter = float(options["outer_diameter_cm"])
         self.width = float(options["ring_width_cm"])
         self.margin = float(options["boundary_margin_cm"])
+        # 身体坐标用实际 D；方向判据固定 D=1，两者不混用。
         self.matrix = affine_matrix(self.center, self.radii, self.angle,
                                    self.diameter)
-        vector = to_cm(start, self.center, self.matrix)
-        norm = math.hypot(vector[0], vector[1])
-        if norm < CENTER_EPS:
+        theta0 = boundary_angle(geometry)
+        if theta0 is None:
             raise ValidationError("起始边界太接近圆心，无法定义方向",
                                   "geometry.open_boundary")
-        self.theta0 = math.atan2(vector[1], vector[0])
+        self.theta0 = theta0
         self.radius = self.diameter / 2.0
         self.inner_radius = self.radius - self.width
 

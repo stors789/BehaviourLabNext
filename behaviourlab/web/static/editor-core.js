@@ -342,8 +342,14 @@
     if (!point) return null;
     const dx = Number(point[0]) - center[0];
     const dy = Number(point[1]) - center[1];
-    const vx = m00 * dx + m01 * dy;
-    const vy = m01 * dx + m11 * dy;
+    // 方向判据固定 D=1：有效性不随实际外径变化；A_D 只是 A_1 的 D 倍。
+    const a1 = 1 / (2 * rx);
+    const b1 = 1 / (2 * ry);
+    const u00 = a1 * ct * ct + b1 * st * st;
+    const u01 = (a1 - b1) * ct * st;
+    const u11 = a1 * st * st + b1 * ct * ct;
+    const vx = u00 * dx + u01 * dy;
+    const vy = u01 * dx + u11 * dy;
     if (!Number.isFinite(vx) || !Number.isFinite(vy)) return null;
     if (Math.hypot(vx, vy) < 1e-8) return null;
     const start = Math.atan2(vy, vx);
