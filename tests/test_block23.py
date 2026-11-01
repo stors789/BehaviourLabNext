@@ -387,15 +387,492 @@ def test_result_page_unit_switch_and_file_rail(client, store):
     # 动物选择器列出两只动物；第二只默认隐藏，图与视频各自渲染。
     assert 'id="unit-switch"' in page
     assert 'data-unit-id="u2"' in page and "hidden" in page
-    job = "j" * 32
-    assert f'src="/runs/{run_id}/{job}/unit_01_trajectory.png"' in page
+    assert f'src="/api/runs/{run_id}/files/unit_01_trajectory.png"' in page
     assert '<video controls preload="metadata"' in page
-    assert f'src="/runs/{run_id}/{job}/annotated.mp4"' in page
+    assert f'src="/api/runs/{run_id}/files/annotated.mp4"' in page
     assert "data-empty=\"figures\"" in page
     assert "data-empty=\"video\"" in page
     # 文件栏只列声明文件并全部带下载链接；脚本接线存在。
     assert 'data-file-rail' in page
-    assert f"/runs/{run_id}/{job}/annotated.mp4?download=1" in page
+    assert f"/api/runs/{run_id}/files/annotated.mp4?download=1" in page
     assert "/static/result.js" in page
     # 声明之外的文件不出现在页面链接里。
     assert "frozen_job.json" not in page
+
+
+# -- 第 23 块有限修正的自检 ------------------------------------------------
+
+
+def test_csv_composite_cells_roundtrip(tmp_path):
+    """组 1：数组/字典写成 ensure_ascii=false 的合法 JSON，可回读。"""
+
+    rows = [{"unit_id": "u" * 32, "unit_name": "鼠, 一", "frame": 0,
+             "time_s": 0.0, "dt_s": 1.0, "in_window": True,
+             "detected": True, "extra": ["中文,词", None, True],
+             "mapping": {"键": False, "n": None}}]
+    outputs.write_csv(tmp_path / "t.csv", rows)
+    text = (tmp_path / "t.csv").read_text(encoding="utf-8-sig")
+    row = next(iter(csv.DictReader(io.StringIO(text))))
+    import json
+
+    assert json.loads(row["extra"]) == ["中文,词", None, True]
+    assert json.loads(row["mapping"]) == {"键": False, "n": None}
+    assert row["in_window"] == "True" and row["detected"] == "True"
+    assert row["time_s"] == "0.0"
+
+
+def test_report_includes_source_coverage_and_metadata(tmp_path):
+    """组 1：报告写源显示名、实际覆盖、每单位窗口与计量 metadata。"""
+
+    rows = _rows()
+    summary = [{"unit_id": "u" * 32, "unit_name": "小鼠, 一",
+                "analysis_window_start_s": 0.0, "analysis_window_end_s": 7.0,
+                "missing_time_s": 2.0,
+                "arena_width_cm": 20.0, "arena_height_cm": 20.0}]
+    result = AnalysisResult(
+        observations=rows, summary=summary, events=[],
+        bins=[], tables={"zones": []}, warnings=["样例警告"],
+        metadata={"assay": "oft",
+                  "coverage": {"start_s": 0.0, "end_s": 7.0,
+                               "duration_s": 7.0, "frame_count": 7},
+                  "units": {"u" * 32: {"coordinate_unit": "cm",
+                                       "tracking_reliable": True}},
+                  "algorithm_version": "0.1.0"},
+    )
+    job = {
+        "schema_version": 1, "run_id": "r" * 32, "job_id": "j" * 32,
+        "assay": "oft",
+        "asset": {"id": "a" * 32, "name": "open field, 1.mp4", "path": "x"},
+        "window": {"start_s": 0.0, "end_s": 7.0},
+        "orientation": 0, "fps_override": None, "sample_fps": None,
+        "options": {"arena_width_cm": 20.0, "arena_height_cm": 20.0},
+        "detection": {}, "units": [{"id": "u" * 32, "name": "小鼠, 一",
+                                    "geometry": {}}],
+        "output": {"annotated_video": False},
+        "style": {"color": "#B86245", "colormap": "viridis",
+                  "line_width": 2, "dpi": 90},
+        "algorithm_version": "0.1.0",
+    }
+    outputs.write_outputs(tmp_path, job, result)
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "open field, 1.mp4" in report, "源文件显示名"
+    assert "实际覆盖" in report and "duration_s=7" in report
+    assert "缺失 2 s" in report, "每单位缺失说明"
+    assert "## 计量 metadata" in report
+    assert "coordinate_unit=cm" in report
+    assert "样例警告" in report
+
+
+def test_figure_suppress_motion_missing_and_unit_order(tmp_path):
+    """组 2：抑制标记不出位置图；motion_x 为空的行不进热图；stem 跟 job.units。"""
+
+    rows = [
+        {"unit_id": "u2", "frame": 0, "time_s": 0.0, "dt_s": 1.0,
+         "in_window": True, "detected": True, "x_cm": 5.0, "y_cm": 5.0,
+         "motion_x": None, "motion_y": None},
+        {"unit_id": "u2", "frame": 1, "time_s": 1.0, "dt_s": 1.0,
+         "in_window": True, "detected": True, "x_cm": 10.0, "y_cm": 10.0,
+         "motion_x": 10.0, "motion_y": 10.0, "motion_x0": 10.0,
+         "motion_y0": 10.0, "motion_x1": 11.0, "motion_y1": 10.0},
+    ]
+    # motion_x=null 的第一行被剔除：只剩第二行的 1 秒曝光。
+    grid, count = figures.heat_grid(rows, 20.0, 20.0)
+    assert count == 1
+    assert math.isclose(sum(sum(line) for line in grid), 1.0, abs_tol=1e-9)
+
+    style = {"dpi": 90, "colormap": "viridis", "line_width": 2,
+             "color": "#B86245"}
+    # 抑制标记：轨迹/热图都不生成，note 说明原因。
+    summary = {"unit_id": "u2", "unit_name": "乙鼠", "mode": "oft",
+               "arena_width_cm": 20.0, "arena_height_cm": 20.0}
+    info = outputs._unit_figures(tmp_path, summary, rows, "unit_01", style,
+                                 suppress_positions=True)
+    assert info["trajectory"] is None and info["heatmap"] is None
+    assert "位置不可靠或不可用" in (info.get("note") or "")
+
+    # 文件编号跟随 job.units 顺序：summary 逆序时 unit_01 仍是冻结第一位。
+    summary_rows = [
+        {"unit_id": "u2", "unit_name": "乙鼠", "arena_width_cm": 20.0,
+         "arena_height_cm": 20.0},
+        {"unit_id": "u1", "unit_name": "甲鼠", "arena_width_cm": 20.0,
+         "arena_height_cm": 20.0},
+    ]
+    rows_u1 = [
+        {"unit_id": "u1", "frame": 0, "time_s": 0.0, "dt_s": 1.0,
+         "in_window": True, "detected": True, "x_cm": 5.0, "y_cm": 5.0,
+         "motion_x": 5.0, "motion_y": 5.0},
+        {"unit_id": "u1", "frame": 1, "time_s": 1.0, "dt_s": 1.0,
+         "in_window": True, "detected": True, "x_cm": 10.0, "y_cm": 10.0,
+         "motion_x": 10.0, "motion_y": 10.0, "motion_x0": 5.0,
+         "motion_y0": 5.0, "motion_x1": 10.0, "motion_y1": 10.0},
+    ]
+    result = AnalysisResult(
+        observations=rows + rows_u1, summary=summary_rows, events=[], bins=[],
+        tables={}, warnings=[],
+        metadata={"assay": "oft", "units": {}},
+    )
+    job = {
+        "run_id": "r" * 32, "job_id": "j" * 32, "assay": "oft",
+        "asset": {"id": "a" * 32, "name": "s.mp4", "path": "x"},
+        "window": {"start_s": 0.0, "end_s": 2.0},
+        "orientation": 0, "fps_override": None, "sample_fps": None,
+        "options": {"arena_width_cm": 20.0, "arena_height_cm": 20.0},
+        "detection": {},
+        # 冻结顺序 u1 在前：u1 得 unit_01，尽管 summary 里 u2 在前。
+        "units": [{"id": "u1", "name": "甲鼠", "geometry": {}},
+                  {"id": "u2", "name": "乙鼠", "geometry": {}}],
+        "output": {"annotated_video": False},
+        "style": style, "algorithm_version": "0.1.0",
+    }
+    manifest = outputs.write_outputs(tmp_path / "out", job, result)
+    figures_map = manifest["figures"]
+    assert figures_map["u1"] and figures_map["u1"][0].startswith("unit_01_")
+    assert figures_map["u2"] and figures_map["u2"][0].startswith("unit_02_")
+
+
+def test_nor_exploration_series_and_break():
+    """组 2：NOR 探索时序按 dt_s 累计，缺失/无速度段断开。"""
+
+    rows = [
+        {"in_window": True, "detected": True, "time_s": 0.0, "dt_s": 1.0,
+         "speed_cm_s": 5.0, "object_1_exploring": True,
+         "object_2_exploring": False},
+        {"in_window": True, "detected": True, "time_s": 1.0, "dt_s": 1.0,
+         "speed_cm_s": 5.0, "object_1_exploring": True,
+         "object_2_exploring": False},
+        {"in_window": True, "detected": False, "time_s": 2.0, "dt_s": 1.0,
+         "speed_cm_s": None, "object_1_exploring": False,
+         "object_2_exploring": False},
+        {"in_window": True, "detected": True, "time_s": 3.0, "dt_s": 1.0,
+         "speed_cm_s": 5.0, "object_1_exploring": True,
+         "object_2_exploring": False},
+    ]
+    series, has_speed = figures.nor_exploration_points(rows)
+    assert has_speed is True
+    # 第一段：0–2 秒累计 2；缺口断开（NaN 不参与相等比较）；第二段
+    # 从累计 2 继续到 3。
+    assert series[0][0] == (2.0, 2.0)
+    assert series[0][1][0] == 3.0 and math.isnan(series[0][1][1])
+    assert series[0][2] == (4.0, 3.0)
+    assert series[1] == []
+
+
+def test_annotated_frame_facts_and_segments():
+    """组 3：当前源帧只取自身观测；轨迹只画保存完成段；黑像素补边。"""
+
+    unit = {
+        "unit_id": "u" * 32, "unit_name": "unit",
+        "observations": [
+            {"frame": 0, "time_s": 0.0, "detected": True,
+             "x_px": 10.0, "y_px": 10.0,
+             "motion_x0": 10.0, "motion_y0": 10.0,
+             "motion_x1": 20.0, "motion_y1": 10.0},
+            {"frame": 1, "time_s": 0.2, "detected": True,
+             "x_px": 20.0, "y_px": 10.0,
+             "motion_x0": 20.0, "motion_y0": 10.0,
+             "motion_x1": 25.0, "motion_y1": 12.0},
+            # 源帧 2 缺失：没有跨缺口的保存段。
+            {"frame": 3, "time_s": 0.6, "detected": True,
+             "x_px": 30.0, "y_px": 10.0,
+             "motion_x0": 30.0, "motion_y0": 10.0,
+             "motion_x1": 31.0, "motion_y1": 10.0},
+        ],
+    }
+    # 源帧 2 没有保存观测：missing，不借用相邻帧的身份或状态。
+    assert annotated._row_for_frame(unit, 2) is None
+    assert annotated._row_state(annotated._row_for_frame(unit, 2)) == "missing"
+    assert annotated._row_state(annotated._row_for_frame(unit, 1)) == "detected"
+    assert annotated._body_point(annotated._row_for_frame(unit, 3)) == (30, 10)
+    # 轨迹只由保存的完成段组成：缺口两侧不连线。
+    segments = annotated._trajectory_segments(unit, 10.0)
+    assert segments == [[(10, 10), (20, 10)], [(20, 10), (25, 12)],
+                        [(30, 10), (31, 10)]]
+    # 未到完成段终点时只延长到已保存的段。
+    assert annotated._trajectory_segments(unit, 0.25) == [
+        [(10, 10), (20, 10)], [(20, 10), (25, 12)]]
+    assert annotated._trajectory_segments({**unit, "manual": True}, 10.0) == []
+
+    import numpy as np
+
+    odd = np.full((97, 129, 3), 200, dtype=np.uint8)
+    padded = annotated._even_canvas(odd)
+    assert padded.shape[:2] == (98, 130)
+    # 右/下补的是黑像素，不是复制边缘。
+    assert padded[0, 129].tolist() == [0, 0, 0]
+    assert padded[97, 0].tolist() == [0, 0, 0]
+    assert padded[0, 128].tolist() == [200, 200, 200]
+    assert padded[96, 0].tolist() == [200, 200, 200]
+
+
+def test_landmark_evaluate_continuous_and_bounds(tmp_path, monkeypatch):
+    """组 4：tracker 连续收到 0..max；越界标注拒绝；逐点误差分位独立。"""
+
+    import numpy as np
+    import pytest
+
+    from behaviourlab import landmarks as landmark_service
+    from behaviourlab.schema import ValidationError
+
+    source_file = tmp_path / "source.mp4"
+    source_file.write_bytes(b"\x00")
+    frames_seen: list[int] = []
+
+    class FakeSource:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def iter_frames(self):
+            for index in range(6):
+                yield type("F", (), {
+                    "image": np.zeros((32, 32, 3), dtype=np.uint8),
+                    "index": index, "time_s": index * 0.1,
+                })()
+
+    class FakeDetector:
+        def foreground(self, image):
+            return object()
+
+    fake_result = type("R", (), {"center": (4.0, 4.0), "nose": (4.0, 4.0),
+                                 "tail_base": None})()
+
+    def fake_track(key, unit_id, **kwargs):
+        frames_seen.append(int(kwargs["frame_index"]))
+        return fake_result
+
+    monkeypatch.setattr(landmark_service.media, "VideoSource", FakeSource)
+    monkeypatch.setattr(landmark_service.detection, "geometry_region",
+                        lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(landmark_service.detection, "prepare_background",
+                        lambda *args, **kwargs: object())
+    monkeypatch.setattr(landmark_service.detection, "shared_detector",
+                        lambda *args, **kwargs: FakeDetector())
+    monkeypatch.setattr(landmark_service.observation, "signature_of",
+                        lambda *args, **kwargs: object())
+    monkeypatch.setattr(landmark_service.observation, "track", fake_track)
+
+    session = {
+        "id": "a" * 32, "assay": "nor", "orientation": 0,
+        "frames": [2, 5], "tolerance_px": 3.5,
+        "asset_identity": {"path": str(source_file),
+                           "size": source_file.stat().st_size,
+                           "mtime_ns": source_file.stat().st_mtime_ns},
+        "unit": {"id": "u" * 32, "geometry": {}, "options": {},
+                 "detection": {}},
+        "detection": {},
+        "fps_override": None,
+        "records": [
+            {"frame": 2, "points": {
+                "body": {"visible": True, "x": 5.0, "y": 4.0}}},
+            {"frame": 5, "points": {
+                "nose": {"visible": True, "x": 14.0, "y": 4.0}}},
+        ],
+    }
+    evaluation = landmark_service.evaluate(tmp_path, session)
+    # tracker 连续处理 0..max，不是只跑选中的 [2,5]。
+    assert frames_seen == [0, 1, 2, 3, 4, 5]
+    # 只对选中帧记录预测。
+    assert [row["frame"] for row in evaluation["records"]] == [2, 5]
+    by_point = evaluation["by_point"]
+    assert by_point["body"]["matched_error_median_px"] == pytest.approx(1.0)
+    assert by_point["nose"]["matched_error_median_px"] == pytest.approx(10.0)
+    assert by_point["nose"]["matched_error_p90_px"] == pytest.approx(10.0)
+    assert by_point["tail"]["matched_error_median_px"] is None
+    assert evaluation["metrics"]["matched_error_median_px"] == \
+        pytest.approx(5.5)
+    assert evaluation["metrics"]["matched_error_p90_px"] == pytest.approx(9.1)
+
+    # 可见标注超出旋转后画面：直接拒绝，不参与计算。
+    bad = dict(session, records=[
+        {"frame": 2, "points": {
+            "body": {"visible": True, "x": -1.0, "y": 400.0}}}],
+        frames=[2])
+    with pytest.raises(ValidationError) as captured:
+        landmark_service.evaluate(tmp_path, bad)
+    assert "超出旋转后画面" in captured.value.message
+
+
+def test_landmark_evaluate_continuous_and_bounds(tmp_path, monkeypatch):
+    """组 4：tracker 连续收到 0..max；越界标注拒绝；逐点误差分位独立。"""
+
+    import numpy as np
+    import pytest
+
+    from behaviourlab import landmarks as landmark_service
+    from behaviourlab.schema import ValidationError
+
+    source_file = tmp_path / "source.mp4"
+    source_file.write_bytes(b"\x00")
+    frames_seen: list[int] = []
+
+    class FakeSource:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def iter_frames(self):
+            for index in range(6):
+                yield type("F", (), {
+                    "image": np.zeros((32, 32, 3), dtype=np.uint8),
+                    "index": index, "time_s": index * 0.1,
+                })()
+
+    class FakeDetector:
+        def foreground(self, image):
+            return object()
+
+    fake_result = type("R", (), {"center": (4.0, 4.0), "nose": (4.0, 4.0),
+                                 "tail_base": None})()
+
+    def fake_track(key, unit_id, **kwargs):
+        frames_seen.append(int(kwargs["frame_index"]))
+        return fake_result
+
+    monkeypatch.setattr(landmark_service.media, "VideoSource", FakeSource)
+    monkeypatch.setattr(landmark_service.detection, "geometry_region",
+                        lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(landmark_service.detection, "prepare_background",
+                        lambda *args, **kwargs: object())
+    monkeypatch.setattr(landmark_service.detection, "shared_detector",
+                        lambda *args, **kwargs: FakeDetector())
+    monkeypatch.setattr(landmark_service.observation, "signature_of",
+                        lambda *args, **kwargs: object())
+    monkeypatch.setattr(landmark_service.observation, "track", fake_track)
+
+    session = {
+        "id": "a" * 32, "assay": "nor", "orientation": 0,
+        "frames": [2, 5], "tolerance_px": 3.5,
+        "asset_identity": {"path": str(source_file),
+                           "size": source_file.stat().st_size,
+                           "mtime_ns": source_file.stat().st_mtime_ns},
+        "unit": {"id": "u" * 32, "geometry": {}, "options": {},
+                 "detection": {}},
+        "detection": {},
+        "fps_override": None,
+        "records": [
+            {"frame": 2, "points": {
+                "body": {"visible": True, "x": 5.0, "y": 4.0}}},
+            {"frame": 5, "points": {
+                "nose": {"visible": True, "x": 14.0, "y": 4.0}}},
+        ],
+    }
+    evaluation = landmark_service.evaluate(tmp_path, session)
+    # tracker 连续处理 0..max，不是只跑选中的 [2,5]。
+    assert frames_seen == [0, 1, 2, 3, 4, 5]
+    # 只对选中帧记录预测。
+    assert [row["frame"] for row in evaluation["records"]] == [2, 5]
+    by_point = evaluation["by_point"]
+    assert by_point["body"]["matched_error_median_px"] == pytest.approx(1.0)
+    assert by_point["nose"]["matched_error_median_px"] == pytest.approx(10.0)
+    assert by_point["nose"]["matched_error_p90_px"] == pytest.approx(10.0)
+    assert by_point["tail"]["matched_error_median_px"] is None
+    assert evaluation["metrics"]["matched_error_median_px"] == \
+        pytest.approx(5.5)
+    assert evaluation["metrics"]["matched_error_p90_px"] == pytest.approx(9.1)
+
+    # 可见标注超出旋转后画面：直接拒绝，不参与计算。
+    bad = dict(session, records=[
+        {"frame": 2, "points": {
+            "body": {"visible": True, "x": -1.0, "y": 400.0}}}],
+        frames=[2])
+    with pytest.raises(ValidationError) as captured:
+        landmark_service.evaluate(tmp_path, bad)
+    assert "超出旋转后画面" in captured.value.message
+
+
+def test_result_page_declared_nested_figure_and_undecided_rejected(
+        client, store):
+    """组 6：清单声明的嵌套新图可经页面与 API 读取下载；未声明不可读。"""
+
+    import json as json_module
+    from pathlib import Path
+
+    run_id = "c" * 32
+    run_dir = Path(store.paths.runs) / run_id
+    (run_dir / "figures").mkdir(parents=True, exist_ok=True)
+    (run_dir / "figures" / "novel_chart.png").write_bytes(b"png")
+    (run_dir / "results.json").write_text(json_module.dumps({
+        "assay": "oft", "summary": [{"unit_id": "u1", "unit_name": "甲鼠",
+                                     "mode": "oft"}],
+        "events": [], "bins": [], "observations": [], "tables": {},
+        "warnings": [], "metadata": {"assay": "oft", "units": {}}}),
+        encoding="utf-8")
+    manifest = {
+        "status": "completed", "run_id": run_id, "job_id": "j" * 32,
+        "assay": "oft", "asset": {"id": "a" * 32, "name": "s.mp4"},
+        "coverage": None, "algorithm_version": "0.1.0",
+        "units": [{"unit_id": "u1", "unit_name": "甲鼠",
+                   "summary": {"unit_id": "u1", "unit_name": "甲鼠",
+                               "mode": "oft"},
+                   "figures": {"trajectory": "figures/novel_chart.png"},
+                   "figure_files": ["figures/novel_chart.png"],
+                   "annotated_video": None}],
+        "figures": {"u1": ["figures/novel_chart.png"]},
+        "annotated_video": None,
+        "files": ["results.json", "figures/novel_chart.png"],
+        "warnings": [], "metadata": {},
+    }
+    (run_dir / "result_manifest.json").write_text(
+        json_module.dumps(manifest), encoding="utf-8")
+
+    page = client.get(f"/results/{run_id}").get_data(as_text=True)
+    assert 'src="/api/runs/%s/files/figures/novel_chart.png"' % run_id in page
+    inline = client.get(f"/api/runs/{run_id}/files/figures/novel_chart.png")
+    assert inline.status_code == 200 and inline.mimetype == "image/png"
+    download = client.get(
+        f"/api/runs/{run_id}/files/figures/novel_chart.png?download=1")
+    assert download.status_code == 200
+    assert "attachment" in download.headers.get("Content-Disposition", "")
+    # 未声明文件一律拒绝；目录遍历也拒绝。
+    assert client.get(
+        f"/api/runs/{run_id}/files/results.json.bak").status_code == 404
+    assert client.get(
+        f"/api/runs/{run_id}/files/../{run_id}/results.json").status_code == 404
+
+
+def test_result_page_declared_nested_figure_and_undecided_rejected(
+        client, store):
+    """组 6：清单声明的嵌套新图可经页面与 API 读取下载；未声明不可读。"""
+
+    import json as json_module
+    from pathlib import Path
+
+    run_id = "c" * 32
+    run_dir = Path(store.paths.runs) / run_id
+    (run_dir / "figures").mkdir(parents=True, exist_ok=True)
+    (run_dir / "figures" / "novel_chart.png").write_bytes(b"png")
+    (run_dir / "results.json").write_text(json_module.dumps({
+        "assay": "oft", "summary": [{"unit_id": "u1", "unit_name": "甲鼠",
+                                     "mode": "oft"}],
+        "events": [], "bins": [], "observations": [], "tables": {},
+        "warnings": [], "metadata": {"assay": "oft", "units": {}}}),
+        encoding="utf-8")
+    manifest = {
+        "status": "completed", "run_id": run_id, "job_id": "j" * 32,
+        "assay": "oft", "asset": {"id": "a" * 32, "name": "s.mp4"},
+        "coverage": None, "algorithm_version": "0.1.0",
+        "units": [{"unit_id": "u1", "unit_name": "甲鼠",
+                   "summary": {"unit_id": "u1", "unit_name": "甲鼠",
+                               "mode": "oft"},
+                   "figures": {"trajectory": "figures/novel_chart.png"},
+                   "figure_files": ["figures/novel_chart.png"],
+                   "annotated_video": None}],
+        "figures": {"u1": ["figures/novel_chart.png"]},
+        "annotated_video": None,
+        "files": ["results.json", "figures/novel_chart.png"],
+        "warnings": [], "metadata": {},
+    }
+    (run_dir / "result_manifest.json").write_text(
+        json_module.dumps(manifest), encoding="utf-8")
+
+    page = client.get(f"/results/{run_id}").get_data(as_text=True)
+    assert 'src="/api/runs/%s/files/figures/novel_chart.png"' % run_id in page
+    inline = client.get(f"/api/runs/{run_id}/files/figures/novel_chart.png")
+    assert inline.status_code == 200 and inline.mimetype == "image/png"
+    download = client.get(
+        f"/api/runs/{run_id}/files/figures/novel_chart.png?download=1")
+    assert download.status_code == 200
+    assert "attachment" in download.headers.get("Content-Disposition", "")
+    # 未声明文件一律拒绝；目录遍历也拒绝。
+    assert client.get(
+        f"/api/runs/{run_id}/files/results.json.bak").status_code == 404
+    assert client.get(
+        f"/api/runs/{run_id}/files/../{run_id}/results.json").status_code == 404

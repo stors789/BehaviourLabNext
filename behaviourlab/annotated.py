@@ -49,6 +49,8 @@ def _ascii_label(text: Any) -> str:
 
 
 def _even_canvas(canvas: Any) -> Any:
+    """奇数宽/高各在右/下补 1 个黑像素到偶数；不拉伸也不复制边缘。"""
+
     import cv2
 
     height, width = canvas.shape[:2]
@@ -56,7 +58,8 @@ def _even_canvas(canvas: Any) -> Any:
     pad_w = width % 2
     if not pad_h and not pad_w:
         return canvas
-    return cv2.copyMakeBorder(canvas, 0, pad_h, 0, pad_w, cv2.BORDER_REPLICATE)
+    return cv2.copyMakeBorder(canvas, 0, pad_h, 0, pad_w,
+                              cv2.BORDER_CONSTANT, value=(0, 0, 0))
 
 
 def _to_bgr(image: Any):
@@ -271,43 +274,55 @@ def _active_units(units: Sequence[Mapping[str, Any]], start: float,
             if unit["start"] - 1e-9 <= middle < unit["end"] - 1e-9]
 
 
-def _trajectory(unit: Mapping[str, Any], upto: float) -> list[tuple[int, int]]:
-    """按完成段逐步延长：只连相邻有效位置，不跨缺失。"""
+def _trajectory_segments(unit: Mapping[str, Any],
+                         upto: float) -> list[list[tuple[int, int]]]:
+    """只画保存的完成运动段（motion_x0..y1），逐段时间延长。
+
+    完成段由分析管线按真实连续性保存：缺失帧没有跨缺口的段，这里
+    不从位置行重新推导连线，因此缺口自然断开，也不连到 held 点。
+    位置被抑制或纯人工的单位不画。
+    """
 
     if unit.get("suppress_positions") or unit.get("manual"):
         return []
-    points: list[tuple[int, int]] = []
-    previous_ok = False
+    segments: list[list[tuple[int, int]]] = []
     for row in unit.get("observations") or []:
         moment = _finite(row.get("time_s"))
         if moment is None or moment > upto + 1e-9:
             break
         if row.get("position_valid") is False or row.get("jump"):
-            previous_ok = False
             continue
-        x, y = _finite(row.get("x_px")), _finite(row.get("y_px"))
-        if x is None or y is None:
-            previous_ok = False
+        x0 = _finite(row.get("motion_x0"))
+        y0 = _finite(row.get("motion_y0"))
+        x1 = _finite(row.get("motion_x1"))
+        y1 = _finite(row.get("motion_y1"))
+        if None in (x0, y0, x1, y1):
             continue
-        if not previous_ok:
-            # 段起点：先放一个孤点，下一帧才连线，避免补出不存在的路径。
-            points.append((int(round(x)), int(round(y))))
-            previous_ok = True
-            continue
-        points.append((int(round(x)), int(round(y))))
-    return points
+        segments.append([(int(round(x0)), int(round(y0))),
+                         (int(round(x1)), int(round(y1)))])
+    return segments
 
 
-def _body_point(unit: Mapping[str, Any], upto: float) -> tuple[int, int] | None:
-    best = None
+def _row_for_frame(unit: Mapping[str, Any],
+                   frame_index: int) -> Mapping[str, Any] | None:
+    """当前源帧自身保存的观测事实；按 frame 索引匹配，不借用相邻帧。"""
+
     for row in unit.get("observations") or []:
-        moment = _finite(row.get("time_s"))
-        if moment is None or moment > upto + 1e-9:
-            break
-        best = row
-    if best is None:
+        row_frame = row.get("frame")
+        if isinstance(row_frame, int) and not isinstance(row_frame, bool) \
+                and row_frame == frame_index:
+            return row
+    return None
+
+
+def _body_point(row: Mapping[str, Any] | None) -> tuple[int, int] | None:
+    """当前帧自己的身体中心；缺失或无效位置不给点。"""
+
+    if not row:
         return None
-    x, y = _finite(best.get("x_px")), _finite(best.get("y_px"))
+    if row.get("position_valid") is False or row.get("jump"):
+        return None
+    x, y = _finite(row.get("x_px")), _finite(row.get("y_px"))
     if x is None or y is None:
         return None
     return int(round(x)), int(round(y))
@@ -502,21 +517,21 @@ def write_run_video(path: str | Path, *, job: Mapping[str, Any],
                     lines = [f"t={clock_text(clip_start)}  frame={frame.index}"]
                     for unit in _active_units(prepared_units, clip_start, clip_end):
                         _draw_geometry(canvas, unit["geometry"], thickness)
-                        path_points = _trajectory(unit, clip_end)
-                        if len(path_points) >= 2:
-                            import cv2
-                            import numpy as np
+                        # 当前源帧只消费自己的保存事实：轨迹按完成段分开
+                        # 画且只延长到本片段终点，不跨缺失，也不把未来
+                        # 帧的身份画到当前帧。
+                        for segment in _trajectory_segments(unit, clip_end):
+                            if len(segment) >= 2:
+                                import cv2
+                                import numpy as np
 
-                            cv2.polylines(canvas, [np.array(path_points, "int32")],
-                                          False, (95, 98, 184), thickness,
-                                          cv2.LINE_AA)
-                        point = _body_point(unit, clip_end)
-                        row = None
-                        for item in unit.get("observations") or []:
-                            moment = _finite(item.get("time_s"))
-                            if moment is None or moment > clip_end + 1e-9:
-                                break
-                            row = item
+                                cv2.polylines(
+                                    canvas,
+                                    [np.array(segment, "int32")],
+                                    False, (95, 98, 184), thickness,
+                                    cv2.LINE_AA)
+                        row = _row_for_frame(unit, int(frame.index))
+                        point = _body_point(row)
                         if point is not None:
                             import cv2
 

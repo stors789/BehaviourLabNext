@@ -27,6 +27,20 @@
 {%- endif -%}
 {%- endmacro %}
 
+{# 概览统一取 SPEC.metrics 前 6 项；单位缺失的键不显示，null 显示 —。 #}
+{% macro overview(entry, s) -%}
+<div class="metric-grid">
+  {% for item in entry.metrics[:6] %}
+  {% if item.key in s %}
+  {{ metric(item.label, num(s[item.key], 3), item.unit or "") }}
+  {% endif %}
+  {% endfor %}
+</div>
+{%- endmacro %}
+
+{# 页面图/下载与 API 共用同一声明文件解析入口；支持清单里的合法相对目录。 #}
+{% macro file_url(run_id, name) -%}/api/runs/{{ run_id }}/files/{{ name | urlencode }}{%- endmacro %}
+
 {% block content %}
 {% set head_entry = results[0] if results else None %}
 {% set head_job = head_entry.job if head_entry else None %}
@@ -106,14 +120,7 @@
     <h3>{{ s.unit_name or s.unit_id }}</h3>
 
     {% if assay == "tst" %}
-    <div class="metric-grid">
-      {{ metric("非挣扎时间（含摆动）", num(s.immobility_time_s, 3), "s") }}
-      {{ metric("挣扎时间", num(s.struggling_time_s, 3), "s") }}
-      {{ metric("不确定时间", num(s.uncertain_time_s, 3), "s") }}
-      {{ metric("非挣扎比例", num(s.immobility_percent, 1), "%") }}
-      {{ metric("挣扎比例", num(s.struggling_percent, 1), "%") }}
-      {{ metric("首次挣扎转非挣扎潜伏期（经典）", num(s.latency_to_immobility_s, 3), "s") }}
-    </div>
+    {{ overview(entry, s) }}
 
     <details class="fold">
       <summary>全部指标</summary>
@@ -160,18 +167,7 @@
     <p class="muted">视觉运动规则使用可调经验阈值，请结合视频与人工复核。</p>
 
     {% elif assay == "oft" %}
-    <div class="metric-grid">
-      {{ metric("总曝光", num(s.total_time_s), "s") }}
-      {{ metric("观察占用", num(s.observed_time_s), "s") }}
-      {{ metric("缺失", num(s.missing_time_s), "s") }}
-      {{ metric("中心占比", num(s.center_percent, 1), "%") }}
-      {{ metric("外围占比", num(s.outer_percent, 1), "%") }}
-      {{ metric("壁区占比", num(s.wall_percent, 1), "%") }}
-      {{ metric("场地内路程", num(s.total_distance_cm), "cm") }}
-      {{ metric("平均速度", num(s.mean_speed_cm_s), "cm/s") }}
-      {{ metric("中心进入", s.center_entries if s.center_entries is not none else "—", "次") }}
-      {{ metric("检测率", num(s.detected_rate_percent, 1), "%") }}
-    </div>
+    {{ overview(entry, s) }}
 
     <details class="fold">
       <summary>完整指标</summary>
@@ -200,18 +196,59 @@
             </td></tr>
           </tbody>
         </table>
+
+        {% set unit_bins = (entry.result.bins or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
+        {% if unit_bins %}
+        <table class="simple-table">
+          <thead>
+            <tr><th>箱</th><th>时间（s）</th><th>中心</th><th>外围</th><th>壁区</th><th>场外</th><th>缺失</th><th>距离（cm）</th><th>均速（cm/s）</th></tr>
+          </thead>
+          <tbody>
+            {% for b in unit_bins %}
+            <tr>
+              <td>{{ b.bin_index }}</td>
+              <td>{{ num(b.start_s, 2) }}–{{ num(b.end_s, 2) }}</td>
+              <td>{{ num(b.center_time_s, 2) }}</td>
+              <td>{{ num(b.outer_time_s, 2) }}</td>
+              <td>{{ num(b.wall_time_s, 2) }}</td>
+              <td>{{ num(b.outside_time_s, 2) }}</td>
+              <td>{{ num(b.missing_time_s, 2) }}</td>
+              <td>{{ num(b.distance_cm, 2) }}</td>
+              <td>{{ num(b.mean_speed_cm_s, 2) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="muted" data-empty="bins">本次动物窗没有分箱数据。</p>
+        {% endif %}
+
+        {% set unit_events = (entry.result.events or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
+        {% if unit_events %}
+        <table class="simple-table">
+          <thead>
+            <tr><th>#</th><th>事件</th><th>目标</th><th>起点（s）</th><th>确认（s）</th></tr>
+          </thead>
+          <tbody>
+            {% for e in unit_events %}
+            <tr>
+              <td>{{ loop.index }}</td>
+              <td>{{ e.kind }}</td>
+              <td>{{ e.target }}</td>
+              <td>{{ num(e.time_s, 3) }}</td>
+              <td>{{ num(e.confirmed_s, 3) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <p class="muted" data-empty="events">本次动物窗没有确认的事件。</p>
+        {% endif %}
       </div>
     </details>
 
     {% elif assay == "fst" %}
-    <div class="metric-grid">
-      {{ metric("不动时间", num(s.immobility_time_s, 3), "s") }}
-      {{ metric("活动时间", num(s.active_time_s, 3), "s") }}
-      {{ metric("不确定时间", num(s.uncertain_time_s, 3), "s") }}
-      {{ metric("不动比例", num(s.immobility_percent, 1), "%") }}
-      {{ metric("不动片段数", s.immobility_bouts if s.immobility_bouts is not none else "—", "次") }}
-      {{ metric("首次不动潜伏期", num(s.latency_to_immobility_s, 3), "s") }}
-    </div>
+    {{ overview(entry, s) }}
 
     <details class="fold">
       <summary>全部指标</summary>
@@ -271,14 +308,7 @@
     <p class="muted">视觉运动规则使用可调经验阈值，请结合视频与人工复核。</p>
 
     {% elif assay == "mwm" %}
-    <div class="metric-grid">
-      {{ metric("平台确认潜伏期", num(s.escape_latency_s, 3), "s") }}
-      {{ metric("首次进入平台区潜伏期", num(s.first_platform_entry_latency_s, 3), "s") }}
-      {{ metric("确认平台前路径", num(s.path_length_to_platform_cm, 3), "cm") }}
-      {{ metric("平台区进入次数", s.platform_entries if s.platform_entries is not none else "—", "次") }}
-      {{ metric("平台区时间", num(s.platform_time_s, 3), "s") }}
-      {{ metric("总路径", num(s.total_distance_cm, 3), "cm") }}
-    </div>
+    {{ overview(entry, s) }}
 
     <details class="fold">
       <summary>全部指标</summary>
@@ -370,14 +400,7 @@
     <p class="muted">探索性规则标签，不是经验证的行为分类。</p>
 
     {% elif assay == "nor" %}
-    <div class="metric-grid">
-      {{ metric("窗口时间", num(s.total_time_s, 3), "s") }}
-      {{ metric("有效检测时间", num(s.observed_time_s, 3), "s") }}
-      {{ metric("缺失检测时间", num(s.missing_time_s, 3), "s") }}
-      {{ metric("检测率", num(s.detected_rate_percent, 1), "%") }}
-      {{ metric("可测量运动时间", num(s.measurable_motion_time_s, 3), "s") }}
-      {{ metric("总距离", num(s.total_distance_cm, 3), "cm") }}
-    </div>
+    {{ overview(entry, s) }}
 
     <details class="fold">
       <summary>全部指标</summary>
@@ -471,14 +494,7 @@
     <p class="muted">头向质量为启发式证据，不是准确概率；请结合视频与人工复核。</p>
 
     {% elif assay == "epm" %}
-    <div class="metric-grid">
-      {{ metric("开放臂时间", num(s.open_time_s, 3), "s") }}
-      {{ metric("封闭臂时间", num(s.closed_time_s, 3), "s") }}
-      {{ metric("中心区时间", num(s.center_time_s, 3), "s") }}
-      {{ metric("开放臂时间占总时长", num(s.open_time_percent_total, 1), "%") }}
-      {{ metric("开放臂时间占臂区时长", num(s.open_time_percent_arms_only, 1), "%") }}
-      {{ metric("开放臂进入次数", s.open_entries if s.open_entries is not none else "—", "次") }}
-    </div>
+    {{ overview(entry, s) }}
 
     <details class="fold">
       <summary>全部指标</summary>
@@ -552,16 +568,7 @@
     {% set unit_candidates = ((entry.result.tables or {}).get("candidates") or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
     {% set unit_meta = ((entry.result.metadata or {}).get("units") or {}).get(s.unit_id) or {} %}
     {% set manual = unit_meta.mode == "manual" %}
-    <div class="metric-grid">
-      {{ metric("总入臂次数", s.total_arm_entries if s.total_arm_entries is not none else "—", "次") }}
-      {{ metric("交替次数", s.alternation_count if s.alternation_count is not none else "—", "次") }}
-      {{ metric("交替机会数", s.alternation_opportunities if s.alternation_opportunities is not none else "—", "次") }}
-      {{ metric("自发交替率", num(s.alternation_percent, 1), "%") }}
-      {% if not manual %}
-      {{ metric("中心区时间", num(s.center_time_s, 3), "s") }}
-      {{ metric("A 臂时间", num(s.arm_A_time_s, 3), "s") }}
-      {% endif %}
-    </div>
+    {{ overview(entry, s) }}
 
     <details class="fold">
       <summary>全部指标</summary>
@@ -726,14 +733,7 @@
     {% endif %}
 
     {% elif assay == "ldb" %}
-    <div class="metric-grid">
-      {{ metric("明室时间", num(s.light_time_s, 3), "s") }}
-      {{ metric("暗室时间", num(s.dark_time_s, 3), "s") }}
-      {{ metric("门区时间", num(s.doorway_time_s, 3), "s") }}
-      {{ metric("明室时间比例", num(s.light_time_percent, 1), "%") }}
-      {{ metric("暗室时间比例", num(s.dark_time_percent, 1), "%") }}
-      {{ metric("初始主室", "明室" if s.initial_chamber == "light" else ("暗室" if s.initial_chamber == "dark" else "—")) }}
-    </div>
+    {{ overview(entry, s) }}
 
     <details class="fold">
       <summary>全部指标</summary>
@@ -837,14 +837,7 @@
     {% elif assay == "barnes" %}
     {% set unit_holes = ((entry.result.tables or {}).get("holes") or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
     {% set unit_visits = (entry.result.events or []) | selectattr("unit_id", "equalto", s.unit_id) | selectattr("kind", "equalto", "hole_visit") | list %}
-    <div class="metric-grid">
-      {{ metric("洞访问", s.visits, "次") }}
-      {{ metric("首次目标潜伏期", num(s.primary_latency_s, 3), "s") }}
-      {{ metric("首次目标前错误", s.primary_errors, "次") }}
-      {{ metric("首次目标路径", num(s.primary_path_cm, 1), "cm") }}
-      {{ metric("平均速度", num(s.mean_speed_cm_s, 3), "cm/s") }}
-      {{ metric("鼻尖覆盖", num(s.nose_coverage_percent, 1), "%") }}
-    </div>
+    {{ overview(entry, s) }}
 
     <details class="fold">
       <summary>全部指标</summary>
@@ -975,23 +968,7 @@
     {% elif assay == "ezm" %}
     {% set unit_events = (entry.result.events or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
     {% set unit_zones = ((entry.result.tables or {}).get("zones") or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
-    <div class="metric-grid">
-      {{ metric("开放区时间", num(s.open_time_s, 3), "s") }}
-      {{ metric("封闭区时间", num(s.closed_time_s, 3), "s") }}
-      {{ metric("边界时间", num(s.boundary_time_s, 3), "s") }}
-      {{ metric("区外时间", num(s.outside_time_s, 3), "s") }}
-      {{ metric("未知时间", num(s.unknown_time_s, 3), "s") }}
-      {{ metric("开放区时间占总时长", num(s.open_time_percent_total, 1), "%") }}
-      {{ metric("开放区时间占开放+封闭", num(s.open_time_percent_known, 1), "%") }}
-      {{ metric("开放区进入", s.open_entries if s.open_entries is not none else "—", "次") }}
-      {{ metric("封闭区进入", s.closed_entries if s.closed_entries is not none else "—", "次") }}
-      {{ metric("首次观察开放区潜伏期", num(s.first_open_observation_latency_s, 3), "s") }}
-      {% if s.first_open_entry_censored %}
-      {{ metric("首次确认进入开放区潜伏期", "未确认（删失）") }}
-      {% else %}
-      {{ metric("首次确认进入开放区潜伏期", num(s.first_open_entry_latency_s, 3), "s") }}
-      {% endif %}
-    </div>
+    {{ overview(entry, s) }}
 
     <details class="fold">
       <summary>全部指标</summary>
@@ -1014,20 +991,20 @@
               未知 {{ num(s.unknown_time_s, 3) }} s
             </td></tr>
             <tr><th>开放比例</th><td>
-              占总时长 {{ num(s.open_time_percent_total, 2) }} %（分母为窗内全部曝光，含缺失）·
-              占开放+封闭 {% if s.open_time_percent_known is not none %}{{ num(s.open_time_percent_known, 2) }} %{% else %}—{% endif %}（分母不含边界、区外与未知）
+              开放区时间占总时长 {{ num(s.open_time_percent_total, 2) }} %（分母为窗内全部曝光，含缺失）·
+              开放区时间占开放+封闭 {% if s.open_time_percent_known is not none %}{{ num(s.open_time_percent_known, 2) }} %{% else %}—{% endif %}（分母不含边界、区外与未知）
             </td></tr>
             <tr><th>进入</th><td>
-              开放 {{ s.open_entries }} 次 · 封闭 {{ s.closed_entries }} 次 ·
+              开放区进入 {{ s.open_entries }} 次 · 封闭区进入 {{ s.closed_entries }} 次 ·
               {% if s.first_open_observation_latency_s is not none %}
-              首次观察开放区 {{ num(s.first_open_observation_latency_s, 3) }} s ·
+              首次观察开放区潜伏期 {{ num(s.first_open_observation_latency_s, 3) }} s ·
               {% else %}
-              首次观察开放区 — ·
+              首次观察开放区潜伏期 — ·
               {% endif %}
               {% if s.first_open_entry_censored %}
-              首次确认进入开放区未确认（删失）
+              首次确认进入开放区潜伏期未确认（删失）
               {% else %}
-              首次确认进入开放区 {{ num(s.first_open_entry_latency_s, 3) }} s
+              首次确认进入开放区潜伏期 {{ num(s.first_open_entry_latency_s, 3) }} s
               {% endif %}
             </td></tr>
             <tr><th>运动</th><td>
@@ -1135,7 +1112,7 @@
     <div class="figure-row" data-figures>
       {% for name in unit.figure_files %}
       <figure>
-        <img src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}"
+        <img src="{{ file_url(run_id, name) }}"
              alt="{{ figure_caption(name, assay) }}">
         <figcaption>{{ figure_caption(name, assay) }}</figcaption>
       </figure>
@@ -1151,9 +1128,9 @@
     <div class="figure-row">
       <figure class="video-figure">
         <video controls preload="metadata"
-               src="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.annotated_video }}"></video>
+               src="{{ file_url(run_id, unit.annotated_video) }}"></video>
         <figcaption>标注视频（源画面与几何/轨迹/状态/事件叠画；时长 {{ num(unit.annotated_video_duration_s, 3) }} s ·
-          <a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ unit.annotated_video }}?download=1">下载</a>）</figcaption>
+          <a href="{{ file_url(run_id, unit.annotated_video) }}?download=1">下载</a>）</figcaption>
       </figure>
     </div>
     {% else %}
@@ -1174,7 +1151,7 @@
       <p class="rail-title">图</p>
       <ul class="rail-list">
         {% for name in rail.figures %}
-        <li><a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}?download=1">{{ name }}</a></li>
+        <li><a href="{{ file_url(run_id, name) }}?download=1">{{ name }}</a></li>
         {% endfor %}
       </ul>
     </div>
@@ -1184,7 +1161,7 @@
       <p class="rail-title">视频</p>
       <ul class="rail-list">
         {% for name in rail.videos %}
-        <li><a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}?download=1">{{ name }}</a></li>
+        <li><a href="{{ file_url(run_id, name) }}?download=1">{{ name }}</a></li>
         {% endfor %}
       </ul>
     </div>
@@ -1194,7 +1171,7 @@
       <p class="rail-title">表格</p>
       <ul class="rail-list">
         {% for name in rail.tables %}
-        <li><a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}?download=1">{{ name }}</a></li>
+        <li><a href="{{ file_url(run_id, name) }}?download=1">{{ name }}</a></li>
         {% endfor %}
       </ul>
     </div>
@@ -1204,7 +1181,7 @@
       <p class="rail-title">报告与配置</p>
       <ul class="rail-list">
         {% for name in rail.docs %}
-        <li><a href="/runs/{{ run_id }}/{{ entry.job_id }}/{{ name }}?download=1">{{ name }}</a></li>
+        <li><a href="{{ file_url(run_id, name) }}?download=1">{{ name }}</a></li>
         {% endfor %}
       </ul>
     </div>

@@ -291,7 +291,7 @@ def test_manual_preview_full_window_and_validation(client, store, tmp_path,
     assert "中心区时间" not in page, "人工结果不伪造中心占用"
     assert "估计总距离" not in page
     assert "候选（" not in page
-    assert f'src="/runs/{run["run_id"]}/{job["job_id"]}/{sequence}"' in page
+    assert f'src="/api/runs/{run["run_id"]}/files/{sequence}"' in page
 
     # 配置窗缩到 [0,1)：窗内 0 条 → 空比例，但草稿事件不删。
     updated = client.put(f"/api/drafts/{draft['id']}", json={"videos": [{

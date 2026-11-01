@@ -35,6 +35,8 @@
     point: "body",
     image: null,           // Image 对象
     imageToken: 0,
+    imageReady: false,     // 新帧载入完成前，禁止向旧图产生点击坐标
+    revision: 0,           // 编辑修订：保存/验证响应用它丢弃过期结果
     context: null,
   };
 
@@ -116,8 +118,10 @@
   }
 
   async function openSession(session) {
+    state.revision += 1;          // 换会话后，旧会话的迟到响应一律丢弃
     state.session = session;
     state.frame = session.frames[0];
+    state.imageReady = false;
     el.workbench.hidden = false;
     if (el.toolTolerance) el.toolTolerance.value = session.tolerance_px;
     renderFrames();
@@ -182,6 +186,7 @@
 
   function setRecord(frame, point, value) {
     const session = state.session;
+    state.revision += 1;          // 任何标记修改都使未完成的保存/验证过期
     let record = session.records.find((item) => item.frame === frame);
     if (!record) {
       record = { frame, points: {} };
@@ -261,6 +266,8 @@
   async function loadFrame() {
     if (!state.session) return;
     const token = ++state.imageToken;
+    // 新帧在加载完成前保留旧图，但禁止把点击记录到旧帧坐标上。
+    state.imageReady = false;
     const session = state.session;
     const url = `/api/assets/${session.asset_id}/frame?index=${state.frame}`
       + `&orientation=${session.orientation}`;
@@ -269,6 +276,7 @@
       // 迟到图片不能覆盖新会话或新帧。
       if (token !== state.imageToken) return;
       state.image = image;
+      state.imageReady = true;
       if (el.frameNote) {
         el.frameNote.textContent = `帧 ${state.frame} · ${image.naturalWidth}×${image.naturalHeight}`;
       }
@@ -277,6 +285,7 @@
     image.onerror = () => {
       if (token !== state.imageToken) return;
       state.image = null;
+      state.imageReady = false;
       renderFigure();
       status("这一帧无法载入；不能在这个状态下标注。", "error");
     };
@@ -316,6 +325,8 @@
       fail("容差必须是有限正数");
       return;
     }
+    const sessionId = state.session.id;
+    const revision = state.revision;
     const body = {
       records: state.session.records,
       tolerance_px: tolerance,
@@ -323,8 +334,16 @@
     try {
       status(verify ? "保存并验证…" : "保存中…");
       const saved = await api().request(
-        "/api/landmarks/" + state.session.id,
+        "/api/landmarks/" + sessionId,
         { method: "PUT", body: JSON.stringify(body) });
+      // 迟到响应归属：会话已切换或保存期间又有编辑，一律丢弃，
+      // 不覆盖当前会话或标注；失败与过期都保留可修正输入。
+      if (!state.session || state.session.id !== sessionId) return;
+      if (state.revision !== revision) {
+        status("保存期间标注又有修改，已保留当前编辑；需要同步请再次保存。",
+               "error");
+        return;
+      }
       state.session = saved.session;
       status("已保存", "ok");
       if (verify) await evaluate();
@@ -337,10 +356,17 @@
   async function evaluate() {
     if (!state.session) return;
     fail("");
+    const sessionId = state.session.id;
+    const revision = state.revision;
     status("验证中…");
     try {
       const data = await api().request(
-        `/api/landmarks/${state.session.id}/evaluate`, { method: "POST", body: "{}" });
+        `/api/landmarks/${sessionId}/evaluate`, { method: "POST", body: "{}" });
+      if (!state.session || state.session.id !== sessionId) return;
+      if (state.revision !== revision) {
+        status("验证期间标注已有修改，结果已丢弃；请重新验证。", "error");
+        return;
+      }
       state.session = data.session;
       renderEvaluation(data.evaluation);
       renderFigure();
@@ -367,7 +393,6 @@
   function renderEvaluation(evaluation) {
     if (!evaluation || !el.evaluationBox || !el.evaluationBody) return;
     el.evaluationBox.hidden = false;
-    const metrics = evaluation.metrics || {};
     const body = el.evaluationBody;
     body.replaceChildren();
     const points = ["body", "nose", "tail", "left_ear", "right_ear"];
@@ -385,8 +410,10 @@
         "—", "—",
       ];
       if (point === "body" || point === "nose" || point === "tail") {
-        cells[5] = num(metrics.matched_error_median_px, 2);
-        cells[6] = num(metrics.matched_error_p90_px, 2);
+        // 逐点误差分位来自该点自己的匹配误差；无匹配显示 null，不
+        // 复用总体分位数，也不把数值填给没有标注的点。
+        cells[5] = num(stat.matched_error_median_px, 2);
+        cells[6] = num(stat.matched_error_p90_px, 2);
       }
       cells.forEach((text) => {
         const cell = document.createElement("td");
@@ -409,6 +436,7 @@
   if (el.frameSelect) {
     el.frameSelect.addEventListener("change", () => {
       state.frame = Number(el.frameSelect.value);
+      state.imageReady = false;   // 新帧加载完成前不记录点击
       clearEvaluation();
       renderFigure();
       loadFrame();
@@ -417,14 +445,20 @@
   if (el.pointSelect) {
     el.pointSelect.addEventListener("change", () => {
       state.point = el.pointSelect.value;
+      // 切点同样清旧 evaluation 图层与数值，不留上一名的预测框。
+      clearEvaluation();
       renderFigure();
     });
   }
   if (el.toolTolerance) {
-    el.toolTolerance.addEventListener("input", () => clearEvaluation());
+    el.toolTolerance.addEventListener("input", () => {
+      state.revision += 1;
+      clearEvaluation();
+    });
   }
   if (el.canvas) {
     el.canvas.addEventListener("click", (event) => {
+      if (!state.imageReady) return;   // 画面未加载完成，不产生坐标
       const point = pointFromEvent(event);
       if (!point || !state.session) return;
       setRecord(state.frame, state.point,

@@ -183,7 +183,7 @@ def test_result_page_shows_figures_and_downloads(client, store, tmp_path,
     assert "壁区包含在外围内" in body
     assert "示例警告" in body
     for name in figures_written:
-        assert f'src="/runs/{run_id}/{job_id}/{name}"' in body
+        assert f'src="/api/runs/{run_id}/files/{name}"' in body
         inline = client.get(f"/runs/{run_id}/{job_id}/{name}")
         assert inline.status_code == 200
         assert inline.mimetype == "image/png"

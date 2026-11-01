@@ -370,7 +370,7 @@ def test_y_preview_and_result_page(client, store, tmp_path, monkeypatch):
                   "最近序列", "候选（", "入臂序列（"):
         assert label in page, label
     assert "B 4.000" in page, "B 臂时间来自同一汇总"
-    assert f'src="/runs/{payload["run_id"]}/{job["job_id"]}/{sequence}"' in page
+    assert f'src="/api/runs/{payload["run_id"]}/files/{sequence}"' in page
     # 机会 0 时交替率是 —，不是 0%；有确认事件时不写空态。
     assert "自发交替率 — %" in page
     assert "没有确认的入臂事件" not in page

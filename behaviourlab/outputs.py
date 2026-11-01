@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -64,6 +65,22 @@ def _columns_from(rows: Sequence[Mapping[str, Any]], columns: Iterable[str] | No
     return ordered
 
 
+def _csv_cell(value: Any) -> Any:
+    """CSV 单元格格式：None→空、bool→True/False、数组/字典→合法 JSON。
+
+    JSON 用 ensure_ascii=false，中文/逗号单元回读 json.loads 成立；
+    数值保持数值（写出后再由 csv 模块转文本），不把 0 与缺失混写。
+    """
+
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, (list, tuple, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
 def write_csv(path: str | Path, rows: Sequence[Mapping[str, Any]],
               columns: Iterable[str] | None = None) -> Path:
     """写 CSV：先固定表头，再按首次出现顺序追加其余字段。
@@ -84,8 +101,7 @@ def write_csv(path: str | Path, rows: Sequence[Mapping[str, Any]],
         for row in rows:
             sanitized = sanitize_json(dict(row))
             writer.writerow(
-                {key: "" if sanitized.get(key) is None else sanitized.get(key)
-                 for key in fieldnames}
+                {key: _csv_cell(sanitized.get(key)) for key in fieldnames}
             )
     return target
 
@@ -172,10 +188,46 @@ def _manifest_figures(manifest: Mapping[str, Any]) -> tuple[list[tuple], list[tu
 
 def _report_markdown(job: Mapping[str, Any], result: Any,
                      manifest: Mapping[str, Any]) -> str:
-    lines = [f"# {job.get('assay', '')} 分析报告", ""]
+    from . import experiments
+
+    assay = _assay_of(job, result)
+    label = assay
+    if experiments.exists(assay):
+        label = str(experiments.get(assay).SPEC.get("label") or assay)
+    lines = [f"# {label} 分析报告", ""]
     lines.append(f"- run: {job.get('run_id')}")
     lines.append(f"- job: {job.get('job_id')}")
+    asset = job.get("asset") if isinstance(job.get("asset"), Mapping) else {}
+    lines.append(f"- 源文件：{asset.get('name') or asset.get('id') or '未知'}"
+                 f"（id {asset.get('id') or '未知'}）")
     lines.append(f"- unit 数: {len(result.summary)}")
+
+    lines.extend(["", "## 源时间与缺失", ""])
+    metadata = result.metadata if isinstance(result.metadata, Mapping) else {}
+    coverage = metadata.get("coverage")
+    if isinstance(coverage, Mapping) and coverage:
+        parts = [f"{key}={_fmt(coverage.get(key))}" for key in
+                 ("start_s", "end_s", "duration_s", "frame_count")
+                 if key in coverage]
+        lines.append(f"- 实际覆盖：{'、'.join(parts) if parts else '（无字段）'}")
+    else:
+        lines.append("- 实际覆盖：没有覆盖记录，无法说明本次实际读取范围。")
+    for row in result.summary:
+        label_cell = str(row.get("unit_name") or row.get("unit_id"))
+        window = ""
+        start = row.get("analysis_window_start_s")
+        end = row.get("analysis_window_end_s")
+        if start is not None and end is not None:
+            window = f"窗口 {_fmt(start)}–{_fmt(end)} s"
+        else:
+            window = "窗口未确定"
+        parts = [window]
+        for key, text in (("missing_time_s", "检测缺失"),
+                          ("unobserved_time_s", "未观测")):
+            if key in row and row.get(key) is not None:
+                parts.append(f"{text} {_fmt(row.get(key))} s")
+        lines.append(f"- {label_cell}：{'；'.join(parts)}")
+
     metrics = _report_metrics(job.get("assay"))
     if not metrics:
         metrics = [{"key": "center_percent", "label": "中心占比", "unit": "%"},
@@ -193,6 +245,13 @@ def _report_markdown(job: Mapping[str, Any], result: Any,
         cells = [str(row.get("unit_name") or row.get("unit_id"))]
         cells.extend(_fmt(row.get(item["key"])) for item in metrics)
         lines.append("| " + " | ".join(cells) + " |")
+
+    # 计量 metadata：只写标量事实（单位、来源、分母、抑制标记等），
+    # 不覆盖实验自己的字段，也不把嵌套结构压平成猜测性文字。
+    meta_lines = _measurement_metadata_lines(metadata)
+    if meta_lines:
+        lines.extend(["", "## 计量 metadata", ""])
+        lines.extend(meta_lines)
     note = ASSAY_NOTES.get(_assay_of(job, result))
     if note:
         lines.extend(["", note])
@@ -230,20 +289,61 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
+_METADATA_SKIP_KEYS = ("units", "coverage", "video", "warnings", "assay")
+
+
+def _scalar_metadata_entries(source: Mapping[str, Any]) -> list[str]:
+    """metadata 里的标量事实键值；嵌套结构不展开也不猜测。"""
+
+    entries = []
+    for key in sorted(source):
+        if key in _METADATA_SKIP_KEYS:
+            continue
+        value = source[key]
+        if value is None or isinstance(value, (str, bool, int, float)):
+            entries.append(f"{key}={_fmt(value) if value is not None else 'null'}")
+    return entries
+
+
+def _measurement_metadata_lines(metadata: Mapping[str, Any]) -> list[str]:
+    """报告的计量 metadata 段：全局标量 + 每单位标量（按 unit_id）。"""
+
+    lines = [f"- 全局：{'、'.join(_scalar_metadata_entries(metadata)) or '（无）'}"]
+    units = metadata.get("units")
+    if isinstance(units, Mapping):
+        for unit_id in sorted(units):
+            unit_meta = units[unit_id]
+            if not isinstance(unit_meta, Mapping):
+                continue
+            name = str(unit_meta.get("unit_name") or unit_id)
+            entries = _scalar_metadata_entries(unit_meta)
+            lines.append(f"- {name}（{unit_id}）："
+                         f"{'、'.join(entries) or '（无标量计量字段）'}")
+    return lines
+
+
 def _unit_figures(target: Path, summary: Mapping[str, Any],
                   rows: Sequence[Mapping[str, Any]], stem: str,
                   style: Mapping[str, Any] | None, *,
                   events: Sequence[Mapping[str, Any]] | None = None,
-                  bins: Sequence[Mapping[str, Any]] | None = None) -> dict:
-    """每动物可用图形：活动曲线不依赖场地宽高，轨迹/热图才需要。"""
+                  bins: Sequence[Mapping[str, Any]] | None = None,
+                  suppress_positions: bool = False) -> dict:
+    """每动物可用图形：活动曲线不依赖场地宽高，轨迹/热图才需要。
+
+    ``suppress_positions``（tracking_reliable=false / position_available=
+    false / 暗室不可见）抑制位置与运动图：轨迹/热图不生成并如实说明，
+    其余不依赖位置的图不受影响。
+    """
 
     missing_size_note = False
     figures_info: dict[str, Any] = {"stem": stem, "trajectory": None,
                                     "heatmap": None, "activity": None,
-                                    "objects": None, "zones": None,
-                                    "sequence": None}
+                                    "objects": None, "exploration": None,
+                                    "zones": None, "sequence": None}
     name = str(summary.get("unit_name") or summary.get("unit_id") or "")
     notes: list[str] = []
+    if suppress_positions:
+        notes.append("位置不可靠或不可用，未生成轨迹与热图")
 
     # 只有真的带最终状态的实验才画活动曲线，不按汇总字段猜。
     state_based = any(row.get("state") for row in rows)
@@ -268,7 +368,9 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
     pool_radius = summary.get("pool_radius_cm")
     is_mwm = (mode == "mwm" and isinstance(pool_radius, (int, float))
               and pool_radius > 0)
-    if is_mwm:
+    if suppress_positions:
+        pass  # 位置/运动图被抑制：上面已写说明，不再尝试任何轨迹/热图分支
+    elif is_mwm:
         radius = float(pool_radius)
         platform = None
         px = summary.get("platform_x_cm")
@@ -399,13 +501,25 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
             notes.append("没有可用的场地尺寸，未生成图形")
 
     if isinstance(summary.get("objects"), list) and summary["objects"]:
-        objects_figure = f"{stem}_exploration.png"
+        objects_figure = f"{stem}_objects.png"
         try:
             if figures.nor_objects_png(target / objects_figure, summary,
                                        title=name, style=style):
                 figures_info["objects"] = objects_figure
         except (OSError, ValueError) as error:
             notes.append(f"物体探索图生成失败：{error}")
+
+    # NOR 探索时序：逐对象按保存观测的 dt_s 累计，缺失/无速度段断开；
+    # 不是重新计算头向规则，也没有有效速度或探索观测就不出图。
+    if str(summary.get("mode")) == "nor":
+        exploration_figure = f"{stem}_exploration.png"
+        try:
+            if figures.nor_exploration_png(target / exploration_figure,
+                                           rows, summary, title=name,
+                                           style=style):
+                figures_info["exploration"] = exploration_figure
+        except (OSError, ValueError) as error:
+            notes.append(f"物体探索时序图生成失败：{error}")
 
     if notes:
         figures_info["note"] = "；".join(notes)
@@ -512,10 +626,23 @@ def write_outputs(directory: str | Path, job: Mapping[str, Any],
     write_json_export(target / "results.json", result.as_dict())
     files.append("results.json")
 
+    metadata = result.metadata if isinstance(result.metadata, Mapping) else {}
+    assay_of = _assay_of(job, result)
     style = job.get("style") if isinstance(job.get("style"), Mapping) else None
+    # 文件 stem 跟随冻结 job.units 的顺序，不随 summary 行序漂移；
+    # summary 里多出的 unit 追加在后，不跨动物补图。
+    frozen_order = [unit.get("id")
+                    for unit in (job.get("units") or [])
+                    if isinstance(unit, Mapping) and unit.get("id")]
+    by_unit = {row.get("unit_id"): row for row in summary_rows}
+    ordered_rows = [by_unit[uid] for uid in frozen_order if uid in by_unit]
+    ordered_rows += [row for row in summary_rows
+                     if row.get("unit_id") not in set(frozen_order)]
+    metadata_units = metadata.get("units") if isinstance(metadata, Mapping) \
+        else None
     units: list[dict] = []
     figure_map: dict[str, list[str]] = {}
-    for index, row in enumerate(summary_rows, start=1):
+    for index, row in enumerate(ordered_rows, start=1):
         unit_id = row.get("unit_id")
         rows = [item for item in observation_rows
                 if item.get("unit_id") == unit_id]
@@ -523,17 +650,27 @@ def write_outputs(directory: str | Path, job: Mapping[str, Any],
         stem = unit_stem(index)
         unit_bins = [item for item in bin_rows
                      if item.get("unit_id") == unit_id]
+        unit_meta = (metadata_units or {}).get(unit_id) \
+            if isinstance(metadata_units, Mapping) else None
+        unit_meta = unit_meta if isinstance(unit_meta, Mapping) else {}
+        suppress = (unit_meta.get("tracking_reliable") is False
+                    or unit_meta.get("position_available") is False)
+        if assay_of == "ldb" and unit_meta.get("dark_box_invisible"):
+            # 暗室不可见：不画整装置轨迹，也不假装有位置。
+            suppress = True
         info = _unit_figures(target, row, rows, stem, style, events=events,
-                             bins=unit_bins)
+                             bins=unit_bins,
+                             suppress_positions=bool(suppress))
         names = [info[key] for key in ("trajectory", "heatmap", "activity",
-                                       "objects", "zones", "sequence")
+                                       "objects", "exploration", "zones",
+                                       "sequence")
                  if info.get(key)]
         files.extend(names)
         figure_map[str(unit_id)] = names
         units.append({"unit_id": unit_id, "unit_name": row.get("unit_name"),
                       "summary": row, "figures": info, "figure_files": names,
                       "annotated_video": None})
-        report(0.75 + 0.2 * len(units) / max(1, len(summary_rows)),
+        report(0.75 + 0.2 * len(units) / max(1, len(ordered_rows)),
                "正在导出结果")
 
     # 一份 run 视频：所有动物共用一个流，按各自窗口叠各自几何与轨迹层。
@@ -548,7 +685,6 @@ def write_outputs(directory: str | Path, job: Mapping[str, Any],
             entry["annotated_video_duration_s"] = round(video[1], 6)
             entry["annotated_video_time_base"] = annotated.TIMEBASE_LABEL
 
-    metadata = result.metadata if isinstance(result.metadata, Mapping) else {}
     coverage = metadata.get("coverage")
     asset = job.get("asset") if isinstance(job.get("asset"), Mapping) else {}
     manifest = {

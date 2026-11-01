@@ -312,11 +312,16 @@ def _run_payload(job_dir: Path) -> dict:
         if isinstance(source, Mapping) and source.get("job_id"):
             entry["job_id"] = source["job_id"]
             break
-    # 新布局把整个视频发布在 runs/{run_id}：任务 ID 以清单/冻结任务为准。
-    for source in (entry.get("manifest"), entry.get("job")):
-        if isinstance(source, Mapping) and source.get("job_id"):
-            entry["job_id"] = source["job_id"]
-            break
+    # 文件入口以清单声明为准：声明里合法的嵌套相对路径（新图种所在
+    # 子目录）也在这里出现；目录扫描只兜底极旧的裸 results.json。
+    declared_files = (entry.get("manifest") or {}).get("files")
+    if isinstance(declared_files, list) and declared_files:
+        merged = [str(name) for name in declared_files
+                  if isinstance(name, str) and name]
+        for name in entry["files"]:
+            if name not in merged:
+                merged.append(name)
+        entry["files"] = merged
     units = []
     for unit in (entry.get("manifest") or {}).get("units") or []:
         units.append({"unit_id": unit.get("unit_id"),

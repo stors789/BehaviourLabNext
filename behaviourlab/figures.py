@@ -33,6 +33,12 @@ def _finite(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _motion_missing(row: Mapping[str, Any]) -> bool:
+    """行里带 motion_x 键但为空：位置事实不完整，空间图一律剔除。"""
+
+    return "motion_x" in row and row.get("motion_x") is None
+
+
 def valid_positions(rows: Iterable[Mapping[str, Any]],
                     width_cm: float, height_cm: float) -> list[tuple[float, float, float]]:
     """窗内有效位置的 (x, y, dt)；jump / position_valid=false 不算有效点。"""
@@ -42,6 +48,8 @@ def valid_positions(rows: Iterable[Mapping[str, Any]],
         if not row.get("in_window") or not row.get("detected"):
             continue
         if row.get("position_valid") is False or row.get("jump") is True:
+            continue
+        if _motion_missing(row):
             continue
         span = _finite(row.get("dt_s"))
         x = _finite(row.get("x_cm"))
@@ -178,6 +186,8 @@ def mwm_points(rows: Iterable[Mapping[str, Any]], radius_cm: float
         if not row.get("in_window") or not row.get("detected"):
             continue
         if row.get("in_pool") is not True:
+            continue
+        if _motion_missing(row):
             continue
         span = _finite(row.get("dt_s"))
         x = _finite(row.get("x_cm"))
@@ -442,6 +452,100 @@ def nor_objects_png(path: str | Path, summary: Mapping[str, Any], *,
 
 EPM_ZONE_LABELS = (("open", "开放臂"), ("closed", "封闭臂"),
                    ("center", "中心区"), ("unknown", "区外"))
+
+
+def nor_exploration_points(rows: Iterable[Mapping[str, Any]]
+                           ) -> tuple[list[list[tuple[float, float]]], bool]:
+    """NOR 探索时序数据：逐对象按 dt_s 累计探索秒，缺失/无速度断开。
+
+    返回 (每个物体的折线段列表, 是否存在有效速度)。累计值只在
+    ``object_N_exploring`` 为真的合格行上增加；断开指该处插入 NaN，
+    不把缺口前后的累计值连成线。
+    """
+
+    ordered = [row for row in rows
+               if row.get("in_window") and _finite(row.get("dt_s")) is not None
+               and float(row.get("dt_s")) > 0]
+    ordered.sort(key=lambda row: float(row.get("time_s") or 0.0))
+    has_speed = any(_finite(row.get("speed_cm_s")) is not None
+                    for row in ordered)
+    series: list[list[tuple[float, float]]] = [[], []]
+    current: list[list[float]] = [[], []]
+    cumulative = [0.0, 0.0]
+    for row in ordered:
+        exploring = (row.get("object_1_exploring"),
+                     row.get("object_2_exploring"))
+        broken = (not row.get("detected")
+                  or _finite(row.get("speed_cm_s")) is None)
+        moment = float(row.get("time_s")) + float(row.get("dt_s"))
+        for index in (0, 1):
+            if broken:
+                # 缺失/无速度：当前折线在此断开；累计值保留，缺口不连线。
+                if current[index]:
+                    series[index].append(tuple(current[index]))
+                    series[index].append((moment, float("nan")))
+                    current[index] = []
+                continue
+            if exploring[index]:
+                cumulative[index] += float(row.get("dt_s"))
+                current[index] = [moment, cumulative[index]]
+            elif current[index]:
+                series[index].append(tuple(current[index]))
+                current[index] = []
+    for index in (0, 1):
+        if current[index]:
+            series[index].append(tuple(current[index]))
+    return series, has_speed
+
+
+def nor_exploration_png(path: str | Path, rows: Iterable[Mapping[str, Any]],
+                        summary: Mapping[str, Any] | None = None, *,
+                        title: str = "",
+                        style: Mapping[str, Any] | None = None) -> bool:
+    """NOR 探索时序图（7×4）：逐对象累计探索秒，缺失/无速度段断开。
+
+    不是重新计算头向规则：只消费保存的 ``object_N_exploring`` 标记与
+    真实曝光时长。没有任何探索观测或没有任何有效速度就不出图。
+    """
+
+    series, has_speed = nor_exploration_points(rows)
+    if not has_speed or not any(points for points in series):
+        return False
+    color, _, line_width, dpi = _style(style)
+    labels = ["物体 1", "物体 2"]
+    objects = (summary or {}).get("objects")
+    if isinstance(objects, list):
+        names = []
+        for item in objects[:2]:
+            names.append(str(item.get("name") or item.get("id"))
+                         if isinstance(item, Mapping) else None)
+        labels = [(names[index] if names[index] else labels[index])
+                  for index in (0, 1)]
+    figure = Figure(figsize=(7.0, 4.0))
+    FigureCanvasAgg(figure)
+    axes = figure.add_subplot(111)
+    colors = (color, "#1c5f9e")
+    for index, points in enumerate(series):
+        if not points:
+            continue
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        axes.plot(xs, ys, color=colors[index], linewidth=line_width,
+                  label=labels[index], solid_capstyle="round")
+    axes.set_xlabel("源时间（s）")
+    axes.set_ylabel("累计探索（s）")
+    axes.set_xlim(left=0.0)
+    axes.set_ylim(bottom=0.0)
+    axes.spines["top"].set_visible(False)
+    axes.spines["right"].set_visible(False)
+    handles, labels_ = axes.get_legend_handles_labels()
+    if handles:
+        axes.legend(handles, labels_, fontsize=8, frameon=False)
+    if title:
+        axes.set_title(title, fontsize=9, color="#333333")
+    figure.tight_layout()
+    figure.savefig(path, format="png", dpi=dpi)
+    return True
 
 
 def epm_zones_png(path: str | Path, summary: Mapping[str, Any], *,

@@ -365,6 +365,7 @@ def evaluate(paths: DataPaths, session: Mapping[str, Any], *,
     predicted: dict[int, dict] = {}
     times: dict[int, float] = {}
     seen_frames: set[int] = set()
+    frame_size: tuple[int, int] | None = None
     for frame in source.iter_frames():
         if cancel is not None and cancel():
             raise ValidationError("标注评估已取消", "job")
@@ -374,6 +375,7 @@ def evaluate(paths: DataPaths, session: Mapping[str, Any], *,
             break
         if region is None:
             height, width = frame.image.shape[:2]
+            frame_size = (width, height)
             try:
                 region, _ = detection.geometry_region(
                     unit.get("geometry") or {}, assay, options, width, height)
@@ -384,34 +386,60 @@ def evaluate(paths: DataPaths, session: Mapping[str, Any], *,
                 {}, 0, width, height)
             detector = detection.shared_detector(key, settings,
                                                  background=background)
+        # 连续处理到最大选中帧：检测与关联不因跳选断链；选中帧只控制
+        # 哪些预测被记录，不改变 tracker 的真实连续状态。
+        try:
+            result = observation.track(
+                key, unit.get("id") or session.get("id"),
+                image=frame.image, region=region, settings=settings,
+                signature=observation.signature_of(
+                    unit.get("geometry") or {}, settings, False),
+                assay=assay, frame_index=frame.index,
+                time_s=float(frame.time_s),
+                foreground=detector.foreground(frame.image),
+                retain_units=[unit.get("id") or session.get("id")],
+            )
+        except detection.DetectionError as error:
+            raise ValidationError(str(error), "detection") from error
         if frame.index in wanted:
             seen_frames.add(int(frame.index))
             times[int(frame.index)] = float(frame.time_s)
-            try:
-                result = observation.track(
-                    key, unit.get("id") or session.get("id"),
-                    image=frame.image, region=region, settings=settings,
-                    signature=observation.signature_of(
-                        unit.get("geometry") or {}, settings, False),
-                    assay=assay, frame_index=frame.index,
-                    time_s=float(frame.time_s),
-                    foreground=detector.foreground(frame.image),
-                    retain_units=[unit.get("id") or session.get("id")],
-                )
-            except detection.DetectionError as error:
-                raise ValidationError(str(error), "detection") from error
             predicted[int(frame.index)] = _predictions(result)
 
     missing = [index for index in frames if index not in seen_frames]
     if missing:
         raise ValidationError(
             f"选中帧无法解码：{missing[0]}", "frames")
+    if frame_size is not None:
+        _validate_record_bounds(session.get("records") or [], frame_size)
 
     evaluation = compute_evaluation(
         session.get("records") or [], predicted, times,
         tolerance=float(session.get("tolerance_px") or 10),
         supported=supported)
     return evaluation
+
+
+def _validate_record_bounds(records: Sequence[Mapping[str, Any]],
+                            frame_size: tuple[int, int]) -> None:
+    """人工可见标记必须落在旋转后的源像素范围内，越界直接拒绝。"""
+
+    width, height = frame_size
+    for record in records:
+        frame_index = int(record.get("frame"))
+        for name, mark in (record.get("points") or {}).items():
+            if not isinstance(mark, Mapping) or not mark.get("visible"):
+                continue
+            x, y = mark.get("x"), mark.get("y")
+            inside = (isinstance(x, (int, float))
+                      and isinstance(y, (int, float))
+                      and not isinstance(x, bool) and not isinstance(y, bool)
+                      and 0 <= float(x) < width and 0 <= float(y) < height)
+            if not inside:
+                raise ValidationError(
+                    f"帧 {frame_index} 的 {name} 标注超出旋转后画面"
+                    f"（0≤x<{width}，0≤y<{height}）",
+                    f"records[{frame_index}].points.{name}")
 
 
 def compute_evaluation(records: Sequence[Mapping[str, Any]],
@@ -473,6 +501,10 @@ def compute_evaluation(records: Sequence[Mapping[str, Any]],
         "matched_error_p90_px": p90,
     }
     for stat in by_point.values():
+        # 逐点误差分位：各点只汇总自己的匹配误差；无匹配为 null，
+        # 不把总体分位数重复填给每个点。
+        stat["matched_error_median_px"] = _percentile(stat["errors"], 0.5)
+        stat["matched_error_p90_px"] = _percentile(stat["errors"], 0.9)
         stat.pop("errors", None)
     return {
         "tolerance_px": float(tolerance),
