@@ -229,3 +229,29 @@ def test_jump_keeps_target_frame_when_not_playing():
     # 只有真的从播放中暂停才回退到已显示帧；滑条跳转保留目标帧。
     assert "const wasPlaying = state.playing;" in body
     assert "if (wasPlaying && Number.isInteger(state.shownFrame)" in body
+
+
+def test_slider_jump_reads_target_before_stopping():
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    for event_name in ("input", "change"):
+        block = source.split(
+            f'el.frameRange.addEventListener("{event_name}"', 1)[1].split(
+            "});", 1)[0]
+        # 先把用户目标读出来，再停播；否则暂停会把滑条写回最后可见帧。
+        assert block.index("const target = Number(el.frameRange.value);") \
+            < block.index("stopPlayback()")
+        assert "loadFrame(target)" in block
+
+
+def test_slider_jump_reads_target_before_stopping():
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    for event_name in ("input", "change"):
+        block = source.split(
+            f'el.frameRange.addEventListener("{event_name}"', 1)[1].split(
+            "});", 1)[0]
+        # 先把用户目标读出来，再停播；否则暂停会把滑条写回最后可见帧。
+        assert block.index("const target = Number(el.frameRange.value);") \
+            < block.index("stopPlayback()")
+        assert "loadFrame(target)" in block

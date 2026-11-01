@@ -212,7 +212,11 @@ def write_manual_y_video(path: str | Path, *, job: Mapping[str, Any],
     sequence: list[str] = []
     current: dict | None = None
     written = 0
-    position = 0
+    # 累计真实曝光（秒）与已量化端点：每帧 duration 用相邻端点之差，
+    # 不把逐帧取整后的 ticks 相加，避免误差累积。
+    elapsed = 0.0
+    start_ticks = 0
+    end_ticks = 0
     last_ticks = 0
     try:
         for frame in source.iter_frames():
@@ -242,13 +246,15 @@ def write_manual_y_video(path: str | Path, *, job: Mapping[str, Any],
                 container, stream = _open_writer(target, canvas.shape[1],
                                                  canvas.shape[0])
             video_frame = av.VideoFrame.from_ndarray(canvas, format="bgr24")
-            ticks = max(1, int(round(duration * TIMEBASE.denominator)))
-            video_frame.pts = position
+            elapsed += duration
+            end_ticks = int(round(elapsed * TIMEBASE.denominator))
+            ticks = max(1, end_ticks - start_ticks)
+            video_frame.pts = start_ticks
             video_frame.time_base = TIMEBASE
             queued.append(ticks)
             for packet in stream.encode(video_frame):
                 _mux(container, packet, queued)
-            position += ticks
+            start_ticks = end_ticks
             last_ticks = ticks
             written += 1
         if container is None:
@@ -281,4 +287,4 @@ def write_manual_y_video(path: str | Path, *, job: Mapping[str, Any],
         except OSError:
             pass
         raise OSError("分析范围内没有可写入的源帧，未生成标注视频")
-    return written, position / TIMEBASE.denominator
+    return written, end_ticks / TIMEBASE.denominator

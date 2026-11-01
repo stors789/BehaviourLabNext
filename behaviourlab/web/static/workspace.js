@@ -2761,13 +2761,16 @@
     });
 
     el.frameRange.addEventListener("input", () => {
-      // 跳转先暂停；旧帧时间由 beginFrameLoad 清掉，等新帧显示后才记历史。
+      // 先记住用户选定的目标，再停播：暂停会把滑条写回最后可见帧，
+      // 停播后读取就丢掉了这次明确跳转。
+      const target = Number(el.frameRange.value);
       stopPlayback();
-      loadFrame(Number(el.frameRange.value));
+      loadFrame(target);
     });
     el.frameRange.addEventListener("change", () => {
+      const target = Number(el.frameRange.value);
       stopPlayback();
-      loadFrame(Number(el.frameRange.value));
+      loadFrame(target);
     });
     el.frameNumber.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;

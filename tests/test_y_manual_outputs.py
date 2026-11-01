@@ -266,27 +266,6 @@ def test_encoding_failure_marks_job_error(client, store, tmp_path, monkeypatch):
     assert not (run_dir / "result_manifest.json").exists()
 
 
-def test_encoding_failure_marks_job_error(client, store, tmp_path, monkeypatch):
-    monkeypatch.setattr(media, "VideoSource", Frames)
-    monkeypatch.setattr(
-        "behaviourlab.engine.media.probe_video",
-        lambda path: {"width": 128, "height": 96, "duration_s": 1.0,
-                      "fps": 10.0, "frame_count": 10})
-
-    def refuse(*args, **kwargs):
-        raise OSError("标注视频编码器不可用（mp4v）")
-
-    monkeypatch.setattr(annotated, "write_manual_y_video", refuse)
-    draft = seed(client, store, tmp_path)
-    payload = client.post("/api/jobs", json={"draft_id": draft["id"]}).get_json()["data"]
-    job = payload["jobs"][0]
-    assert job["status"] == "error"
-    assert "标注视频" in str(job.get("error")), job
-    assert "manifest" not in job
-    run_dir = store.paths.runs / payload["run_id"] / job["job_id"]
-    assert not (run_dir / "result_manifest.json").exists()
-
-
 def test_annotated_video_skips_zero_exposure_boundary_frames(tmp_path,
                                                              monkeypatch):
     """真实源在窗口两端会给零曝光上下文帧，视频只收窗口内的真实曝光。"""
@@ -334,7 +313,7 @@ class Frames29:
     def __init__(self, path=None, *, start_s=0.0, end_s=None,
                  decode_images=True, **kwargs):
         self._frames = []
-        for index in range(28):
+        for index in range(120):
             moment = index / 29.0
             self._frames.append(Frame(
                 image=(np.full((96, 128), 200, dtype=np.uint8)
@@ -377,9 +356,48 @@ def test_vfr_keeps_cropped_exposures(tmp_path, monkeypatch):
     assert all(abs(item - 1 / 29.0) < 2e-6 for item in durations[1:-1])
     assert sum(durations) == pytest.approx(0.8, abs=1e-4)
     starts = [float(item.pts * item.time_base) for item in decoded]
+    # 端点量化：每帧 PTS 与真实曝光起点相差不超过 1µs（含累计）。
+    ends = []
+    elapsed = 0.0
+    for index in range(120):
+        low = max(index / 29.0, 0.1)
+        high = min((index + 1) / 29.0, 0.9)
+        if high - low <= 1e-12:
+            continue
+        ends.append(elapsed)
+        elapsed += high - low
     assert starts[0] == pytest.approx(0.0, abs=1e-9)
-    # 时间基 1µs：帧时间按微秒取整，容忍累计 5µs 的量化误差。
-    assert starts[-1] == pytest.approx(0.8 - durations[-1], abs=1e-5)
+    for started, truth in zip(starts, ends):
+        assert started == pytest.approx(truth, abs=1e-6)
+    assert seconds == pytest.approx(0.8, abs=1e-6)
+    assert sum(durations) == pytest.approx(0.8, abs=1e-6)
+
+
+def test_vfr_full_window_has_no_accumulated_drift(tmp_path, monkeypatch):
+    """整窗 [0,4) 仍是 116 帧、总时长 4s，累计 PTS 误差 ≤1µs。"""
+
+    monkeypatch.setattr(media, "VideoSource", Frames29)
+    job = {"asset": {"path": "memory", "metadata": {"fps": 29.0}},
+           "window": {"start_s": 0.0, "end_s": 4.0},
+           "orientation": 0, "fps_override": None}
+    summary = {"unit_name": "unit", "analysis_window_start_s": 0.0,
+               "analysis_window_end_s": 4.0}
+    target = tmp_path / "full.mp4"
+    frames, seconds = annotated.write_manual_y_video(
+        target, job=job, summary=summary, events=[])
+    assert frames == 116
+    assert seconds == pytest.approx(4.0, abs=1e-6)
+
+    import av
+
+    with av.open(str(target)) as container:
+        assert float(container.duration) / av.time_base == pytest.approx(
+            4.0, abs=1e-6)
+        decoded = list(container.decode(video=0))
+    assert len(decoded) == 116
+    for index, item in enumerate(decoded):
+        assert float(item.pts * item.time_base) == pytest.approx(
+            index / 29.0, abs=1e-6)
 
 
 def test_encode_write_failure_cleans_up(tmp_path, monkeypatch):
