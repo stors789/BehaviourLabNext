@@ -13,7 +13,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import threading
 import time
 from copy import deepcopy
@@ -1097,17 +1096,24 @@ class JobScheduler:
                 self._process = process
                 return self._wait(process, context)
         except OSError as error:
+            if process is not None:
+                # spawn 已成功、等待中出错：错误发生在已创建进程的所属
+                # 路径上，必须先终止并等待确认退出，再写错误返回；判断
+                # 依据是引用是否存在，不依赖 finally 里是否还有活动异常。
+                self._terminate(process)
             self._write_error(context["progress_path"],
                               f"无法启动工作进程：{error}")
             return 1
-        finally:
-            failing = sys.exc_info()[0] is not None
-            if process is not None and failing:
-                # 异常路径：所属进程必须先终止并等待确认退出，再释放句柄与
-                # 清引用。JobObject.close 可能触发终止，但不等于已等待确认；
-                # 引用在确认前保持可用，外层 _stop_active_process 重复调用
-                # 是安全兜底。正常返回时 _wait 已确认进程退出，只需释放。
+        except BaseException:
+            # 其他异常向上传播前同样先收尾已创建的进程；spawn 尚未产生
+            # 进程时不动任何句柄。
+            if process is not None:
                 self._terminate(process)
+            raise
+        finally:
+            # 正常返回时 _wait 已确认进程退出，这里只释放并清引用；
+            # 异常路径的终止已在 except 分支完成。释放多次调用安全，
+            # 外层 _stop_active_process 是重复调用的安全兜底。
             self._process = None
             if process is not None:
                 release = getattr(process, "release", None)

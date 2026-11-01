@@ -428,6 +428,107 @@ def test_process_exception_marks_terminal_and_clears_reference(paths, store,
     assert not (paths.runs / f".{batch['videos'][0]['run_id']}.tmp").exists()
 
 
+class _PollFaultProcess:
+    """假 ManagedProcess：poll 故障夹具，收尾接口与真实对象同形。"""
+
+    def __init__(self, error, owner, calls):
+        self._error = error
+        self._owner = owner
+        self.calls = calls
+
+    def poll(self):
+        self.calls.append("poll")
+        if self._error is not None:
+            raise self._error
+        return 0
+
+    def terminate(self):
+        self.calls.append("terminate")
+        # 收尾发生时引用必须仍可用，终止的确实是所属进程。
+        assert self._owner._process is self
+
+    def wait(self, timeout=None):
+        self.calls.append("wait")
+        return 0
+
+    def release(self):
+        self.calls.append("release")
+
+
+def _run_poll_fault(paths, store, asset, error):
+    draft = _draft(store, asset)
+    scheduler = JobScheduler(store, paths, inline=False)
+    process = _PollFaultProcess(error, scheduler, calls := [])
+    monkeypatch_target = scheduler
+    monkeypatch_target._spawn = lambda *args, **kwargs: process
+    batch = scheduler.submit(draft["id"])
+    run_id = batch["videos"][0]["run_id"]
+    store.update_batch(batch["id"], {"status": RUNNING})
+    scheduler._run_batch(batch["id"])
+    record = store.get_batch(batch["id"])
+    return record, record["videos"][0], calls, run_id
+
+
+def test_poll_oserror_terminates_created_process(paths, store):
+    """OSError：batch/video 为 failed，顺序 terminate→wait→release 一次。"""
+
+    asset = _asset(store, paths)
+    record, video, calls, run_id = _run_poll_fault(
+        paths, store, asset, OSError("句柄轮询失败"))
+    assert record["status"] == FAILED
+    assert video["status"] == FAILED
+    assert "无法启动工作进程" in str(video["error"])
+    assert calls == ["poll", "terminate", "wait", "release"]
+    assert calls.count("release") == 1, "close 仅一次"
+    assert not (paths.runs / f".{run_id}.tmp").exists()
+
+
+def test_poll_runtimeerror_keeps_same_teardown_order(paths, store):
+    """RuntimeError：保留已通过结果，收尾顺序与引用要求一致。"""
+
+    asset = _asset(store, paths)
+    record, video, calls, _ = _run_poll_fault(
+        paths, store, asset, RuntimeError("poll 不可用"))
+    assert record["status"] == FAILED
+    assert video["status"] == FAILED
+    assert "执行失败：RuntimeError" in str(video["error"])
+    assert calls == ["poll", "terminate", "wait", "release"]
+    assert calls.count("release") == 1
+
+
+def test_poll_normal_completes_without_teardown(paths, store, monkeypatch):
+    """normal：继续 completed，正常路径只轮询与释放，不触发终止。"""
+
+    asset = _asset(store, paths)
+    draft = _draft(store, asset)
+    scheduler = JobScheduler(store, paths, inline=False)
+    process = _PollFaultProcess(None, scheduler, calls := [])
+
+    def fake_wait(fake_process, context):
+        stage = context["stage"]
+        stage.mkdir(parents=True, exist_ok=True)
+        (stage / "summary.csv").write_text("unit_id\n", encoding="utf-8")
+        atomic_write_json(stage / "results.json", {"units": []})
+        atomic_write_json(stage / "frozen_job.json", dict(context["job"]))
+        atomic_write_json(stage / "result_manifest.json", {
+            "status": "completed", "run_id": context["job"]["run_id"],
+            "job_id": context["job"]["job_id"], "assay": context["job"]["assay"],
+            "files": ["summary.csv", "results.json", "frozen_job.json",
+                      "result_manifest.json"],
+            "units": [], "warnings": [], "metadata": {}})
+        return fake_process.poll()
+
+    monkeypatch.setattr(scheduler, "_spawn", lambda *args, **kwargs: process)
+    monkeypatch.setattr(scheduler, "_wait", fake_wait)
+    batch = scheduler.submit(draft["id"])
+    store.update_batch(batch["id"], {"status": RUNNING})
+    scheduler._run_batch(batch["id"])
+    record = store.get_batch(batch["id"])
+    assert record["status"] == COMPLETED
+    assert record["videos"][0]["status"] == COMPLETED
+    assert calls == ["poll", "release"], "正常路径不终止、不重复释放"
+
+
 # -- 组 4：删除的输入保护、归属核对与旧历史 ------------------------------
 
 
