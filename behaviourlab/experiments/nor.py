@@ -84,8 +84,14 @@ SPEC = {
     "geometry": [
         geometry_field("arena", "场地四角（左上、右上、右下、左下）", "quad",
                        count=4),
-        geometry_field("objects", "物体中心（依次点击：物体 1、物体 2）", "objects",
-                       count=2, role="object"),
+        geometry_field("object1", "物体 1 中心", "point", count=1,
+                       role="object"),
+        geometry_field("object2", "物体 2 中心", "point", count=1,
+                       role="object"),
+        geometry_field("explore1", "物体 1 探索范围", "polygon", min_points=3,
+                       optional=True, role="explore"),
+        geometry_field("explore2", "物体 2 探索范围", "polygon", min_points=3,
+                       optional=True, role="explore"),
         geometry_field("mask", "检测遮罩", "polygon", min_points=3,
                        optional=True),
     ],
@@ -192,13 +198,14 @@ def _segments_meet(a: Sequence[float], b: Sequence[float],
     o4 = _orientation(c, d, b)
     if o1 != o2 and o3 != o4:
         return True
-    if o1 == 0 and _between(a, c, b):
+    # 共线时只判"另一点落在本段内"，共线但分离的线段不算相交。
+    if o1 == 0 and _between(a, b, c):
         return True
-    if o2 == 0 and _between(a, d, b):
+    if o2 == 0 and _between(a, b, d):
         return True
-    if o3 == 0 and _between(c, a, d):
+    if o3 == 0 and _between(c, d, a):
         return True
-    if o4 == 0 and _between(c, b, d):
+    if o4 == 0 and _between(c, d, b):
         return True
     return False
 
@@ -415,7 +422,13 @@ def validate_objects(geometry: Mapping[str, Any] | None, *,
                            "message": "物体角色必须是 familiar 或 novel"})
         else:
             roles.append(role)
-        if _point(item.get("center")) is None:
+        center = item.get("center")
+        if center is None:
+            # 未画完的草稿允许先存另一半；最终校验/开始任务才要求中心。
+            if require:
+                issues.append({"field": f"{prefix}.center",
+                               "message": "缺少物体中心"})
+        elif _point(center) is None:
             issues.append({"field": f"{prefix}.center",
                            "message": "物体中心必须是两个有限数值"})
         zone = item.get("zone")
@@ -437,7 +450,8 @@ def objects_of(geometry: Mapping[str, Any]) -> list[dict]:
         center = (_point(item.get("center"))
                   if isinstance(item, Mapping) else None)
         if center is None:
-            raise ValidationError("物体中心无效", "geometry.objects")
+            raise ValidationError("缺少物体中心",
+                                  f"geometry.objects[{index}].center")
         role = item.get("role")
         identity = item.get("id")
         name = item.get("name")
@@ -698,7 +712,8 @@ def _annotate(row: dict, matrix: Sequence[float], width: float,
         row[f"object_{position}_nose_distance_cm"] = nose_distance
         zone_polygon = obj.get("zone")
         if zone_polygon:
-            clearance = (distance if body is None
+            clearance = (_point_polygon_distance((x_cm, y_cm), zone_polygon)
+                         if body is None
                          else _polygons_distance(body, zone_polygon))
             nose_clearance = (None if nose is None
                               else _point_polygon_distance(nose, zone_polygon))
@@ -1277,7 +1292,8 @@ def process_unit(unit: Mapping[str, Any],
             and row.get("tail_x_px") is not None else None)
         _annotate(row, matrix, width_cm, height_cm, rect, options, objects)
     segments = timeline.motion_segments(rows, window,
-                                        x_key="x_cm", y_key="y_cm")
+                                        x_key="x_cm", y_key="y_cm",
+                                        require_continuity=True)
     timeline.attach_motion(rows, segments)
     for row in rows:
         row["speed_cm_s"] = row.get("speed")

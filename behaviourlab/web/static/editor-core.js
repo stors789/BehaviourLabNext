@@ -644,6 +644,117 @@
     return Boolean(this.signature) && this.signature === previewSignature(config);
   };
 
+  // NOR 物体步骤 ↔ geometry.objects 的桥接：步骤键只用于画布，落盘仍是
+  // 恰好两个对象的 {id,name,role,center,zone} 结构。
+  const NOR_OBJECT_STEPS = {
+    object1: { index: 0, kind: "center" },
+    object2: { index: 1, kind: "center" },
+    explore1: { index: 0, kind: "zone" },
+    explore2: { index: 1, kind: "zone" },
+  };
+  const NOR_OBJECT_DEFAULTS = [
+    { id: "object_1", name: "物体 1", role: "familiar" },
+    { id: "object_2", name: "物体 2", role: "novel" },
+  ];
+
+  function norKeyShape(geometry, key) {
+    if (!geometry || !Object.prototype.hasOwnProperty.call(geometry, key)) {
+      return null;
+    }
+    const shape = geometry[key];
+    return shape ? clone(shape) : null;
+  }
+
+  function norObjects(geometry) {
+    const source = geometry ? geometry.objects : null;
+    const list = [];
+    for (let index = 0; index < 2; index += 1) {
+      const fallback = NOR_OBJECT_DEFAULTS[index];
+      let entry = null;
+      if (Array.isArray(source)) entry = source[index] || null;
+      else if (source && typeof source === "object") {
+        // 兼容早期只存两点形状的草稿。
+        const points = Array.isArray(source.points) ? source.points : [];
+        entry = points.length > index ? { center: points[index] } : null;
+      }
+      const center = entry && Array.isArray(entry.center)
+        && entry.center.length >= 2
+        ? [Number(entry.center[0]), Number(entry.center[1])] : null;
+      const valid = center && Number.isFinite(center[0]) && Number.isFinite(center[1]);
+      list.push({
+        id: entry && typeof entry.id === "string" && entry.id
+          ? entry.id : fallback.id,
+        name: entry && typeof entry.name === "string" && entry.name
+          ? entry.name : fallback.name,
+        role: entry && (entry.role === "novel" || entry.role === "familiar")
+          ? entry.role : fallback.role,
+        center: valid ? center : null,
+        zone: entry && entry.zone && Array.isArray(entry.zone.points)
+          && entry.zone.points.length >= 3 ? clone(entry.zone) : null,
+      });
+    }
+    return list;
+  }
+
+  function norShape(geometry, key) {
+    const step = NOR_OBJECT_STEPS[key];
+    if (!step) return norKeyShape(geometry, key);
+    const objects = norObjects(geometry);
+    if (step.kind === "center") {
+      const center = objects[step.index].center;
+      return center ? { type: "point", points: [[center[0], center[1]]] } : null;
+    }
+    const zone = objects[step.index].zone;
+    return zone ? clone(zone) : null;
+  }
+
+  function norApply(geometry, key, shape) {
+    if (!geometry) return;
+    const step = NOR_OBJECT_STEPS[key];
+    if (!step) {
+      // 普通步骤沿用原来的语义：清除即删除键，不留下 null 占位。
+      if (shape) geometry[key] = shape;
+      else delete geometry[key];
+      return;
+    }
+    const objects = norObjects(geometry);
+    if (step.kind === "center") {
+      const point = shape && Array.isArray(shape.points) ? shape.points[0] : null;
+      objects[step.index].center = point
+        ? [Number(point[0]), Number(point[1])] : null;
+    } else {
+      objects[step.index].zone = shape ? clone(shape) : null;
+    }
+    geometry.objects = objects;
+  }
+
+  function norClear(geometry, key) {
+    norApply(geometry, key, null);
+  }
+
+  function norSetRole(geometry, index, role, phase) {
+    if (!geometry || (index !== 0 && index !== 1)) return norObjects(geometry);
+    const objects = norObjects(geometry);
+    const value = role === "novel" ? "novel" : "familiar";
+    objects[index].role = value;
+    if (phase !== "familiarization") {
+      // 识别期：改一个角色同时把另一项设成相反角色。
+      objects[1 - index].role = value === "novel" ? "familiar" : "novel";
+    }
+    geometry.objects = objects;
+    return objects;
+  }
+
+  function norNormalizeRoles(geometry, phase) {
+    if (!geometry) return norObjects(geometry);
+    const objects = norObjects(geometry);
+    if (phase !== "familiarization" && objects[0].role === objects[1].role) {
+      objects[1].role = objects[0].role === "novel" ? "familiar" : "novel";
+    }
+    geometry.objects = objects;
+    return objects;
+  }
+
   return {
     TOOLBAR_HEIGHT,
     HANDLE_HIT_PX,
@@ -665,5 +776,11 @@
     moveEllipseCenter,
     moveRadius,
     mwmLines,
+    norObjects,
+    norShape,
+    norApply,
+    norClear,
+    norSetRole,
+    norNormalizeRoles,
   };
 });

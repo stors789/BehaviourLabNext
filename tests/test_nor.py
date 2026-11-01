@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
@@ -215,8 +217,10 @@ def test_registration_validation_preview_and_page(client, store, tmp_path,
              if item["key"] == "nor"][0]
     assert entry["label"] == "新物体识别实验 / NOR"
     assert [item["label"] for item in entry["geometry"]] == [
-        "场地四角（左上、右上、右下、左下）",
-        "物体中心（依次点击：物体 1、物体 2）", "检测遮罩"]
+        "场地四角（左上、右上、右下、左下）", "物体 1 中心", "物体 2 中心",
+        "物体 1 探索范围", "物体 2 探索范围", "检测遮罩"]
+    assert [bool(item["required"]) for item in entry["geometry"]] == [
+        True, True, True, False, False, False]
     assert entry["template_keys"] == ["arena", "arena_width_cm",
                                       "arena_height_cm"]
     assert set(entry["defaults"]) == set(nor.DEFAULTS)
@@ -331,8 +335,296 @@ def test_registration_validation_preview_and_page(client, store, tmp_path,
     assert figures["objects"]
     assert figures["trajectory"]
 
+    # objects 图必须能内联显示与附件下载，且与本次生成文件逐字节相同。
+    from pathlib import Path as _Path
+
+    run_dir = _Path(store.paths.runs) / payload["run_id"] / job["job_id"]
+    stored = (run_dir / figures["objects"]).read_bytes()
+    inline = client.get(
+        f"/runs/{payload['run_id']}/{job['job_id']}/{figures['objects']}")
+    assert inline.status_code == 200
+    assert inline.mimetype == "image/png"
+    assert inline.data[:8] == b"\x89PNG\r\n\x1a\n"
+    attachment = client.get(
+        f"/runs/{payload['run_id']}/{job['job_id']}/{figures['objects']}"
+        "?download=1")
+    assert attachment.status_code == 200
+    assert attachment.headers["Content-Disposition"].startswith("attachment")
+    assert attachment.data == inline.data == stored
+    # 轨迹/热图与 CSV 的既有通路保持可用。
+    for name in (figures["trajectory"], figures["heatmap"],
+                 "observations.csv", "bins.csv"):
+        assert client.get(
+            f"/runs/{payload['run_id']}/{job['job_id']}/{name}").status_code == 200
+    assert client.get(
+        f"/runs/{payload['run_id']}/{job['job_id']}/notes.txt").status_code == 404
+
     page = client.get(f"/results/{payload['run_id']}").get_data(as_text=True)
     for label in ("窗口时间", "有效检测时间", "缺失检测时间", "检测率",
                   "可测量运动时间", "总距离", "辨别指数", "新物体偏好指数",
                   "首次探索物体", "距离回退", "物体探索与接近范围（秒）"):
         assert label in page
+
+
+# -- 复验反例：编辑落盘结构、两种多边形距离、曝光断口、物体图下载 --------
+
+ZONE = {"type": "polygon",
+        "points": [[20.0, 24.0], [24.0, 24.0], [24.0, 26.0], [20.0, 26.0]]}
+
+
+def zone_geometry() -> dict:
+    return {
+        "arena": ARENA,
+        "objects": [
+            {"id": "object_1", "name": "物体 1", "role": "familiar",
+             "center": [22.0, 25.0], "zone": ZONE},
+            {"id": "object_2", "name": "物体 2", "role": "novel",
+             "center": [45.0, 45.0], "zone": None},
+        ],
+    }
+
+
+def body_rows(points, contours, spans=None) -> list[dict]:
+    result = []
+    for index, point in enumerate(points):
+        start, end = (spans[index] if spans else (float(index),
+                                                  float(index) + 1.0))
+        result.append({
+            "unit_id": "u" * 32, "unit_name": "小鼠 1", "frame": index,
+            "time_s": start, "source_dt_s": end - start,
+            "elapsed_s": start, "analysis_fps": 1.0,
+            "source_interval_start_s": start,
+            "source_interval_end_s": end,
+            "interval_start_s": start, "interval_end_s": end,
+            "dt_s": end - start, "in_window": True, "detected": True,
+            "x_px": float(point[0]), "y_px": float(point[1]),
+            "quality": 1.0,
+            "contour": [[float(x), float(y)] for x, y in contours[index]],
+            "missing_reason": None, "head_angle": None, "head_quality": 0.0,
+            "nose_x_px": None, "nose_y_px": None,
+            "tail_x_px": None, "tail_y_px": None,
+            "left_ear_x_px": None, "left_ear_y_px": None,
+            "right_ear_x_px": None, "right_ear_y_px": None,
+            "detection_method": "threshold",
+        })
+    return result
+
+
+def test_point_body_distance_uses_zone_not_object_center():
+    # 无轮廓：身体中心 (21,25) 在多边形内，clearance 必须是 0。
+    facts = nor.process_unit(
+        unit(geom=zone_geometry()),
+        body_rows([(21.0, 25.0)] * 2, [[], []]),
+        timeline.Window(0.0, 2.0), None)
+    second = facts["rows"][1]
+    assert second["object_1_zone_clearance_cm"] == pytest.approx(0.0, abs=TOL)
+    assert second["object_1_near"] is True
+    assert second["current_object"] == 1
+    assert facts["summary"]["object_1_exploration_s"] == pytest.approx(1.0,
+                                                                      abs=TOL)
+
+
+def test_body_polygon_distance_keeps_collinear_gap():
+    body = [(8.0, 24.0), (12.0, 24.0), (12.0, 26.0), (8.0, 26.0)]
+    facts = nor.process_unit(
+        unit(geom=zone_geometry()),
+        body_rows([(10.0, 25.0)] * 2, [body, body]),
+        timeline.Window(0.0, 2.0), None)
+    second = facts["rows"][1]
+    # 身体矩形 x∈[8,12] 与 zone x∈[20,24] 分离 8 cm，共线边不算相交。
+    assert second["object_1_zone_clearance_cm"] == pytest.approx(8.0, abs=TOL)
+    assert second["object_1_near"] is False
+    assert second["current_object"] is None
+    assert facts["summary"]["object_1_exploration_s"] == 0.0
+
+    # 真重叠仍为 0，且不因修共线分支而失效。
+    overlap = [(19.0, 24.0), (23.0, 24.0), (23.0, 26.0), (19.0, 26.0)]
+    facts = nor.process_unit(
+        unit(geom=zone_geometry()),
+        body_rows([(10.0, 25.0)] * 2, [overlap, overlap]),
+        timeline.Window(0.0, 2.0), None)
+    second = facts["rows"][1]
+    assert second["object_1_zone_clearance_cm"] == pytest.approx(0.0, abs=TOL)
+    assert second["object_1_near"] is True
+    assert second["current_object"] == 1
+
+
+def test_motion_and_exploration_do_not_cross_exposure_gap():
+    geom = geometry()
+    rows = body_rows([(10.0, 25.0), (10.0, 25.0)], [[], []],
+                     spans=[(0.0, 0.5), (1.0, 1.5)])
+    facts = nor.process_unit(unit(geom=geom), rows, timeline.Window(0.0, 2.0),
+                             None)
+    second = facts["rows"][1]
+    assert second["speed_cm_s"] is None
+    assert second["exploration_mode"] == "no_speed"
+    assert second["current_object"] is None
+    assert facts["summary"]["total_object_exploration_s"] == 0.0
+    assert facts["summary"]["measurable_motion_time_s"] == 0.0
+    assert facts["summary"]["object_2_bouts"] == 0
+    assert facts["summary"]["object_2_latency_s"] is None
+    assert [item["kind"] for item in facts["events"]] == [
+        "object_2_zone_entry"]
+
+    # 真正相接的曝光仍成段并正常探索。
+    joined = body_rows([(10.0, 25.0), (10.0, 25.0)], [[], []],
+                       spans=[(0.0, 0.5), (0.5, 1.0)])
+    solid = nor.process_unit(unit(geom=geom), joined,
+                             timeline.Window(0.0, 1.0), None)
+    assert solid["summary"]["measurable_motion_time_s"] == pytest.approx(
+        0.5, abs=TOL)
+    assert solid["summary"]["object_2_exploration_s"] == pytest.approx(
+        0.5, abs=TOL)
+
+
+def test_geometry_steps_allow_half_drawn_draft():
+    half = {"arena": ARENA, "objects": [
+        {"id": "object_1", "name": "物体 1", "role": "familiar",
+         "center": [10.0, 25.0], "zone": None},
+        {"id": "object_2", "name": "物体 2", "role": "novel",
+         "center": None, "zone": None}]}
+    # 只画好一个中心时仍可保存；最终校验要求两个中心都在。
+    assert nor.validate_unit(dict(nor.DEFAULTS), half) == []
+    assert [item["field"] for item in nor.validate_unit(
+        dict(nor.DEFAULTS), half, complete=True)] == [
+        "geometry.objects[1].center"]
+
+
+def test_editor_output_saves_previews_and_analyzes(client, store, tmp_path,
+                                                   monkeypatch):
+    """JS 编辑产物直接走保存→刷新→预览→分析，不经手写对象结构。"""
+
+    import json
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    from behaviourlab import media, preview
+    from behaviourlab.media import FrameInfo
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node 不可用")
+    script = Path(__file__).parent / "js" / "test_nor_editor.cjs"
+    result = subprocess.run([node, str(script)], capture_output=True,
+                            text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "nor-editor OK" in result.stdout
+    line = [item for item in result.stdout.splitlines()
+            if item.startswith("nor-geometry ")][0]
+    geometry = json.loads(line.split(" ", 1)[1])
+    # 画布只写 arena + 恰好两个对象，没有平行步骤键。
+    assert sorted(geometry) == ["arena", "objects"]
+    assert nor.validate_unit(dict(nor.DEFAULTS), geometry, complete=True) == []
+
+    source = tmp_path / "nor-ui.mp4"
+    source.write_bytes(b"placeholder")
+    asset = store.create_asset(
+        name="nor-ui.mp4", path=str(source), project_id=None,
+        metadata={"width": 240, "height": 240, "duration_s": 4.0,
+                  "fps": 10.0, "frame_count": 40})
+    draft = store.create_draft("nor", videos=[{
+        "asset_id": asset["id"],
+        "window": {"start_s": 0.0, "end_s": 4.0},
+        "orientation": 0, "fps_override": None, "sample_fps": 10,
+        "units": [{"id": "e" * 32, "name": "NOR 鼠", "window": None,
+                   "geometry": {}, "options": {}, "detection": {},
+                   "manual": None}],
+    }])
+
+    def save(unit_geometry):
+        return client.put(f"/api/drafts/{draft['id']}", json={"videos": [{
+            "asset_id": asset["id"],
+            "window": {"start_s": 0.0, "end_s": 4.0},
+            "orientation": 0, "fps_override": None, "sample_fps": 10,
+            "units": [{"id": "e" * 32, "name": "NOR 鼠", "window": None,
+                       "geometry": unit_geometry, "options": {},
+                       "detection": {}, "manual": None}],
+        }]})
+
+    # 只画好第一个中心也能保存（编辑未完成不挡住落盘）。
+    half = json.loads(json.dumps(geometry))
+    half["objects"][1]["center"] = None
+    assert save(half).status_code == 200
+    assert nor.validate_unit(dict(nor.DEFAULTS), half, complete=True) != []
+
+    saved = save(geometry)
+    assert saved.status_code == 200, saved.get_json()
+    reloaded = client.get(f"/api/drafts/{draft['id']}").get_json()["data"]
+    stored = reloaded["draft"]["videos"][0]["units"][0]["geometry"]
+    assert stored == geometry
+    assert client.get(
+        f"/api/drafts/{draft['id']}/validate").get_json()["data"]["issues"] == []
+
+    monkeypatch.setattr(media, "VideoSource", PreviewSource)
+    monkeypatch.setattr(
+        "behaviourlab.engine.media.probe_video",
+        lambda path: {"width": 240, "height": 240, "duration_s": 4.0,
+                      "fps": 10.0, "frame_count": 40})
+    monkeypatch.setattr(
+        preview.media, "read_frame_at_time",
+        lambda *args, **kwargs: FrameInfo(
+            image=np.full((240, 240, 3), 255, dtype=np.uint8), index=15,
+            time_s=1.5, pts=None, time_base=None, clock_source="pts"))
+
+    behavior = client.post(
+        f"/api/drafts/{draft['id']}/preview",
+        json={"asset_id": asset["id"], "unit_id": "e" * 32,
+              "time_s": 1.5, "kind": "behavior"})
+    assert behavior.status_code == 201, behavior.get_json()
+    assert behavior.get_json()["data"]["summary"]["behavior"]["mode"] == "nor"
+
+    started = client.post(f"/api/drafts/{draft['id']}/analyze")
+    assert started.status_code == 201, started.get_json()
+    payload = started.get_json()["data"]
+    job = payload["jobs"][0]
+    summary = job["manifest"]["units"][0]["summary"]
+    assert summary["total_time_s"] == pytest.approx(4.0, abs=1e-9)
+    assert [item["role"] for item in summary["objects"]] == [
+        "familiar", "novel"]
+    assert summary["objects"][0]["zone_type"] == "polygon"
+    assert summary["objects"][1]["zone_type"] == "circle"
+    assert job["manifest"]["units"][0]["figures"]["objects"]
+
+
+def test_editor_invalidates_preview_on_object_edits():
+    source = (Path(__file__).parent.parent
+              / "behaviourlab/web/static/workspace.js").read_text(
+                  encoding="utf-8")
+    # 提交几何与改角色都必须让旧预览失效，且预览前先保存。
+    commit = source.split("function commitGeometry", 1)[1].split("\n  }", 1)[0]
+    assert "invalidatePreview()" in commit
+    role = source.split("function norRoleRow", 1)[1].split("\n  }", 1)[0]
+    assert "invalidatePreview()" in role
+    assert "markDirty()" in role
+    assert "norSetRole" in role
+
+
+def test_workspace_reads_and_writes_object_steps_through_bridge():
+    source = (Path(__file__).parent.parent
+              / "behaviourlab/web/static/workspace.js").read_text(
+                  encoding="utf-8")
+    # 物体中心/探索范围不再直接读写 unit.geometry[stepKey]。
+    assert "unit.geometry[state.stepKey]" not in source
+    for marker in ("function stepShape(unit, key)",
+                   "stepShape(unit, state.stepKey)",
+                   "window.BLCore.norApply(unit.geometry, key, shape)",
+                   "window.BLCore.norClear(unit.geometry, state.stepKey)",
+                   "function norRoleRow(index)",
+                   'state.assay === "nor" && step.role === "object"'):
+        assert marker in source, marker
+
+
+def test_two_objects_near_still_explore_only_one():
+    geom = geometry(novel=(10.0, 25.0), familiar=(14.0, 25.0))
+    facts = nor.process_unit(unit(geom=geom),
+                             body_rows([(12.0, 25.0)] * 2, [[], []]),
+                             timeline.Window(0.0, 2.0), None)
+    second = facts["rows"][1]
+    assert second["object_1_near"] is True
+    assert second["object_2_near"] is True
+    # 完全相等时取列表先出现者，且只探索一个。
+    assert second["current_object"] == 1
+    assert second["object_2_exploring"] is False
+    assert facts["summary"]["total_object_exploration_s"] == pytest.approx(
+        1.0, abs=TOL)

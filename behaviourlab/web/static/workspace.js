@@ -732,13 +732,30 @@
       (target && target.options) || {});
   }
 
+  // NOR 的物体步骤存在 geometry.objects 里，画布通过同一桥接读写。
+  function stepShape(unit, key) {
+    return window.BLCore.norShape(unit ? unit.geometry : null, key);
+  }
+
+  function setStepShape(unit, key, shape) {
+    if (!unit) return;
+    if (!unit.geometry) unit.geometry = {};
+    window.BLCore.norApply(unit.geometry, key, shape);
+  }
+
+  function norObjectShapes(unit) {
+    return ["object1", "object2", "explore1", "explore2"]
+      .map((key) => stepShape(unit, key))
+      .filter(Boolean);
+  }
+
   function selectStep(key) {
     const step = geometrySteps().find((item) => item.key === key);
     if (!step) return;
     state.stepKey = key;
     const unit = currentUnit();
     const resolved = window.BLCore.resolveStep(step, effectiveOptions(unit));
-    state.editor.reset(resolved, unit && unit.geometry ? unit.geometry[key] : null);
+    state.editor.reset(resolved, stepShape(unit, key));
     syncTools();
     renderInspector();
     draw();
@@ -746,7 +763,7 @@
 
   function syncTools() {
     const unit = currentUnit();
-    const hasGeometry = Boolean(unit && unit.geometry && unit.geometry[state.stepKey]);
+    const hasGeometry = Boolean(stepShape(unit, state.stepKey));
     const hasPending = state.editor.points.length > 0;
     el.toolFinish.hidden = !state.editor.canFinish();
     el.toolUndo.disabled = !hasGeometry && !hasPending;
@@ -758,7 +775,7 @@
     if (!step) return;
     const unit = currentUnit();
     const resolved = window.BLCore.resolveStep(step, effectiveOptions(unit));
-    state.editor.reset(resolved, unit && unit.geometry ? unit.geometry[state.stepKey] : null);
+    state.editor.reset(resolved, stepShape(unit, state.stepKey));
     syncTools();
   }
 
@@ -889,10 +906,16 @@
     video.units.forEach((unit, index) => {
       if (index === state.unitIndex) return;
       Object.values(unit.geometry || {}).forEach((shape) => drawShape(shape, "#8ed7c7", 1.2, false));
+      if (state.assay === "nor") {
+        norObjectShapes(unit).forEach((shape) => drawShape(shape, "#8ed7c7", 1.2, false));
+      }
     });
     const unit = currentUnit();
     if (!unit) return;
-    const shape = unit.geometry ? unit.geometry[state.stepKey] : null;
+    if (state.assay === "nor") {
+      norObjectShapes(unit).forEach((shape) => drawShape(shape, "#8ed7c7", 1.4, false));
+    }
+    const shape = stepShape(unit, state.stepKey);
     if (shape) drawShape(shape, "#ffd26f", 2.8, true);
     if (state.assay === "mwm") drawMwmGuides(unit);
     drawEditor();
@@ -1016,8 +1039,7 @@
   function commitGeometry(geometry) {
     const unit = currentUnit();
     if (!unit) return;
-    if (!unit.geometry) unit.geometry = {};
-    unit.geometry[state.stepKey] = geometry;
+    setStepShape(unit, state.stepKey, geometry);
     markDirty();
     invalidatePreview();
     syncTools();
@@ -1033,7 +1055,7 @@
     const point = toSource(event);
     if (!point) return;
     const unit = currentUnit();
-    const existing = unit.geometry ? unit.geometry[state.stepKey] : null;
+    const existing = stepShape(unit, state.stepKey);
     if (existing) {
       const hit = state.editor.hitHandle(point, viewport().scale);
       if (!hit) {
@@ -1072,17 +1094,17 @@
     }
     const unit = currentUnit();
     if (!unit) return;
-    const shape = unit.geometry[state.stepKey];
+    const shape = stepShape(unit, state.stepKey);
     if (!shape) return;
     const hit = drag.hit;
     if (hit.kind === "vertex") {
-      unit.geometry[state.stepKey] = window.BLCore.moveVertex(shape, hit.index, point);
+      setStepShape(unit, state.stepKey, window.BLCore.moveVertex(shape, hit.index, point));
     } else if (hit.kind === "hole") {
-      unit.geometry[state.stepKey] = window.BLCore.moveHole(shape, hit.id, point);
+      setStepShape(unit, state.stepKey, window.BLCore.moveHole(shape, hit.id, point));
     } else if (hit.kind === "center") {
-      unit.geometry[state.stepKey] = window.BLCore.moveEllipseCenter(shape, point);
+      setStepShape(unit, state.stepKey, window.BLCore.moveEllipseCenter(shape, point));
     } else if (hit.kind === "radius") {
-      unit.geometry[state.stepKey] = window.BLCore.moveRadius(shape, hit.axis, point);
+      setStepShape(unit, state.stepKey, window.BLCore.moveRadius(shape, hit.axis, point));
     }
     draw();
   }
@@ -1127,10 +1149,15 @@
     const steps = geometrySteps();
     const required = steps.filter((step) => step.required);
     const optional = steps.filter((step) => !step.required);
-    const drawn = (step) => Boolean(unit.geometry && unit.geometry[step.key]);
+    const drawn = (step) => Boolean(stepShape(unit, step.key));
     const list = document.createElement("div");
     list.className = "step-list";
-    required.forEach((step) => list.append(stepRow(step, drawn(step))));
+    required.forEach((step) => {
+      list.append(stepRow(step, drawn(step)));
+      if (state.assay === "nor" && step.role === "object") {
+        list.append(norRoleRow(step.key === "object1" ? 0 : 1));
+      }
+    });
     body.append(list);
     if (optional.length) {
       const fold = document.createElement("details");
@@ -1198,6 +1225,36 @@
       canvas.focus();
     });
     return row;
+  }
+
+  function norRoleRow(index) {
+    const unit = currentUnit();
+    const wrap = document.createElement("label");
+    wrap.className = "field inline unit";
+    const caption = document.createElement("span");
+    caption.textContent = "物体 " + (index + 1) + " 角色";
+    const select = document.createElement("select");
+    [["familiar", "熟悉"], ["novel", "新奇"]].forEach(([value, text]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      select.append(option);
+    });
+    const objects = window.BLCore.norObjects(unit ? unit.geometry : null);
+    select.value = objects[index].role;
+    select.addEventListener("change", () => {
+      const target = currentUnit();
+      if (!target) return;
+      if (!target.geometry) target.geometry = {};
+      window.BLCore.norSetRole(target.geometry, index, select.value,
+        effectiveOption(target, "phase", "recognition"));
+      invalidatePreview();
+      markDirty();
+      renderInspector();
+      draw();
+    });
+    wrap.append(caption, select);
+    return wrap;
   }
 
   function renderDetectionInspector(body, unit) {
@@ -1621,6 +1678,10 @@
         target.options[param.key] = input.value;
         changed = input.value;
       }
+      if (param.key === "phase" && state.assay === "nor") {
+        if (!target.geometry) target.geometry = {};
+        window.BLCore.norNormalizeRoles(target.geometry, changed);
+      }
       invalidatePreview();
       markDirty();
       if (param.key === "mode") {
@@ -1850,7 +1911,7 @@
     if (state.view === "geometry") {
       const unit = currentUnit();
       const missing = geometrySteps().filter((step) =>
-        step.required && !(unit.geometry && unit.geometry[step.key]));
+        step.required && !stepShape(unit, step.key));
       if (missing.length) {
         selectStep(missing[0].key);
         status("缺少：" + missing[0].label, "warn");
@@ -2041,8 +2102,8 @@
     el.toolUndo.addEventListener("click", () => {
       const result = state.editor.undo();
       const unit = currentUnit();
-      if (result === "geometry" && unit) {
-        delete unit.geometry[state.stepKey];
+      if (result === "geometry" && unit && unit.geometry) {
+        window.BLCore.norClear(unit.geometry, state.stepKey);
         markDirty();
         state.previewGate.invalidate();
       } else if (result === "points") {
@@ -2054,8 +2115,9 @@
       const unit = currentUnit();
       state.editor.redraw();
       if (unit && unit.geometry) {
-        delete unit.geometry[state.stepKey];
+        window.BLCore.norClear(unit.geometry, state.stepKey);
         markDirty();
+        state.previewGate.invalidate();
       }
       renderInspector();
       draw();

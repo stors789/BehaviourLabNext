@@ -40,7 +40,8 @@ PREVIEW_NAME = re.compile(r"[0-9a-f]{32}\.(?:png|jpg|jpeg)")
 RUN_FILES = ("observations.csv", "summary.csv", "events.csv", "bins.csv",
              "frozen_job.json", "results.json", "result_manifest.json",
              "report.md")
-RUN_FIGURE = re.compile(r"[A-Za-z0-9_-]+_(?:trajectory|heatmap|activity)\.png")
+RUN_FIGURE = re.compile(
+    r"[A-Za-z0-9_-]+_(?:trajectory|heatmap|activity|objects)\.png")
 
 
 def _is_run_file(name: str) -> bool:
