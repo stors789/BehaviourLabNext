@@ -604,8 +604,8 @@
     const message = typeof issue.message === "string" ? issue.message.trim() : "";
     const name = fieldName(issue.field);
     if (message) {
-      // 后端文案已经带名称时不重复前缀，未带名称时补上“字段：原因”。
-      if (!name || message.indexOf(name) === 0) return message;
+      // 原因里已含可读字段名（句首或句中）就不再补前缀，例如“缺少封闭臂 2”。
+      if (!name || message.indexOf(name) >= 0) return message;
       return name + "：" + message;
     }
     return name || (typeof issue.field === "string" ? issue.field : "");

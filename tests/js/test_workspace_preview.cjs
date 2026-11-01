@@ -181,6 +181,7 @@ function fieldNamesFromDescriptors() {
     center_size_cm: "中心区边长",
     bin_seconds: "时间箱长度",
     arena_width_cm: "场地宽度",
+    closed_2: "封闭臂 2",
   });
 
   const zero = issueText({
@@ -196,6 +197,12 @@ function fieldNamesFromDescriptors() {
       message: "场地宽度必须 > 0" }],
   }, "保存失败");
   assert.strictEqual(named, "场地宽度必须 > 0", "名称已在文案里时不重复前缀");
+
+  const zone = issueText({
+    fields: [{ field: "videos[0].units[0].geometry.zones.closed_2",
+      message: "缺少封闭臂 2" }],
+  }, "保存失败");
+  assert.strictEqual(zone, "缺少封闭臂 2", "名称在句中也保持原样");
 
   const many = issueText({
     fields: [
