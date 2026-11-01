@@ -543,38 +543,163 @@ def test_barnes_relative_window_without_anchor_is_empty():
     assert facts["warning"] and "无法确定相对时间窗" in facts["warning"]
 
 
-# -- 探测试次与无锚点相对窗 ---------------------------------------------
+# -- 复数修正：遮罩包含语义与严格形状校验 -------------------------------
 
-def test_barnes_probe_drops_escape_fields():
-    options = {"hole_count": 3, "target_hole": "1", "trial_type": "probe",
+def test_barnes_mask_is_detection_region_not_exclusion():
+    import numpy as np
+
+    from behaviourlab import detection
+
+    disk = {"type": "ellipse", "center": [100.0, 100.0],
+            "radii": [45.0, 45.0], "angle": 0.0}
+    mask = {"type": "polygon",
+            "points": [[95, 95], [105, 95], [105, 105], [95, 105]]}
+    region, source = detection.geometry_region(
+        {"arena": disk, "mask": mask}, "barnes", {}, 200, 200)
+    assert source == "mask"
+    assert int(region[100, 100]) == 255
+    assert int(region[100, 120]) == 0
+
+    # 没有 mask 才用圆盘；统计圆盘与物理尺度不随检测区域改变。
+    arena_region, arena_source = detection.geometry_region(
+        {"arena": disk}, "barnes", {}, 200, 200)
+    assert arena_source == "arena"
+    assert int(arena_region[100, 100]) == 255
+    assert int(arena_region[100, 170]) == 0
+
+    foreground = np.zeros((200, 200), dtype=np.uint8)
+    foreground[99:102, 99:102] = 255
+    settings = {"bg_method": "threshold", "gray_threshold": 127.0,
+                "erosion_kernel": 1, "erosion_iter": 0,
+                "dilation_kernel": 5, "dilation_iter": 0,
+                "min_area": 1.0, "max_area": 1000.0,
+                "quality_threshold": 0.4}
+    candidates, reason = detection.find_candidates(foreground, region, settings)
+    assert reason is None
+    assert len(candidates) == 1
+    assert candidates[0]["center"] == pytest.approx((100.0, 100.0), abs=1e-8)
+
+
+def test_barnes_shape_validation_requires_two_dimensions():
+    holes = two_holes()
+    options = dict(barnes.DEFAULTS, hole_count=2, target_hole="1")
+
+    three_component = [{"id": "1", "center": [130, 100, 99]},
+                       {"id": "2", "center": [70, 100]}]
+    issues = barnes.validate_unit(options, geometry(three_component),
+                                  complete=True)
+    assert [item["field"] for item in issues] == ["geometry.holes[0].center"]
+
+    boolean_point = [{"id": "1", "center": [True, 100]},
+                     {"id": "2", "center": [70, 100]}]
+    issues = barnes.validate_unit(options, geometry(boolean_point),
+                                  complete=True)
+    assert [item["field"] for item in issues] == ["geometry.holes[0].center"]
+
+    mask = {"type": "ellipse", "points": [[0, 0], [4, 0], [0, 4]]}
+    issues = barnes.validate_unit(options, geometry(holes, mask=mask),
+                                  complete=True)
+    assert [item["field"] for item in issues] == ["geometry.mask"]
+
+    legal_mask = {"type": "polygon",
+                  "points": [[95, 95], [105, 95], [105, 105], [95, 105]]}
+    assert barnes.validate_unit(options, geometry(holes, mask=legal_mask),
+                                complete=True) == []
+
+    wide_center = {"type": "ellipse", "center": [100, 100, 5],
+                   "radii": [45, 45], "angle": 0}
+    issues = barnes.validate_unit(options, geometry(holes, disk=wide_center),
+                                  complete=True)
+    assert [item["field"] for item in issues] == ["geometry.arena"]
+
+    wide_points = {"type": "ellipse",
+                   "points": [[60, 55, 1], [140, 55, 1], [140, 145, 1],
+                              [100, 160, 1], [60, 145, 1]]}
+    issues = barnes.validate_unit(options, geometry(holes, disk=wide_points),
+                                  complete=True)
+    assert [item["field"] for item in issues] == ["geometry.arena"]
+
+    # 未填完的草稿仍可暂存；已提供的非法形状连保存校验都不放行。
+    assert barnes.validate_unit(options, {}) == []
+    assert [item["field"] for item in
+            barnes.validate_unit(options, {"mask": mask})] == ["geometry.mask"]
+    issues = barnes.validate_unit(options, {"mask": mask}, complete=True)
+    fields = [item["field"] for item in issues]
+    assert "geometry.mask" in fields
+    assert "geometry.arena" in fields and "geometry.holes" in fields
+
+
+# -- 复数修正：未确认入洞候选被真实离洞打断 -----------------------------
+
+def test_barnes_pending_entry_cleared_on_real_exit():
+    options = {"hole_count": 2, "target_hole": "1",
                "visit_confirm_s": 0.1, "visit_reset_s": 0.1,
-               "quality_threshold": 0.4}
-    rows = fixture_rows()
-    facts = process(rows, unit_payload=unit(options=options))
-    summary = facts["summary"]
-    assert summary["trial_type"] == "probe"
-    assert summary["escape_candidates"] == 0
-    assert not [item for item in facts["events"]
-                if item["kind"] == "escape_candidate"]
-    assert summary["total_latency_s"] is None
-    assert summary["total_errors"] is None
-    assert summary["total_path_cm"] is None
-    assert summary["total_censored"] is None
+               "quality_threshold": 0.9}
+    payload = unit(holes=two_holes(), options=options)
+    in_hole = (130, 100)
+    center = (100, 100)
+    other = (70, 100)
 
-
-def test_barnes_relative_window_without_anchor_is_empty():
-    options = {"hole_count": 3, "target_hole": "1"}
-    payload = unit(options=options)
-    payload["window"] = {"mode": "relative", "offset_s": 0.0,
-                         "duration_s": 2.0}
-    rows = rows_at([(0.0, 0.0, 0.2, None, None),
-                    (0.2, 0.2, 0.4, None, None)])
-    facts = barnes.process_unit(payload, rows, timeline.Window(0.0, 2.0), None)
+    three = rows_at([(0.0, 0.0, 0.1, in_hole, in_hole),
+                     (0.1, 0.1, 0.2, center, center),
+                     (0.2, 0.2, 0.3, in_hole, in_hole)])
+    facts = process(three, unit_payload=payload, window=(0.0, 0.3))
     summary = facts["summary"]
-    assert summary["analysis_window_start_s"] is None
-    assert summary["total_time_s"] == pytest.approx(0.0, abs=1e-8)
-    assert summary["body_coverage_percent"] is None
-    assert summary["nose_coverage_percent"] is None
-    assert summary["mean_speed_cm_s"] is None
+    assert [item for item in facts["events"]
+            if item["kind"] == "hole_visit"] == []
     assert summary["visits"] == 0
-    assert facts["warning"] and "无法确定相对时间窗" in facts["warning"]
+    assert summary["primary_latency_s"] is None
+    assert summary["primary_path_cm"] is None
+    assert summary["primary_censored"] is True
+
+    # 中间点换成另一个洞：同样不能继续累计。
+    three_other = rows_at([(0.0, 0.0, 0.1, in_hole, in_hole),
+                           (0.1, 0.1, 0.2, other, other),
+                           (0.2, 0.2, 0.3, in_hole, in_hole)])
+    facts = process(three_other, unit_payload=payload, window=(0.0, 0.3))
+    assert facts["summary"]["visits"] == 0
+    assert facts["summary"]["primary_censored"] is True
+
+    # 第 4 条仍在洞内：唯一访问从重新入洞的 .2 起算。
+    four = rows_at([(0.0, 0.0, 0.1, in_hole, in_hole),
+                    (0.1, 0.1, 0.2, center, center),
+                    (0.2, 0.2, 0.3, in_hole, in_hole),
+                    (0.3, 0.3, 0.4, in_hole, in_hole)])
+    facts = process(four, unit_payload=payload, window=(0.0, 0.4))
+    visits = [item for item in facts["events"] if item["kind"] == "hole_visit"]
+    assert [(item["time_s"], item["confirmed_s"]) for item in visits] == [
+        (0.2, 0.3)]
+    assert facts["summary"]["visits"] == 1
+    assert facts["summary"]["primary_latency_s"] == pytest.approx(0.2, abs=1e-8)
+
+
+# -- 复数修正：运动段不跨曝光断口 ---------------------------------------
+
+def test_barnes_motion_needs_continuous_exposure():
+    options = {"hole_count": 3, "target_hole": "1", "quality_threshold": 0.9,
+               "bin_seconds": 0.5}
+    payload = unit(options=options)
+    gap = rows_at([(0.0, 0.0, 0.5, (100, 100), (130, 100)),
+                   (1.0, 1.0, 2.0, (120, 100), (130, 100))])
+    facts = process(gap, unit_payload=payload, window=(0.0, 2.0))
+    summary = facts["summary"]
+    assert summary["total_distance_cm"] == pytest.approx(0.0, abs=1e-8)
+    assert summary["measurable_motion_time_s"] == pytest.approx(0.0, abs=1e-8)
+    assert summary["mean_speed_cm_s"] is None
+    assert sum(item["distance_cm"] for item in facts["bins"]) == pytest.approx(
+        0.0, abs=1e-8)
+    assert sum(item["measurable_motion_time_s"]
+               for item in facts["bins"]) == pytest.approx(0.0, abs=1e-8)
+
+    # 曝光相接时正常成段，距离与可测时长进入汇总与分箱。
+    joined = rows_at([(0.0, 0.0, 0.5, (100, 100), (130, 100)),
+                      (1.0, 0.5, 1.5, (120, 100), (130, 100))])
+    facts = process(joined, unit_payload=payload, window=(0.0, 2.0))
+    summary = facts["summary"]
+    assert summary["total_distance_cm"] == pytest.approx(20.0, abs=1e-8)
+    assert summary["measurable_motion_time_s"] == pytest.approx(1.0, abs=1e-8)
+    assert summary["mean_speed_cm_s"] == pytest.approx(20.0, abs=1e-8)
+    assert sum(item["distance_cm"] for item in facts["bins"]) == pytest.approx(
+        20.0, abs=1e-8)
+    assert sum(item["measurable_motion_time_s"]
+               for item in facts["bins"]) == pytest.approx(1.0, abs=1e-8)

@@ -383,6 +383,69 @@ async function saveFailureCarriesFieldReason() {
     "场地宽度必须 > 0", "阻断提示必须带具体字段原因");
 }
 
+// Barnes：范围说明跟随真实 preview_scope，configured 不能说成片段。
+function barnesScopeNotes() {
+  const range = previewNoteFor({
+    time_s: 12.5,
+    preview_scope: { mode: "range", start_s: 11.5, end_s: 15.5 },
+    summary: {
+      kind: "behavior",
+      detection_available: true,
+      detection: { candidates: 1, missing_reason: null },
+      behavior: {
+        mode: "barnes", total_time_s: 3.0,
+        window_start_s: 11.5, window_end_s: 14.5,
+        visits: 2, primary_latency_s: 1.2, primary_errors: 1,
+        primary_censored: false, nose_coverage_percent: 96.5,
+        visit_source: "automatic",
+      },
+    },
+    warnings: [],
+  });
+  assert.ok(range.text.includes("行为 11.50–14.50 s"), range.text);
+  assert.ok(range.text.includes("源帧 12.50 s"), range.text);
+  assert.ok(range.text.includes("当前片段 11.50–15.50 s"), range.text);
+  assert.ok(range.text.includes("片段估计，非完整行为结果"), range.text);
+
+  const configured = previewNoteFor({
+    time_s: 7.25,
+    preview_scope: { mode: "configured", start_s: 5, end_s: 10 },
+    summary: {
+      kind: "behavior",
+      detection_available: true,
+      detection: { candidates: 1, missing_reason: null },
+      behavior: {
+        mode: "barnes", total_time_s: 2.0,
+        window_start_s: 5.99997, window_end_s: 7.99997,
+        visits: 1, primary_latency_s: 0.5, primary_errors: 0,
+        primary_censored: false, nose_coverage_percent: 100.0,
+        visit_source: "manual",
+      },
+    },
+    warnings: [],
+  });
+  assert.ok(configured.text.includes("行为 6.00–8.00 s"), configured.text);
+  assert.ok(configured.text.includes("完整配置范围 5.00–10.00 s"), configured.text);
+  assert.ok(configured.text.includes("源帧 7.25 s"), configured.text);
+  assert.ok(!configured.text.includes("片段"),
+    "configured 范围不得声明为片段：" + configured.text);
+  assert.ok(configured.text.includes("人工记录"), configured.text);
+
+  const detection = previewNoteFor({
+    time_s: 3.0,
+    preview_scope: { mode: "frame", start_s: 3, end_s: 3, frame_count: 1 },
+    summary: {
+      kind: "detection",
+      detection_available: true,
+      detection: { candidates: 1, missing_reason: null },
+    },
+    warnings: [],
+  });
+  assert.ok(detection.text.includes("源帧 3.00 s"), detection.text);
+  assert.ok(detection.text.includes("单帧"), detection.text);
+  assert.ok(!detection.text.includes("片段估计"), detection.text);
+}
+
 (async () => {
   await saveRunsFirst();
   await saveFailureStopsPreview();
@@ -393,6 +456,7 @@ async function saveFailureCarriesFieldReason() {
   fieldNamesFromDescriptors();
   behaviorNote();
   mwmQuadrantGuides();
+  barnesScopeNotes();
   await saveFailureCarriesFieldReason();
   console.log("workspace-preview OK");
 })().catch((error) => {

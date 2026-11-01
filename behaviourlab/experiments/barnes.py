@@ -74,7 +74,7 @@ SPEC = {
     "geometry": [
         geometry_field("arena", "圆盘外缘", "ellipse", min_points=5),
         geometry_field("holes", "洞位", "holes", count_key="hole_count"),
-        geometry_field("mask", "遮挡区域", "polygon", min_points=3,
+        geometry_field("mask", "检测遮罩", "polygon", min_points=3,
                        optional=True),
     ],
     "metrics": [
@@ -98,7 +98,9 @@ def _finite(value: Any) -> float | None:
 
 
 def _pair(value: Any) -> tuple[float, float] | None:
-    if not isinstance(value, (list, tuple)) or len(value) < 2:
+    """源像素点/半轴必须恰好两个有限数；多余分量与布尔值都算非法。"""
+
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
         return None
     x, y = _finite(value[0]), _finite(value[1])
     if x is None or y is None:
@@ -128,10 +130,11 @@ def ellipse_params(geometry: Mapping[str, Any] | None
     center = arena.get("center")
     radii = arena.get("radii")
     if isinstance(center, (list, tuple)) and isinstance(radii, (list, tuple)):
-        cx = _finite(center[0]) if len(center) > 0 else None
-        cy = _finite(center[1]) if len(center) > 1 else None
-        rx = _finite(radii[0]) if len(radii) > 0 else None
-        ry = _finite(radii[1]) if len(radii) > 1 else None
+        # 中心与半轴都必须是恰好两个有限数，多余分量不做截断。
+        if len(center) != 2 or len(radii) != 2:
+            return None
+        cx, cy = _finite(center[0]), _finite(center[1])
+        rx, ry = _finite(radii[0]), _finite(radii[1])
         angle = _finite(arena.get("angle", 0.0))
         if None in (cx, cy, rx, ry, angle) or rx <= 0 or ry <= 0:
             return None
@@ -212,28 +215,43 @@ def validate_geometry(geometry: Mapping[str, Any] | None,
                        "message": "圆盘外缘必须是椭圆"})
     elif ellipse_params(geometry) is None:
         issues.append({"field": "geometry.arena",
-                       "message": "圆盘需要两个正半轴，或至少 5 个有限边缘点"})
+                       "message": "圆盘中心与半轴必须是两个有限数，"
+                                  "或给至少 5 个二维边缘点"})
 
     holes, hole_issues = holes_of(geometry, options.get("hole_count"))
     issues.extend(hole_issues)
-    if geometry.get("holes") is None:
+    raw_holes = geometry.get("holes")
+    if raw_holes is None:
         if require:
             issues.append({"field": "geometry.holes", "message": "缺少洞位"})
-    elif holes and target is not None \
+    elif isinstance(raw_holes, list) and holes and len(holes) == len(raw_holes) \
+            and target is not None \
             and target not in {item["id"] for item in holes}:
+        # 洞位本身有错时只报洞位，不追加目标洞的连带错误。
         issues.append({"field": "options.target_hole",
                        "message": f"目标洞 {target} 不在已标洞号中"})
 
     mask = geometry.get("mask")
     if mask is not None:
-        points = _shape_points(mask)
-        if len(points) < 3:
-            issues.append({"field": "geometry.mask",
-                           "message": "检测遮罩至少需要 3 个有限点"})
-        elif abs(_polygon_area(points)) <= 1e-9:
-            issues.append({"field": "geometry.mask",
-                           "message": "检测遮罩面积必须大于 0"})
+        issues.extend(mask_issues(mask))
     return issues
+
+
+def mask_issues(mask: Any) -> list[dict]:
+    """可选检测遮罩：本块只接受合法 polygon（二维、正面积、不自交）。"""
+
+    if not isinstance(mask, Mapping) or mask.get("type") != "polygon":
+        return [{"field": "geometry.mask", "message": "检测遮罩必须是 polygon"}]
+    points = _shape_points(mask)
+    if len(points) < 3:
+        return [{"field": "geometry.mask",
+                 "message": "检测遮罩需要至少 3 个有限二维点"}]
+    if abs(_polygon_area(points)) <= 1e-9:
+        return [{"field": "geometry.mask",
+                 "message": "检测遮罩面积必须大于 0"}]
+    if geo.polygon_self_intersects(points):
+        return [{"field": "geometry.mask", "message": "检测遮罩不能自交"}]
+    return []
 
 
 def _polygon_area(points: Sequence[Sequence[float]]) -> float:
@@ -537,7 +555,9 @@ def _visits_for(rows: Sequence[Mapping[str, Any]],
                 continue
 
             if not state.active:
-                state.outside_start = None
+                # 合格鼻尖真实离开该洞：未确认的进入候选立即作废，不能跨洞或
+                # 跨一段洞外时间继续累计。
+                state.reset_pending()
                 continue
             if state.outside_start is None:
                 state.outside_start = instant
@@ -731,8 +751,10 @@ def process_unit(unit: Mapping[str, Any], captured: Sequence[Mapping[str, Any]],
 
     segments: list[dict] = []
     if window.known:
+        # 只有相邻且真实曝光相接的合格身体点才能构成完成段；断口不补点。
         segments = timeline.motion_segments(rows, window,
-                                            x_key="motion_x", y_key="motion_y")
+                                            x_key="motion_x", y_key="motion_y",
+                                            require_continuity=True)
     timeline.attach_motion(rows, segments)
 
     manual = unit.get("manual") if isinstance(unit.get("manual"), Mapping) else {}

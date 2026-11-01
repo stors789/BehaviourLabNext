@@ -510,9 +510,27 @@
     no_candidate_within_gate: "门限内没有符合的候选",
   };
 
+  // 预览范围说明：configured 是完整配置范围，普通自动预览才是片段估计。
+  function previewFramePrefix(frameTime) {
+    return (typeof frameTime === "number" && isFinite(frameTime))
+      ? "源帧 " + frameTime.toFixed(2) + " s · " : "";
+  }
+
+  function previewScopeNote(scope) {
+    const fixed = (input) => (typeof input === "number" && isFinite(input)
+      ? input.toFixed(2) : "—");
+    if (!scope || typeof scope !== "object") return "";
+    const span = fixed(scope.start_s) + "–" + fixed(scope.end_s) + " s";
+    if (scope.mode === "frame") return "单帧检测预览（不产生行为统计）";
+    if (scope.mode === "configured") return "完整配置范围 " + span;
+    return "当前片段 " + span + "（片段估计，非完整行为结果）";
+  }
+
   function previewNoteFor(data) {
     const summary = (data && data.summary) || {};
     const detection = summary.detection || null;
+    const scope = (data && data.preview_scope) || null;
+    const frameTime = data && typeof data.time_s === "number" ? data.time_s : null;
     const warnings = (data && Array.isArray(data.warnings) ? data.warnings : [])
       .filter((text) => typeof text === "string" && text.trim());
     const lines = [];
@@ -599,11 +617,17 @@
           ? number.toFixed(1) + "%" : "—");
         const primary = behavior.primary_censored
           ? "未到达目标" : value(behavior.primary_latency_s) + " s";
-        lines.push("行为 " + value(behavior.total_time_s) + " s：访问 "
-          + count(behavior.visits) + " 次 · 首次目标 " + primary
+        const window = (behavior.window_start_s !== null
+          && behavior.window_start_s !== undefined
+          && behavior.window_end_s !== null
+          && behavior.window_end_s !== undefined)
+          ? value(behavior.window_start_s) + "–" + value(behavior.window_end_s) + " s"
+          : "未确定";
+        lines.push("行为 " + window + "：访问 " + count(behavior.visits)
+          + " 次 · 首次目标 " + primary
           + " · 错误 " + count(behavior.primary_errors)
-          + " · 鼻尖覆盖 " + percent(behavior.nose_coverage_percent)
-          + "（片段估计，非完整行为结果）");
+          + " · 鼻尖覆盖 " + percent(behavior.nose_coverage_percent));
+        lines.push(previewFramePrefix(frameTime) + previewScopeNote(scope));
         if (behavior.visit_source === "manual") {
           lines.push("访问序列来自人工记录，未使用自动鼻尖证据");
         }
@@ -629,6 +653,11 @@
       if (typeof behavior.threshold_note === "string" && behavior.threshold_note) {
         lines.push(behavior.threshold_note);
       }
+    }
+    if (summary.kind === "detection") {
+      // 检测预览只核对单帧；范围说明与行为统计无关。
+      const note = previewScopeNote(scope) || "单帧检测预览（不产生行为统计）";
+      lines.push(previewFramePrefix(frameTime) + note);
     }
     warnings.forEach((text) => lines.push(text));
     return { tone, text: lines.join("\n") };
