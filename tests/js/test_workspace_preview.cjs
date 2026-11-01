@@ -5,6 +5,7 @@ const {
   saveThenPreview,
   previewNoteFor,
   issueText,
+  setFieldLabels,
   mwmLines,
 } = require("../../behaviourlab/web/static/editor-core.js");
 
@@ -174,6 +175,48 @@ function fieldReasonsWin() {
   assert.strictEqual(fallback, "保存失败，未生成预览");
 }
 
+function fieldNamesFromDescriptors() {
+  // 界面用参数描述符的 label 登记可读名称，错误提示不再只给开发字段。
+  setFieldLabels({
+    center_size_cm: "中心区边长",
+    bin_seconds: "时间箱长度",
+    arena_width_cm: "场地宽度",
+  });
+
+  const zero = issueText({
+    message: "草稿未通过校验",
+    fields: [{ field: "videos[0].units[0].options.center_size_cm",
+      message: "必须大于 0" }],
+  }, "保存失败");
+  assert.strictEqual(zero, "中心区边长：必须大于 0", "必须补上可读字段名");
+  assert.ok(zero.indexOf("options.") < 0, "不抛裸开发字段");
+
+  const named = issueText({
+    fields: [{ field: "videos[0].units[0].options.arena_width_cm",
+      message: "场地宽度必须 > 0" }],
+  }, "保存失败");
+  assert.strictEqual(named, "场地宽度必须 > 0", "名称已在文案里时不重复前缀");
+
+  const many = issueText({
+    fields: [
+      { field: "videos[0].units[0].options.center_size_cm", message: "必须大于 0" },
+      { field: "videos[0].units[0].options.bin_seconds", message: "必须大于 0" },
+    ],
+  }, "保存失败");
+  assert.strictEqual(many, "中心区边长：必须大于 0；时间箱长度：必须大于 0");
+
+  const unknown = issueText({
+    fields: [{ field: "videos[0].units[0].mystery", message: "必须是对象" }],
+  }, "保存失败");
+  assert.strictEqual(unknown, "必须是对象", "缺少名称时仍给原因");
+
+  setFieldLabels(null);
+  assert.strictEqual(issueText({
+    fields: [{ field: "videos[0].units[0].options.center_size_cm",
+      message: "必须大于 0" }],
+  }, "保存失败"), "必须大于 0", "未登记名称时退回原有文案");
+}
+
 function behaviorNote() {
   const found = previewNoteFor({
     summary: {
@@ -254,6 +297,44 @@ function behaviorNote() {
   assert.ok(nor.text.includes("1.00 / 1.50 s"), nor.text);
   assert.ok(nor.text.includes("接近 3.00 s"), nor.text);
   assert.ok(!nor.text.includes("平台"), "NOR 不套用 MWM 标签");
+
+  const epm = previewNoteFor({
+    summary: {
+      detection_available: true,
+      detection: { candidates: 1, missing_reason: null },
+      behavior: {
+        mode: "epm", total_time_s: 0.2, open_time_s: 0.0,
+        closed_time_s: 0.1, center_time_s: 0.1,
+        total_arm_entries: 1, open_entries: 0,
+      },
+    },
+    warnings: [],
+  });
+  assert.ok(epm.text.includes("入臂 1 次（开放 0）"), epm.text);
+
+  const epmZero = previewNoteFor({
+    summary: {
+      detection_available: true,
+      detection: { candidates: 1, missing_reason: null },
+      behavior: {
+        mode: "epm", total_time_s: 0.2, open_time_s: 0.0,
+        closed_time_s: 0.0, center_time_s: 0.2,
+        total_arm_entries: 0, open_entries: 0,
+      },
+    },
+    warnings: [],
+  });
+  assert.ok(epmZero.text.includes("入臂 0 次（开放 0）"), epmZero.text);
+
+  const epmMissing = previewNoteFor({
+    summary: {
+      detection_available: true,
+      detection: { candidates: 1, missing_reason: null },
+      behavior: { mode: "epm", total_time_s: 0.2, open_time_s: 0.1 },
+    },
+    warnings: [],
+  });
+  assert.ok(epmMissing.text.includes("入臂 — 次"), "缺字段仍显示 —");
 }
 
 function mwmQuadrantGuides() {
@@ -302,6 +383,7 @@ async function saveFailureCarriesFieldReason() {
   await cleanStateSkipsSave();
   notes();
   fieldReasonsWin();
+  fieldNamesFromDescriptors();
   behaviorNote();
   mwmQuadrantGuides();
   await saveFailureCarriesFieldReason();

@@ -81,6 +81,45 @@ def _report_metrics(assay: Any) -> list[dict]:
     return list(experiments.get(assay).SPEC.get("metrics") or [])[:5]
 
 
+# 报告图形按清单里真实存在的每动物图形生成，名称与结果页一致。
+FIGURE_LABELS = (
+    ("zones", "区域时长图"),
+    ("trajectory", "轨迹图"),
+    ("heatmap", "热图"),
+    ("objects", "物体探索图"),
+    ("activity", "活动曲线"),
+)
+
+# 归属说明只在实验适用范围成立时写：EPM 没有壁区，不能套用 OFT 文案。
+ASSAY_NOTES = {
+    "oft": "中心、外围、场外三类互斥；壁区包含在外围内。",
+    "epm": "开放臂与封闭臂时间互斥；开放臂时间占总时长以窗口总时长为分母"
+           "（含缺失曝光），开放臂时间占臂区时长以开放臂时间+封闭臂时间为分母。",
+}
+
+
+def _assay_of(job: Mapping[str, Any], result: Any) -> str:
+    metadata = getattr(result, "metadata", None) or {}
+    return str(job.get("assay") or metadata.get("assay") or "").strip()
+
+
+def _manifest_figures(manifest: Mapping[str, Any]) -> tuple[list[tuple], list[tuple]]:
+    """按清单列出 (动物, [(图名, 文件名)]) 与没有图形的 (动物, 原因)。"""
+
+    listed: list[tuple] = []
+    empty: list[tuple] = []
+    for unit in manifest.get("units", []):
+        info = unit.get("figures") or {}
+        label = unit.get("unit_name") or unit.get("unit_id")
+        names = [(caption, info[key]) for key, caption in FIGURE_LABELS
+                 if isinstance(info.get(key), str) and info.get(key)]
+        if names:
+            listed.append((label, names))
+        else:
+            empty.append((label, str(info.get("note") or "未生成图形")))
+    return listed, empty
+
+
 def _report_markdown(job: Mapping[str, Any], result: Any,
                      manifest: Mapping[str, Any]) -> str:
     lines = [f"# {job.get('assay', '')} 分析报告", ""]
@@ -101,20 +140,29 @@ def _report_markdown(job: Mapping[str, Any], result: Any,
         cells = [str(row.get("unit_name") or row.get("unit_id"))]
         cells.extend(_fmt(row.get(item["key"])) for item in metrics)
         lines.append("| " + " | ".join(cells) + " |")
+    note = ASSAY_NOTES.get(_assay_of(job, result))
+    if note:
+        lines.extend(["", note])
     if result.warnings:
         lines.extend(["", "## 警告", ""])
         lines.extend(f"- {text}" for text in result.warnings)
-    lines.extend(["", "中心、外围、场外三类互斥；壁区包含在外围内。"])
+
+    listed, empty = _manifest_figures(manifest)
     lines.extend(["", "## 图形", ""])
-    for unit in manifest.get("units", []):
-        info = unit.get("figures") or {}
-        label = unit.get("unit_name") or unit.get("unit_id")
-        names = [name for name in (info.get("trajectory"), info.get("heatmap"),
-                                   info.get("activity")) if name]
-        if names:
-            lines.append(f"- {label}：" + "、".join(names))
-        else:
-            lines.append(f"- {label}：" + str(info.get("note") or "未生成图形"))
+    if not listed:
+        lines.append("本次运行没有生成图形。")
+    for label, names in listed:
+        lines.append(f"- {label}：" + "、".join(
+            f"{caption}（{name}）" for caption, name in names))
+    for label, reason in empty:
+        lines.append(f"- {label}：{reason}")
+    if listed:
+        # 引用同目录的实际文件，图片地址与清单条目一一对应。
+        lines.extend(["", "图片（与本报告同一目录）：", ""])
+        for label, names in listed:
+            for caption, name in names:
+                lines.append(f"![{label} · {caption}]({name})")
+
     lines.extend(["", "## 文件", ""])
     lines.extend(f"- {name}" for name in manifest.get("files", []))
     return "\n".join(lines) + "\n"

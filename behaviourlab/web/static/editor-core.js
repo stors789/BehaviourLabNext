@@ -583,12 +583,38 @@
     return { tone, text: lines.join("\n") };
   }
 
+  // 字段路径本身是开发用语，界面用描述符登记的名称（如“中心区边长”）。
+  let FIELD_LABELS = null;
+
+  function setFieldLabels(labels) {
+    FIELD_LABELS = labels && typeof labels === "object" ? labels : null;
+  }
+
+  function fieldName(field) {
+    const path = typeof field === "string" ? field : "";
+    const key = path ? path.split(".").pop() : "";
+    if (!key || !FIELD_LABELS) return "";
+    if (!Object.prototype.hasOwnProperty.call(FIELD_LABELS, key)) return "";
+    const label = FIELD_LABELS[key];
+    return typeof label === "string" ? label : "";
+  }
+
+  function issueLine(issue) {
+    if (!issue) return "";
+    const message = typeof issue.message === "string" ? issue.message.trim() : "";
+    const name = fieldName(issue.field);
+    if (message) {
+      // 后端文案已经带名称时不重复前缀，未带名称时补上“字段：原因”。
+      if (!name || message.indexOf(name) === 0) return message;
+      return name + "：" + message;
+    }
+    return name || (typeof issue.field === "string" ? issue.field : "");
+  }
+
   // 校验失败优先展示字段级原因；通用文案只在没有具体字段时兜底。
   function issueText(error, fallback) {
     const issues = error && Array.isArray(error.fields) ? error.fields : [];
-    const messages = issues
-      .map((issue) => (issue && (issue.message || issue.field)) || "")
-      .filter((text) => text);
+    const messages = issues.map(issueLine).filter((text) => text);
     if (messages.length) return messages.join("；");
     return (error && error.message) || fallback || "请求失败";
   }
@@ -816,6 +842,7 @@
     previewSignature,
     previewNoteFor,
     issueText,
+    setFieldLabels,
     saveThenPreview,
     stableStringify,
     resolveStep,

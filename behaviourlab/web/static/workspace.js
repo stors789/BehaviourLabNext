@@ -712,6 +712,31 @@
     return state.catalog.find((item) => item.key === state.assay) || null;
   }
 
+  // 参数与几何描述符的 label 是界面唯一可读名称来源；错误提示据此补字段名，
+  // 用户看到“中心区边长：必须大于 0”而不是 options.center_size_cm。
+  function registerFieldLabels() {
+    const labels = {};
+    const current = assaySpec();
+    const ordered = current
+      ? [current].concat(state.catalog.filter((item) => item !== current))
+      : state.catalog;
+    ordered.forEach((item) => {
+      (item.parameters || []).forEach((param) => {
+        if (!param || !param.key || !param.label) return;
+        if (!(param.key in labels)) labels[param.key] = param.label;
+      });
+      (item.geometry || []).forEach((step) => {
+        if (!step || !step.key || !step.label) return;
+        if (step.key in labels) return;
+        const name = step.label.replace(/(四角|范围)$/, "").trim();
+        labels[step.key] = name || step.label;
+      });
+    });
+    if (typeof window.BLCore.setFieldLabels === "function") {
+      window.BLCore.setFieldLabels(labels);
+    }
+  }
+
   function geometrySteps() {
     const spec = assaySpec();
     return spec ? spec.geometry || [] : [];
@@ -2335,6 +2360,7 @@
         status(error.message, "error");
       }
     }
+    registerFieldLabels();
     const entry = history.state && history.state.analysis;
     if (entry && entry.draftId === state.draftId) {
       state.videoIndex = Number.isInteger(entry.video) ? entry.video : 0;

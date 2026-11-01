@@ -251,6 +251,11 @@ def test_registration_validation_preview_and_page(client, store, tmp_path,
     behavior_data = behavior.get_json()["data"]
     assert behavior_data["summary"]["behavior"]["mode"] == "epm"
     assert behavior_data["summary"]["missing_steps"] == []
+    # 预览直接返回核心 summary 的总入臂次数，界面不再自己加一遍。
+    behavior_summary = behavior_data["summary"]["behavior"]
+    assert behavior_summary["total_arm_entries"] == (
+        behavior_summary["open_entries"] + behavior_summary["closed_entries"])
+    assert behavior_summary["total_arm_entries"] >= 1
 
     started = client.post(f"/api/drafts/{draft['id']}/analyze")
     assert started.status_code == 201, started.get_json()

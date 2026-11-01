@@ -85,6 +85,21 @@ def test_save_failures_show_field_reasons():
     assert "    issueText," in core
 
 
+def test_error_text_registers_readable_field_names():
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    # 描述符 label 登记到错误格式化层，折叠参数区外也能看见字段名。
+    assert "registerFieldLabels()" in source
+    assert "window.BLCore.setFieldLabels(labels)" in source
+    assert "param.label" in source
+
+    core = (ROOT / "behaviourlab/web/static/editor-core.js").read_text(
+        encoding="utf-8")
+    assert "function setFieldLabels(labels)" in core
+    assert "setFieldLabels," in core
+    assert "function issueLine(issue)" in core
+
+
 def test_tst_preview_modes_and_output_toggle():
     source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
         encoding="utf-8")

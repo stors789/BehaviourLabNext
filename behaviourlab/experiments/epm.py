@@ -693,7 +693,12 @@ def process_unit(unit: Mapping[str, Any],
                  "center size / arm width); not a perspective correction",
         "cm_per_px_est": scale,
         "zone_priority": list(ZONE_KEYS),
-        "occupancy_denominator": "observed duration",
+        # 两个开放臂占比的分母不同：占总时长含缺失曝光，占臂区只算两臂时间。
+        "occupancy_denominator": {
+            "open_time_percent_total": "total_time_s (window duration, "
+                                       "includes missing exposure)",
+            "open_time_percent_arms_only": "open_time_s + closed_time_s",
+        },
         "mean_speed_denominator": "measurable completed motion duration",
         "center_reset": "reset after entry_reset_center_s of real center "
                         "observations; missing aborts the center timer",
@@ -892,6 +897,8 @@ def preview_analysis(*, asset: Mapping[str, Any], video: Mapping[str, Any],
         "center_time_s": summary["center_time_s"],
         "open_entries": summary["open_entries"],
         "closed_entries": summary["closed_entries"],
+        # 与核心 summary 同源，界面不再自己加一遍计数。
+        "total_arm_entries": summary["total_arm_entries"],
         "total_distance_cm": summary["total_distance_cm"],
         "mean_speed_cm_s": summary["mean_speed_cm_s"],
         "cm_per_px_est": summary["cm_per_px_est"],
