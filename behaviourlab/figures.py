@@ -277,6 +277,51 @@ def mwm_heatmap_png(path: str | Path,
     return True
 
 
+def nor_objects_png(path: str | Path, summary: Mapping[str, Any], *,
+                    title: str = "",
+                    style: Mapping[str, Any] | None = None) -> bool:
+    """每个物体的探索与接近范围时长（秒）；没有物体数据不出图。"""
+
+    objects = summary.get("objects")
+    if not isinstance(objects, list) or not objects:
+        return False
+    color, _, _, dpi = _style(style)
+    labels: list[str] = []
+    explore: list[float] = []
+    zone: list[float] = []
+    for item in objects:
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("name") or item.get("id") or "")
+        role = ("新奇" if item.get("role") == "novel"
+                else "熟悉" if item.get("role") == "familiar" else "")
+        labels.append(f"{name}\n{role}" if role else name)
+        explore.append(_finite(item.get("exploration_s")) or 0.0)
+        zone.append(_finite(item.get("zone_time_s")) or 0.0)
+    if not labels:
+        return False
+    figure = Figure(figsize=(4.2, 2.8))
+    FigureCanvasAgg(figure)
+    axes = figure.add_subplot(111)
+    positions = list(range(len(labels)))
+    breadth = 0.34 if len(labels) > 1 else 0.26
+    axes.bar([value - breadth / 2 for value in positions], explore, breadth,
+             color=color, label="探索")
+    axes.bar([value + breadth / 2 for value in positions], zone, breadth,
+             color="#6F8F7C", label="接近范围")
+    axes.set_xticks(positions)
+    axes.set_xticklabels(labels, fontsize=8)
+    axes.set_ylabel("s")
+    axes.spines["top"].set_visible(False)
+    axes.spines["right"].set_visible(False)
+    axes.legend(fontsize=8, frameon=False)
+    if title:
+        axes.set_title(title, fontsize=9, color="#333333")
+    figure.tight_layout()
+    figure.savefig(path, format="png", dpi=dpi)
+    return True
+
+
 def center_rect_for(summary: Mapping[str, Any]) -> tuple[float, float, float, float] | None:
     width = _finite(summary.get("arena_width_cm"))
     height = _finite(summary.get("arena_height_cm"))

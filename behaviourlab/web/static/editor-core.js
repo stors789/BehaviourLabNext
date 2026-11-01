@@ -551,6 +551,15 @@
           + count(behavior.platform_entries) + " 次 / 平台 "
           + value(behavior.platform_time_s) + " s / 路径 "
           + value(behavior.total_distance_cm) + " cm");
+      } else if (behavior.mode === "nor") {
+        const count = (number) => (typeof number === "number" && isFinite(number)
+          ? number.toFixed(2) : "—");
+        lines.push("行为 " + value(behavior.total_time_s) + " s：探索 "
+          + value(behavior.total_object_exploration_s) + " s（"
+          + count(behavior.object_1_exploration_s) + " / "
+          + count(behavior.object_2_exploration_s) + " s）· 接近 "
+          + count((Number(behavior.object_1_zone_time_s) || 0)
+            + (Number(behavior.object_2_zone_time_s) || 0)) + " s");
       } else {
         lines.push("行为 " + value(behavior.total_time_s) + " s：非挣扎 "
           + value(behavior.immobility_time_s) + " / 挣扎 "

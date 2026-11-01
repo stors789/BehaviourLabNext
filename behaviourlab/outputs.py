@@ -134,12 +134,13 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
     """每动物可用图形：活动曲线不依赖场地宽高，轨迹/热图才需要。"""
 
     figures_info: dict[str, Any] = {"stem": stem, "trajectory": None,
-                                    "heatmap": None, "activity": None}
+                                    "heatmap": None, "activity": None,
+                                    "objects": None}
     name = str(summary.get("unit_name") or summary.get("unit_id") or "")
     notes: list[str] = []
 
-    state_based = (any(row.get("state") for row in rows)
-                   or "immobility_time_s" in summary)
+    # 只有真的带最终状态的实验才画活动曲线，不按汇总字段猜。
+    state_based = any(row.get("state") for row in rows)
     if state_based:
         activity = f"{stem}_activity.png"
         try:
@@ -225,6 +226,15 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
     elif figures_info["activity"] is None:
         notes.append("没有可用的场地尺寸，未生成图形")
 
+    if isinstance(summary.get("objects"), list) and summary["objects"]:
+        objects_figure = f"{stem}_objects.png"
+        try:
+            if figures.nor_objects_png(target / objects_figure, summary,
+                                       title=name, style=style):
+                figures_info["objects"] = objects_figure
+        except (OSError, ValueError) as error:
+            notes.append(f"物体探索图生成失败：{error}")
+
     if notes:
         figures_info["note"] = "；".join(notes)
     return figures_info
@@ -265,7 +275,7 @@ def export_result(directory: str | Path, job: Mapping[str, Any],
                 if item.get("unit_id") == unit_id]
         stem = figure_stem(row, used)
         info = _unit_figures(target, row, rows, stem, style)
-        for key in ("trajectory", "heatmap", "activity"):
+        for key in ("trajectory", "heatmap", "activity", "objects"):
             if info.get(key):
                 files.append(info[key])
         units.append({"unit_id": unit_id, "unit_name": row.get("unit_name"),

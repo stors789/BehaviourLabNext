@@ -139,6 +139,33 @@ def _draw_guides(canvas, assay: str, options: Mapping[str, Any],
                  unit_geometry: Mapping[str, Any], thickness: int) -> None:
     import cv2
 
+    if assay == "nor":
+        # 物体中心与自定义探索范围画在同一画布，角色随标签显示。
+        entries = experiments.get("nor").object_entries(
+            unit_geometry.get("objects")) or []
+        for index, item in enumerate(entries, start=1):
+            if not isinstance(item, Mapping):
+                continue
+            zone = item.get("zone")
+            if isinstance(zone, Mapping) and zone.get("points"):
+                _draw_shape(canvas, zone, _bgr("#b45f45"), thickness)
+            center = item.get("center")
+            if not (isinstance(center, (list, tuple)) and len(center) >= 2):
+                continue
+            point = (int(round(float(center[0]))),
+                     int(round(float(center[1]))))
+            cv2.circle(canvas, point, 10, _bgr("#1c5f9e"), 1, cv2.LINE_AA)
+            role = ("新奇" if item.get("role") == "novel"
+                    else "熟悉" if item.get("role") == "familiar" else "")
+            label = f"O{index}" + (f" {role}" if role else "")
+            width = int(canvas.shape[1])
+            label_x = point[0] + 12
+            if label_x + 8 * len(label) > width - 4:
+                label_x = max(2, point[0] - 12 - 8 * len(label))
+            cv2.putText(canvas, label, (label_x, max(12, point[1] - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, _bgr("#1c5f9e"), 1,
+                        cv2.LINE_AA)
+        return
     if assay not in ("mwm", "ezm"):
         return
     if assay == "mwm":

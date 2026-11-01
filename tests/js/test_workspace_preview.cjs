@@ -237,6 +237,23 @@ function behaviorNote() {
   assert.ok(mwm.text.includes("平台 2.00 s"), mwm.text);
   assert.ok(mwm.text.includes("路径 30.00 cm"), mwm.text);
   assert.ok(!mwm.text.includes("不动 "), "MWM 不套用 FST 标签");
+
+  const nor = previewNoteFor({
+    summary: {
+      detection_available: true,
+      detection: { candidates: 1, missing_reason: null },
+      behavior: {
+        mode: "nor", total_time_s: 4.0, total_object_exploration_s: 2.5,
+        object_1_exploration_s: 1.0, object_2_exploration_s: 1.5,
+        object_1_zone_time_s: 1.5, object_2_zone_time_s: 1.5,
+      },
+    },
+    warnings: [],
+  });
+  assert.ok(nor.text.includes("探索 2.50 s"), nor.text);
+  assert.ok(nor.text.includes("1.00 / 1.50 s"), nor.text);
+  assert.ok(nor.text.includes("接近 3.00 s"), nor.text);
+  assert.ok(!nor.text.includes("平台"), "NOR 不套用 MWM 标签");
 }
 
 function mwmQuadrantGuides() {
