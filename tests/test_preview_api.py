@@ -621,8 +621,8 @@ def test_dark_visible_change_clears_evidence(client, store, tmp_path, monkeypatc
         "orientation": 0, "fps_override": None, "sample_fps": None,
         "units": [{
             "id": "c" * 32, "name": "小鼠 1", "window": None,
-            "geometry": {"light": light, "dark": dark},
-            "options": {"dark_visible": True},
+            "geometry": {"zones": {"light": light, "dark": dark}},
+            "options": {"dark_box_visible": True},
             "detection": {"min_area": 20.0, "max_area": 20000.0,
                           "quality_threshold": 0.0,
                           "erosion_iter": 0, "dilation_iter": 0},
@@ -650,75 +650,7 @@ def test_dark_visible_change_clears_evidence(client, store, tmp_path, monkeypatc
 
     record = client.get(f"/api/drafts/{draft['id']}").get_json()["data"]["draft"]
     videos = record["videos"]
-    videos[0]["units"][0]["options"]["dark_visible"] = False
-    saved = client.put(f"/api/drafts/{draft['id']}", json={"videos": videos})
-    assert saved.status_code == 200, saved.get_json()
-
-    second = np.full((120, 160, 3), 255, dtype=np.uint8)
-    cv2.rectangle(second, (16, 28), (55, 51), (0, 0, 0), -1)
-    monkeypatch.setattr(
-        preview.media, "read_frame_info",
-        lambda *args, **kwargs: FrameInfo(image=second, index=1, time_s=0.04,
-                                          pts=1, time_base=None,
-                                          clock_source="pts"))
-    switched = client.post(
-        f"/api/drafts/{draft['id']}/preview",
-        json={"asset_id": asset["id"], "unit_id": "c" * 32,
-              "frame_index": 1, "kind": "detection"},
-    )
-    assert switched.status_code == 201, switched.get_json()
-    detected = switched.get_json()["data"]["summary"]["detection"]
-    assert detected["missing_reason"] is None
-    assert abs(detected["center"][0] - 35.0) <= 1.0
-    assert abs(detected["center"][1] - 40.0) <= 1.0
-
-
-def test_dark_visible_change_clears_evidence(client, store, tmp_path, monkeypatch):
-    source = tmp_path / "ldb.mp4"
-    source.write_bytes(b"placeholder")
-    asset = store.create_asset(
-        name="明暗.mp4", path=str(source), project_id=None,
-        metadata={"width": 160, "height": 120, "duration_s": 10.0,
-                  "fps": 25.0, "frame_count": 250},
-    )
-    light = {"type": "quad", "points": [[10, 10], [150, 10], [150, 110], [10, 110]]}
-    dark = {"type": "quad", "points": [[120, 10], [150, 10], [150, 110], [120, 110]]}
-    draft = store.create_draft("ldb", videos=[{
-        "asset_id": asset["id"],
-        "window": {"start_s": 0, "end_s": None},
-        "orientation": 0, "fps_override": None, "sample_fps": None,
-        "units": [{
-            "id": "c" * 32, "name": "小鼠 1", "window": None,
-            "geometry": {"light": light, "dark": dark},
-            "options": {"dark_visible": True},
-            "detection": {"min_area": 20.0, "max_area": 20000.0,
-                          "quality_threshold": 0.0,
-                          "erosion_iter": 0, "dilation_iter": 0},
-            "manual": None,
-        }],
-    }])
-
-    first = np.full((120, 160, 3), 255, dtype=np.uint8)
-    cv2.rectangle(first, (30, 30), (39, 39), (0, 0, 0), -1)
-    monkeypatch.setattr(
-        preview.media, "read_frame_info",
-        lambda *args, **kwargs: FrameInfo(image=first, index=0, time_s=0.0,
-                                          pts=0, time_base=None,
-                                          clock_source="pts"))
-    opened = client.post(
-        f"/api/drafts/{draft['id']}/preview",
-        json={"asset_id": asset["id"], "unit_id": "c" * 32,
-              "frame_index": 0, "kind": "detection"},
-    )
-    assert opened.status_code == 201, opened.get_json()
-    accepted = opened.get_json()["data"]["summary"]["detection"]
-    assert accepted["missing_reason"] is None
-    assert abs(accepted["quality"] - 1.0) <= 1e-9
-    assert accepted["center"][0] < 60.0
-
-    record = client.get(f"/api/drafts/{draft['id']}").get_json()["data"]["draft"]
-    videos = record["videos"]
-    videos[0]["units"][0]["options"]["dark_visible"] = False
+    videos[0]["units"][0]["options"]["dark_box_visible"] = False
     saved = client.put(f"/api/drafts/{draft['id']}", json={"videos": videos})
     assert saved.status_code == 200, saved.get_json()
 

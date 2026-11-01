@@ -96,6 +96,8 @@ ASSAY_NOTES = {
     "oft": "中心、外围、场外三类互斥；壁区包含在外围内。",
     "epm": "开放臂与封闭臂时间互斥；开放臂时间占总时长以窗口总时长为分母"
            "（含缺失曝光），开放臂时间占臂区时长以开放臂时间+封闭臂时间为分母。",
+    "ldb": "明室、暗室、门区与未知互斥，比例分母为窗口总时长；不可见暗室下"
+           "失检曝光按推断暗室计入暗室时间，同时计入缺失，二者不相加。",
 }
 
 
@@ -309,8 +311,8 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
 
     if missing_size_note and not any(
             figures_info.get(key) for key in ("zones", "objects", "sequence")):
-        # Y 迷宫没有场地宽高，是否出图由序列图自己说明，不写成缺尺寸。
-        if str(summary.get("mode")) != "ymaze":
+        # Y 迷宫 / LDB 不用场地宽高描述图形空态，是否出图由各自逻辑说明。
+        if str(summary.get("mode")) not in ("ymaze", "ldb"):
             notes.append("没有可用的场地尺寸，未生成图形")
 
     if isinstance(summary.get("objects"), list) and summary["objects"]:

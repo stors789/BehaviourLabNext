@@ -811,7 +811,13 @@
 
   function geometrySteps() {
     const spec = assaySpec();
-    return spec ? spec.geometry || [] : [];
+    const steps = spec ? spec.geometry || [] : [];
+    if (state.assay !== "ldb") return steps;
+    // 不可见暗室隐藏绘图步骤，但不删除已绘制的几何。
+    const visible = effectiveOptions(currentUnit()).dark_box_visible;
+    return visible === false
+      ? steps.filter((step) => step.key !== "dark")
+      : steps;
   }
 
   function currentSpec() {
@@ -1430,6 +1436,16 @@
     }
 
     const steps = geometrySteps();
+    if (!steps.some((step) => step.key === state.stepKey)) {
+      // 当前步骤被隐藏（如 LDB 关闭暗室可见）时回到第一个步骤。
+      state.stepKey = steps.length ? steps[0].key : null;
+      const first = steps[0];
+      if (first) {
+        state.editor.reset(window.BLCore.resolveStep(first, effectiveOptions(unit)),
+                           stepShape(unit, first.key));
+        syncTools();
+      }
+    }
     const required = steps.filter((step) => step.required);
     const optional = steps.filter((step) => !step.required);
     const drawn = (step) => Boolean(stepShape(unit, step.key));
@@ -1996,6 +2012,11 @@
         state.recordMode = changed === "manual";
         if (state.recordMode) state.view = "geometry";
         renderTasknav();
+      }
+      if (param.key === "dark_box_visible" && state.assay === "ldb") {
+        // 可见性切换立即改变几何步骤与检测区域，废弃预览并重选步骤。
+        ensureContext();
+        state.view = "geometry";
       }
       refreshEditorSpec();
       renderInspector();

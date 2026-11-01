@@ -299,17 +299,20 @@ def geometry_region(geometry: Mapping[str, Any] | None, assay: str,
         return rasterize_shape(explicit, width, height), "mask"
 
     if assay == "ldb":
-        light = geometry.get("light")
+        zones = geometry.get("zones")
+        if not isinstance(zones, Mapping):
+            zones = {key: geometry.get(key) for key in ("light", "dark", "door")}
+        light = zones.get("light")
         if not isinstance(light, Mapping):
             raise DetectionError("缺少明室区域")
         region = rasterize_shape(light, width, height)
-        dark = geometry.get("dark")
-        if options.get("dark_visible") and isinstance(dark, Mapping):
-            rasterize_shape(dark, width, height, region)
+        source = "light"
+        # 可见模式才把暗室纳入检测范围；不可见时只看明室，失检由评分层推断。
+        if options.get("dark_box_visible") and isinstance(zones.get("dark"),
+                                                          Mapping):
+            rasterize_shape(zones["dark"], width, height, region)
             source = "light+dark"
-        else:
-            source = "light"
-        door = geometry.get("door")
+        door = zones.get("doorway") or zones.get("door")
         if isinstance(door, Mapping) and _shape_points(door):
             cv2.fillPoly(region, [np.array(_shape_points(door), dtype=np.int32)], 0)
         return region, source

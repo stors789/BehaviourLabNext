@@ -386,7 +386,7 @@ def create_preview(
                 session_key, unit.get("id") or id(unit),
                 image=info.image, region=region, settings=settings,
                 signature=observation.signature_of(
-                    geometry, settings, bool(options.get("dark_visible"))),
+                    geometry, settings, bool(options.get("dark_box_visible"))),
                 assay=draft["assay"], frame_index=info.index,
                 time_s=float(info.time_s),
                 foreground=detector.foreground(info.image),

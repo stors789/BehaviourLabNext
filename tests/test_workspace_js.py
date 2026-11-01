@@ -255,3 +255,20 @@ def test_slider_jump_reads_target_before_stopping():
         assert block.index("const target = Number(el.frameRange.value);") \
             < block.index("stopPlayback()")
         assert "loadFrame(target)" in block
+
+
+def test_ldb_geometry_steps_follow_visibility():
+    source = (ROOT / "behaviourlab/web/static/workspace.js").read_text(
+        encoding="utf-8")
+    steps = source.split("function geometrySteps()", 1)[1].split("\n  }", 1)[0]
+    # 不可见暗室隐藏绘图步骤，但不删除已绘制几何。
+    assert 'state.assay !== "ldb"' in steps
+    assert 'step.key !== "dark"' in steps
+    assert "effectiveOptions(currentUnit()).dark_box_visible" in steps
+    # 可见性切换立即重选步骤（暗室步骤隐藏时回到第一步）。
+    toggle = source.split('param.key === "dark_box_visible"', 1)[1].split(
+        "\n      }", 1)[0]
+    assert "ensureContext();" in toggle
+    inspector = source.split("const steps = geometrySteps();", 1)[1].split(
+        "const required = steps.filter", 1)[0]
+    assert "steps.some((step) => step.key === state.stepKey)" in inspector

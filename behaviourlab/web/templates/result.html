@@ -798,6 +798,115 @@
     <p class="muted">入臂由候选关联与真实时间确认自动判定；距离与速度为手画尺寸的估计值（cm_estimated）。</p>
     {% endif %}
 
+    {% elif assay == "ldb" %}
+    <div class="metric-grid">
+      {{ metric("明室时间", num(s.light_time_s, 3), "s") }}
+      {{ metric("暗室时间", num(s.dark_time_s, 3), "s") }}
+      {{ metric("门区时间", num(s.doorway_time_s, 3), "s") }}
+      {{ metric("明室时间比例", num(s.light_time_percent, 1), "%") }}
+      {{ metric("暗室时间比例", num(s.dark_time_percent, 1), "%") }}
+      {{ metric("初始主室", "明室" if s.initial_chamber == "light" else ("暗室" if s.initial_chamber == "dark" else "—")) }}
+    </div>
+
+    <details class="fold">
+      <summary>全部指标</summary>
+      <div class="fold-body">
+        <table class="simple-table">
+          <tbody>
+            <tr><th>主室</th><td>
+              初始 {{ "明室" if s.initial_chamber == "light" else ("暗室" if s.initial_chamber == "dark" else "—") }}
+              {% if s.initial_chamber_time_s is not none %}（起点 {{ num(s.initial_chamber_time_s, 3) }} s，
+              {{ "推断" if s.initial_chamber_evidence == "inferred_absent" else "检测" }}）{% endif %} ·
+              转换 {{ s.total_transitions }} 次 · 进入明室 {{ s.light_entries }} 次 /
+              进入暗室 {{ s.dark_entries }} 次 ·
+              首次进入明室潜伏期 {{ num(s.first_light_latency_s, 3) }} s
+            </td></tr>
+            <tr><th>时间</th><td>
+              窗口 {{ num(s.total_time_s, 3) }} s · 检测 {{ num(s.observed_time_s, 3) }} s ·
+              缺失 {{ num(s.missing_time_s, 3) }} s · 未知 {{ num(s.unknown_time_s, 3) }} s
+            </td></tr>
+            {% if s.dark_box_visible == false %}
+            <tr><th>推断</th><td>
+              推断暗室 {{ num(s.inferred_dark_time_s, 3) }} s（与缺失是同一时间的不同事实，不相加）
+            </td></tr>
+            {% endif %}
+            {% if s.coordinate_unit == "cm" %}
+            <tr><th>运动</th><td>
+              总距离 {{ num(s.total_distance_cm, 3) }} cm ·
+              平均速度 {{ num(s.mean_speed_cm_s, 3) }} / 最大 {{ num(s.max_speed_cm_s, 3) }} cm/s ·
+              移动 {{ num(s.moving_time_s, 3) }} s / 静止 {{ num(s.immobility_time_s, 3) }} s ·
+              可测 {{ num(s.measurable_motion_time_s, 3) }} s
+            </td></tr>
+            {% elif s.coordinate_unit == "px" %}
+            <tr><th>运动（px）</th><td>
+              总距离 {{ num(s.total_distance_px, 3) }} px ·
+              平均速度 {{ num(s.mean_speed_px_s, 3) }} / 最大 {{ num(s.max_speed_px_s, 3) }} px/s ·
+              可测 {{ num(s.measurable_motion_time_s, 3) }} s
+            </td></tr>
+            {% else %}
+            <tr><th>位置</th><td>不可见暗室：不输出全场距离或速度。</td></tr>
+            {% endif %}
+            <tr><th>参数</th><td>
+              暗室可见 {{ "是" if s.dark_box_visible else "否" }} ·
+              开门延迟 {{ num(s.door_open_delay_s, 2) }} s ·
+              转换确认 {{ num(s.transition_min_dwell_s, 2) }} s ·
+              门区重置 {{ num(s.doorway_reset_s, 2) }} s ·
+              明室 {{ num(s.light_box_length_cm, 1) }}×{{ num(s.light_box_width_cm, 1) }} cm ·
+              暗室 {{ num(s.dark_box_length_cm, 1) }}×{{ num(s.dark_box_width_cm, 1) }} cm ·
+              公共边 {{ num(s.shared_edge_length_cm, 1) }} cm ·
+              移动阈值 {{ num(s.movement_threshold_cm_s, 2) }} cm/s ·
+              箱宽 {{ num(s.bin_seconds, 2) }} s
+            </td></tr>
+            <tr><th>窗口</th><td>
+              {% if s.analysis_window_start_s is not none %}
+              {{ num(s.analysis_window_start_s, 3) }}–{{ num(s.analysis_window_end_s, 3) }} s
+              {% else %}未确定{% endif %}
+            </td></tr>
+          </tbody>
+        </table>
+        {% set unit_bins = (entry.result.bins or []) | selectattr("unit_id", "equalto", s.unit_id) | list %}
+        {% if unit_bins %}
+        <table class="simple-table">
+          <thead>
+            <tr><th>箱</th><th>时间（s）</th><th>明</th><th>暗</th><th>门区</th><th>未知</th><th>检测</th><th>缺失</th><th>初始</th><th>转换</th><th>距离</th><th>均速</th></tr>
+          </thead>
+          <tbody>
+            {% for b in unit_bins %}
+            <tr>
+              <td>{{ b.bin_index }}</td>
+              <td>{{ num(b.start_s, 2) }}–{{ num(b.end_s, 2) }}</td>
+              <td>{{ num(b.light_time_s, 2) }}</td>
+              <td>{{ num(b.dark_time_s, 2) }}</td>
+              <td>{{ num(b.doorway_time_s, 2) }}</td>
+              <td>{{ num(b.unknown_time_s, 2) }}</td>
+              <td>{{ num(b.observed_time_s, 2) }}</td>
+              <td>{{ num(b.missing_time_s, 2) }}</td>
+              <td>{{ b.initial_entries }}</td>
+              <td>{{ b.transitions }}</td>
+              {% if s.coordinate_unit == "cm" %}
+              <td>{{ num(b.total_distance_cm, 2) }} cm</td>
+              <td>{{ num(b.mean_speed_cm_s, 2) }}</td>
+              {% elif s.coordinate_unit == "px" %}
+              <td>{{ num(b.total_distance_px, 2) }} px</td>
+              <td>{{ num(b.mean_speed_px_s, 2) }}</td>
+              {% else %}
+              <td>—</td><td>—</td>
+              {% endif %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+      </div>
+    </details>
+    {% if s.dark_box_visible == false %}
+    <p class="muted">不可见暗室：明室未检测即推断在暗室；不输出可靠全场距离或速度。</p>
+    {% elif s.coordinate_unit == "cm" %}
+    <p class="muted">距离与速度来自相邻边物理映射（cm），请结合视频与人工复核。</p>
+    {% else %}
+    <p class="muted">两室不是有效四角：位置仅保留像素，不输出 cm 距离。</p>
+    {% endif %}
+
     {% else %}
     <div class="metric-grid">
       {% for item in entry.metrics[:6] %}

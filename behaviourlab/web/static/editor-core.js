@@ -570,6 +570,23 @@
           + value(behavior.center_time_s) + " s · 入臂 "
           + count(behavior.total_arm_entries) + " 次（开放 "
           + count(behavior.open_entries) + "）");
+      } else if (behavior.mode === "ldb") {
+        const count = (number) => (typeof number === "number" && isFinite(number)
+          ? String(number) : "—");
+        const percent = (number) => (typeof number === "number" && isFinite(number)
+          ? number.toFixed(0) + "%" : "—");
+        lines.push("行为 " + value(behavior.total_time_s) + " s：明室 "
+          + value(behavior.light_time_s) + "（"
+          + percent(behavior.light_time_percent) + "）/ 暗室 "
+          + value(behavior.dark_time_s) + "（"
+          + percent(behavior.dark_time_percent) + "）/ 门区 "
+          + value(behavior.doorway_time_s) + " s · 初始 "
+          + (behavior.initial_chamber === "light" ? "明室"
+            : behavior.initial_chamber === "dark" ? "暗室" : "—")
+          + " · 转换 " + count(behavior.total_transitions) + " 次");
+        if (behavior.dark_box_visible === false) {
+          lines.push("不可见暗室：明室失检按推断暗室计");
+        }
       } else if (behavior.mode === "ymaze") {
         const count = (number) => (typeof number === "number" && isFinite(number)
           ? String(number) : "—");
@@ -799,6 +816,7 @@
   const NESTED_ZONE_STEPS = {
     epm: ["center", "open_1", "open_2", "closed_1", "closed_2"],
     ymaze: ["center", "A", "B", "C"],
+    ldb: ["light", "dark", "doorway"],
   };
 
   function stepShape(assay, geometry, key) {
