@@ -256,15 +256,20 @@ def _settings_value(store: Store, section: str) -> Any:
 
 
 def _run_payloads(directory: Path) -> list[dict]:
-    """读取一次运行的结果；新布局是 runs/{run_id}，旧布局是嵌套 job 目录。"""
+    """读取一次运行的结果；新布局是 runs/{run_id}，旧布局是嵌套 job 目录。
 
-    payloads: list[dict] = []
+    目录本身就是一次已解析的发布（直接含 results.json/result_manifest.json）
+    时只展示它自己的结果：figures/ 等声明文件子目录不再次枚举，也不
+    变成“结果文件缺失”的错误卡片。目录只是容器时才枚举子目录，保留
+    真实旧布局（嵌套 job 目录）的合法兼容。
+    """
+
     if not directory.is_dir():
-        return payloads
-    entries = sorted(item for item in directory.iterdir() if item.is_dir())
+        return []
     if any((directory / name).is_file()
            for name in ("results.json", "result_manifest.json")):
-        entries.insert(0, directory)
+        return [_run_payload(directory)]
+    entries = sorted(item for item in directory.iterdir() if item.is_dir())
     return [_run_payload(entry) for entry in entries]
 
 

@@ -382,6 +382,9 @@
     state.session.evaluation = null;
     if (el.evaluationBox) el.evaluationBox.hidden = true;
     if (el.evaluationBody) el.evaluationBody.replaceChildren();
+    // 预测图层属于旧评估：清评估必须同步重绘画布，蓝色预测框与
+    // “预测”标签立即消失；人工标注保留。
+    renderFigure();
   }
 
   function num(value, digits) {
@@ -453,7 +456,10 @@
   if (el.toolTolerance) {
     el.toolTolerance.addEventListener("input", () => {
       state.revision += 1;
+      // 改容差即旧评估整体失效：表格、预测图层与“验证完成”提示
+      // 同步复位，人工标注保留；不引入新的异步排列。
       clearEvaluation();
+      status("");
     });
   }
   if (el.canvas) {

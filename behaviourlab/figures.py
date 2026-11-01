@@ -456,11 +456,12 @@ EPM_ZONE_LABELS = (("open", "开放臂"), ("closed", "封闭臂"),
 
 def nor_exploration_points(rows: Iterable[Mapping[str, Any]]
                            ) -> tuple[list[list[tuple[float, float]]], bool]:
-    """NOR 探索时序数据：逐对象按 dt_s 累计探索秒，缺失/无速度断开。
+    """NOR 探索时序数据：逐对象按真实曝光区间累计探索秒，缺失断开。
 
-    返回 (每个物体的折线段列表, 是否存在有效速度)。累计值只在
-    ``object_N_exploring`` 为真的合格行上增加；断开指该处插入 NaN，
-    不把缺口前后的累计值连成线。
+    返回 (每个对象的折线点列表, 是否存在有效速度)。每个探索中的
+    曝光区间都保留起点 ``(time_s, 累计前)`` 与终点 ``(time_s+dt_s,
+    累计后)``，连续探索的点连成可见曲线；缺失/无速度行插入 NaN 断开，
+    不把缺口前后的累计值连成线，也不只保存段末单点。
     """
 
     ordered = [row for row in rows
@@ -470,31 +471,37 @@ def nor_exploration_points(rows: Iterable[Mapping[str, Any]]
     has_speed = any(_finite(row.get("speed_cm_s")) is not None
                     for row in ordered)
     series: list[list[tuple[float, float]]] = [[], []]
-    current: list[list[float]] = [[], []]
+    current: list[list[tuple[float, float]]] = [[], []]
     cumulative = [0.0, 0.0]
     for row in ordered:
         exploring = (row.get("object_1_exploring"),
                      row.get("object_2_exploring"))
         broken = (not row.get("detected")
                   or _finite(row.get("speed_cm_s")) is None)
-        moment = float(row.get("time_s")) + float(row.get("dt_s"))
+        begin = float(row.get("time_s"))
+        moment = begin + float(row.get("dt_s"))
         for index in (0, 1):
             if broken:
                 # 缺失/无速度：当前折线在此断开；累计值保留，缺口不连线。
                 if current[index]:
-                    series[index].append(tuple(current[index]))
+                    series[index].extend(current[index])
                     series[index].append((moment, float("nan")))
                     current[index] = []
                 continue
             if exploring[index]:
+                if not current[index]:
+                    # 段起点保存曝光开始时的累计值：单行探索也是一条
+                    # 可见上升线段，不是孤立的末值点。
+                    current[index].append((begin, cumulative[index]))
                 cumulative[index] += float(row.get("dt_s"))
-                current[index] = [moment, cumulative[index]]
+                current[index].append((moment, cumulative[index]))
             elif current[index]:
-                series[index].append(tuple(current[index]))
+                series[index].extend(current[index])
+                series[index].append((moment, float("nan")))
                 current[index] = []
     for index in (0, 1):
         if current[index]:
-            series[index].append(tuple(current[index]))
+            series[index].extend(current[index])
     return series, has_speed
 
 

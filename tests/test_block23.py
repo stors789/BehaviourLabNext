@@ -531,29 +531,51 @@ def test_figure_suppress_motion_missing_and_unit_order(tmp_path):
 
 
 def test_nor_exploration_series_and_break():
-    """组 2：NOR 探索时序按 dt_s 累计，缺失/无速度段断开。"""
+    """组 2：NOR 探索时序保存各曝光区间的累计变化，可见线段与断口。
+
+    原始反例：对象1在[0,1)探索1秒，[1,3)缺失，对象2在[3,6)探索3秒。
+    每个探索中的曝光区间保留起点（累计前）与终点（累计后）两个坐标，
+    缺失段插入 NaN 断开；累计终值 1/3 不变。
+    """
 
     rows = [
+        {"in_window": True, "detected": True, "time_s": 0.0, "dt_s": 1.0,
+         "speed_cm_s": 5.0, "object_1_exploring": True,
+         "object_2_exploring": False},
+        {"in_window": True, "detected": False, "time_s": 1.0, "dt_s": 2.0,
+         "speed_cm_s": None, "object_1_exploring": False,
+         "object_2_exploring": False},
+        {"in_window": True, "detected": True, "time_s": 3.0, "dt_s": 3.0,
+         "speed_cm_s": 5.0, "object_1_exploring": False,
+         "object_2_exploring": True},
+    ]
+    series, has_speed = figures.nor_exploration_points(rows)
+    assert has_speed is True
+    # 对象1：[0,1) 的上升线段 (0,0)→(1,1)，缺口处 NaN 断开。
+    assert series[0][:2] == [(0.0, 0.0), (1.0, 1.0)]
+    assert series[0][2][0] == 3.0 and math.isnan(series[0][2][1])
+    # 对象2：[3,6) 的上升线段 (3,0)→(6,3)；终值 3 与既定标记一致。
+    assert series[1] == [(3.0, 0.0), (6.0, 3.0)]
+
+    # 连续探索的多行连成一条折线；中途停止后 NaN 断开，不连到后面。
+    continuous = [
         {"in_window": True, "detected": True, "time_s": 0.0, "dt_s": 1.0,
          "speed_cm_s": 5.0, "object_1_exploring": True,
          "object_2_exploring": False},
         {"in_window": True, "detected": True, "time_s": 1.0, "dt_s": 1.0,
          "speed_cm_s": 5.0, "object_1_exploring": True,
          "object_2_exploring": False},
-        {"in_window": True, "detected": False, "time_s": 2.0, "dt_s": 1.0,
-         "speed_cm_s": None, "object_1_exploring": False,
+        {"in_window": True, "detected": True, "time_s": 2.0, "dt_s": 1.0,
+         "speed_cm_s": 5.0, "object_1_exploring": False,
          "object_2_exploring": False},
         {"in_window": True, "detected": True, "time_s": 3.0, "dt_s": 1.0,
          "speed_cm_s": 5.0, "object_1_exploring": True,
          "object_2_exploring": False},
     ]
-    series, has_speed = figures.nor_exploration_points(rows)
-    assert has_speed is True
-    # 第一段：0–2 秒累计 2；缺口断开（NaN 不参与相等比较）；第二段
-    # 从累计 2 继续到 3。
-    assert series[0][0] == (2.0, 2.0)
-    assert series[0][1][0] == 3.0 and math.isnan(series[0][1][1])
-    assert series[0][2] == (4.0, 3.0)
+    series, _ = figures.nor_exploration_points(continuous)
+    assert series[0][:3] == [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)]
+    assert series[0][3][0] == 3.0 and math.isnan(series[0][3][1])
+    assert series[0][4:] == [(3.0, 2.0), (4.0, 3.0)]
     assert series[1] == []
 
 
@@ -602,6 +624,103 @@ def test_annotated_frame_facts_and_segments():
     assert padded[97, 0].tolist() == [0, 0, 0]
     assert padded[0, 128].tolist() == [200, 200, 200]
     assert padded[96, 0].tolist() == [200, 200, 200]
+
+
+def test_annotated_motion_segments_map_cm_to_source_pixels():
+    """组 3 残留：完成段保存的是 cm，叠画先映射回旋转后源像素。
+
+    冻结变换 px = diag(8.5, 9.7)·cm + (2, 1)；完成段端点按本 run 的
+    成对坐标恢复映射，不再把 (19.929, 3.550)cm 直接当 (20, 4)px 画。
+    """
+
+    def to_px(cm_point):
+        return (cm_point[0] * 8.5 + 2.0, cm_point[1] * 9.7 + 1.0)
+
+    cm_points = [(0.0, 0.0), (20.0, 0.0), (0.0, 10.0), (19.929, 3.550)]
+    rows = []
+    for index, cm_point in enumerate(cm_points):
+        px_point = to_px(cm_point)
+        rows.append({"frame": index, "time_s": index * 0.1,
+                     "detected": True, "coordinate_unit": "cm_estimated",
+                     "x_px": px_point[0], "y_px": px_point[1],
+                     "x_cm": cm_point[0], "y_cm": cm_point[1]})
+    # 缺口两侧各一段完成段（cm 坐标），保持完成段裁窗与断开规则。
+    rows[1]["motion_x0"], rows[1]["motion_y0"] = 0.0, 0.0
+    rows[1]["motion_x1"], rows[1]["motion_y1"] = 20.0, 0.0
+    rows[3]["motion_x0"], rows[3]["motion_y0"] = 10.0, 1.0
+    rows[3]["motion_x1"], rows[3]["motion_y1"] = 19.929, 3.550
+    unit = {"unit_id": "u" * 32, "unit_name": "unit", "observations": rows}
+
+    segments = annotated._trajectory_segments(unit, 10.0)
+    assert segments == [
+        [tuple(round(v) for v in to_px((0.0, 0.0))),
+         tuple(round(v) for v in to_px((20.0, 0.0)))],
+        [tuple(round(v) for v in to_px((10.0, 1.0))),
+         tuple(round(v) for v in to_px((19.929, 3.550)))],
+    ]
+    # 用户反例的量级：cm 终点约画到 (171, 35)px，不是 (20, 4)px。
+    assert segments[1][1] == (171, 35)
+    # 未到段终点只延长到已保存的段。
+    assert len(annotated._trajectory_segments(unit, 0.15)) == 1
+
+    # 声明 cm 但成对坐标恢复不出一致线性映射：不画轨迹层，不冒充像素。
+    broken = [dict(row) for row in rows]
+    for offset, row in enumerate(broken):
+        row["x_cm"] = row["x_cm"] * (1.0 + 0.1 * offset)
+    distorted = {**unit, "observations": broken,
+                 "_cm_px_mapper": annotated._cm_to_px_mapper(broken)}
+    assert distorted["_cm_px_mapper"] is None
+    assert annotated._trajectory_segments(distorted, 10.0) == []
+
+
+def test_result_page_declared_figure_subdir_is_not_a_job(client, store):
+    """组 6 残留：已解析 run 的 figures/ 是文件子目录，不是旧 job 任务。"""
+
+    import json
+    from pathlib import Path
+
+    from behaviourlab.web.app import _run_payloads
+
+    run_id = "c" * 32
+    run_dir = Path(store.paths.runs) / run_id
+    (run_dir / "figures").mkdir(parents=True)
+    (run_dir / "results.json").write_text(json.dumps(
+        {"assay": "oft", "summary": [], "events": [], "bins": [],
+         "observations": [], "tables": {}, "warnings": [],
+         "metadata": {"assay": "oft", "units": {}}}), encoding="utf-8")
+    (run_dir / "figures" / "unit_01_copy.png").write_bytes(b"png")
+    manifest = {
+        "status": "completed", "run_id": run_id, "job_id": "j" * 32,
+        "assay": "oft", "asset": {"id": "a" * 32, "name": "单鼠.mp4"},
+        "coverage": None, "algorithm_version": "0.1.0",
+        "units": [{"unit_id": "u1", "unit_name": "甲鼠", "summary": {},
+                   "figures": {"overview": "figures/unit_01_copy.png"},
+                   "figure_files": ["figures/unit_01_copy.png"],
+                   "annotated_video": None}],
+        "figures": {"u1": ["figures/unit_01_copy.png"]},
+        "annotated_video": None,
+        "files": ["results.json", "figures/unit_01_copy.png"],
+        "warnings": [], "metadata": {},
+    }
+    (run_dir / "result_manifest.json").write_text(json.dumps(manifest),
+                                                  encoding="utf-8")
+
+    payloads = _run_payloads(run_dir)
+    assert len(payloads) == 1, "已解析 run 只展示自己的结果"
+    assert payloads[0].get("result") is not None
+    page = client.get(f"/results/{run_id}").get_data(as_text=True)
+    assert "结果文件缺失" not in page
+    assert "figures/unit_01_copy.png" in page
+
+    # 旧布局兼容：目录只是容器时，真实 job 子目录仍被枚举。
+    legacy_base = Path(store.paths.runs) / ("d" * 32)
+    legacy_job = legacy_base / ("m" * 32)
+    legacy_job.mkdir(parents=True)
+    (legacy_job / "results.json").write_text(json.dumps({"summary": []}),
+                                             encoding="utf-8")
+    legacy_payloads = _run_payloads(legacy_base)
+    assert len(legacy_payloads) == 1
+    assert legacy_payloads[0]["job_id"] == "m" * 32
 
 
 def test_landmark_evaluate_continuous_and_bounds(tmp_path, monkeypatch):

@@ -274,16 +274,78 @@ def _active_units(units: Sequence[Mapping[str, Any]], start: float,
             if unit["start"] - 1e-9 <= middle < unit["end"] - 1e-9]
 
 
+def _cm_to_px_mapper(rows: Sequence[Mapping[str, Any]]) -> Any:
+    """从本 run 保存的成对坐标恢复测量坐标→旋转后源像素的映射。
+
+    完成段（motion_x0..y1）保存的是测量坐标（cm 或估计 cm），不是像素。
+    这里用同一 run 中 ``(x_px, y_px)`` 与 ``(x_cm, y_cm)`` 同时有效的
+    观测恢复二者之间的线性映射，再把完成段端点映射回源像素。数据声明
+    就是像素、或没有任何坐标声明的历史数据按原样直画；声明为 cm 而成
+    对坐标恢复不出一致线性映射（如分区透视）时返回 None——宁可少画
+    一层轨迹，也不能把物理/估计单位当像素画。
+    """
+
+    declared: str | None = None
+    pairs: list[tuple[float, float, float, float]] = []
+    for row in rows:
+        value = row.get("coordinate_unit")
+        if isinstance(value, str) and value:
+            declared = value
+        if row.get("position_valid") is False or row.get("jump"):
+            continue
+        x_px, y_px = _finite(row.get("x_px")), _finite(row.get("y_px"))
+        x_cm, y_cm = _finite(row.get("x_cm")), _finite(row.get("y_cm"))
+        if None in (x_px, y_px, x_cm, y_cm):
+            continue
+        pairs.append((x_cm, y_cm, x_px, y_px))
+    if declared in (None, "px"):
+        return lambda point: (float(point[0]), float(point[1]))
+    if declared not in ("cm", "cm_estimated") or len(pairs) < 3:
+        return None
+    np = __import__("numpy")
+    cm = np.array([(item[0], item[1]) for item in pairs], dtype="float64")
+    px = np.array([(item[2], item[3]) for item in pairs], dtype="float64")
+    design = np.column_stack([cm, np.ones(len(cm))])
+    try:
+        solution, _, _, _ = np.linalg.lstsq(design, px, rcond=None)
+    except Exception:
+        return None
+    if not np.all(np.isfinite(solution)):
+        return None
+    if float(np.max(np.abs(design @ solution - px))) > 0.5:
+        return None
+    def mapper(point):
+        vector = np.array([float(point[0]), float(point[1]), 1.0])
+        mapped = vector @ solution
+        return float(mapped[0]), float(mapped[1])
+    return mapper
+
+
+def _unit_cm_mapper(unit: Mapping[str, Any]) -> Any:
+    """单位级缓存：一次渲染只恢复一次坐标映射。"""
+
+    if "_cm_px_mapper" in unit:
+        return unit["_cm_px_mapper"]
+    mapper = _cm_to_px_mapper(unit.get("observations") or [])
+    unit["_cm_px_mapper"] = mapper
+    return mapper
+
+
 def _trajectory_segments(unit: Mapping[str, Any],
                          upto: float) -> list[list[tuple[int, int]]]:
     """只画保存的完成运动段（motion_x0..y1），逐段时间延长。
 
     完成段由分析管线按真实连续性保存：缺失帧没有跨缺口的段，这里
     不从位置行重新推导连线，因此缺口自然断开，也不连到 held 点。
-    位置被抑制或纯人工的单位不画。
+    坐标是测量单位（cm/估计 cm）时先按本 run 冻结的成对坐标映射回
+    旋转后源像素；映射建立不起来就不画轨迹层。位置被抑制或纯人工
+    的单位不画。
     """
 
     if unit.get("suppress_positions") or unit.get("manual"):
+        return []
+    mapper = _unit_cm_mapper(unit)
+    if mapper is None:
         return []
     segments: list[list[tuple[int, int]]] = []
     for row in unit.get("observations") or []:
@@ -298,8 +360,10 @@ def _trajectory_segments(unit: Mapping[str, Any],
         y1 = _finite(row.get("motion_y1"))
         if None in (x0, y0, x1, y1):
             continue
-        segments.append([(int(round(x0)), int(round(y0))),
-                         (int(round(x1)), int(round(y1)))])
+        start = mapper((x0, y0))
+        end = mapper((x1, y1))
+        segments.append([(int(round(start[0])), int(round(start[1]))),
+                         (int(round(end[0])), int(round(end[1])))])
     return segments
 
 
