@@ -84,9 +84,17 @@ def main(argv: list[str] | None = None) -> int:
         from .web import create_app
 
         app = create_app(data_dir=str(paths.root))
-        service = LocalService(app, paths, port=args.port)
+        jobs = app.config["JOBS"]
+        # 服务与调度器共享同一份数据根所有权：关闭时先停调度、再放锁。
+        service = LocalService(
+            app, paths, port=args.port,
+            owner_registry=app.config["JOB_OWNER"],
+            stop_callbacks=[jobs.shutdown],
+        )
         atexit.register(service.stop)
         service.start()
+        if not jobs.start():
+            LOGGER.error("调度器未取得数据根所有权，任务不会开始执行")
         LOGGER.info("本地服务：%s", service.url)
         try:
             if args.browser:

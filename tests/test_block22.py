@@ -458,3 +458,91 @@ def test_replay_rejects_running_batch(sandbox):
     with pytest.raises(JobConflict):
         scheduler.replay(batch["id"])
     assert tmp_path is not None
+
+
+def test_local_service_shares_owner_and_stops_scheduler(sandbox):
+    """启动器路径：服务先持锁，调度器复用同一份所有权，关闭按序释放。"""
+
+    store, paths, tmp_path = sandbox
+    from behaviourlab.service import LocalService
+    from behaviourlab.web import create_app
+
+    app = create_app(data_dir=str(paths.root), store=store, testing=True)
+    jobs = app.config["JOBS"]
+
+    class Server:
+        def __init__(self):
+            self.closed = False
+
+        def run(self):
+            time.sleep(0.05)
+
+        def close(self):
+            self.closed = True
+
+    server = Server()
+    service = LocalService(
+        app, paths, port=0,
+        server_factory=lambda *args, **kwargs: server,
+        ready_probe=lambda url, root: (True, ""),
+        owner_registry=app.config["JOB_OWNER"],
+        stop_callbacks=[jobs.shutdown],
+    )
+    service.start()
+    try:
+        assert jobs.start() is True
+        assert jobs.running is True
+    finally:
+        service.stop()
+    assert server.closed is True
+    assert jobs.running is False
+
+    # 关闭后所有权真的释放：新实例可以取得。
+    again = JobScheduler(store, paths)
+    assert again.start() is True
+    again.shutdown()
+    assert again.owner.held is False
+
+
+def test_local_service_shares_owner_and_stops_scheduler(sandbox):
+    """启动器路径：服务先持锁，调度器复用同一份所有权，关闭按序释放。"""
+
+    store, paths, tmp_path = sandbox
+    from behaviourlab.service import LocalService
+    from behaviourlab.web import create_app
+
+    app = create_app(data_dir=str(paths.root), store=store, testing=True)
+    jobs = app.config["JOBS"]
+
+    class Server:
+        def __init__(self):
+            self.closed = False
+
+        def run(self):
+            time.sleep(0.05)
+
+        def close(self):
+            self.closed = True
+
+    server = Server()
+    service = LocalService(
+        app, paths, port=0,
+        server_factory=lambda *args, **kwargs: server,
+        ready_probe=lambda url, root: (True, ""),
+        owner_registry=app.config["JOB_OWNER"],
+        stop_callbacks=[jobs.shutdown],
+    )
+    service.start()
+    try:
+        assert jobs.start() is True
+        assert jobs.running is True
+    finally:
+        service.stop()
+    assert server.closed is True
+    assert jobs.running is False
+
+    # 关闭后所有权真的释放：新实例可以取得。
+    again = JobScheduler(store, paths)
+    assert again.start() is True
+    again.shutdown()
+    assert again.owner.held is False
