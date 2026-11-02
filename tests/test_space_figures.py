@@ -17,6 +17,8 @@ from behaviourlab import figures, outputs, timeline
 from behaviourlab.experiments import barnes, epm, ldb, ymaze
 from behaviourlab.schema import AnalysisResult
 
+import test_ldb
+
 PNG_MAGIC = bytes.fromhex("89504e470d0a1a0a")
 STYLE = {"dpi": 90, "colormap": "viridis", "line_width": 2,
          "color": "#B86245"}
@@ -197,14 +199,11 @@ def test_ldb_visible_space_figures_in_source_pixels(tmp_path):
     assert (facts["rows"], facts["summary"], facts["events"],
             facts["bins"]) == snapshot
 
-    # 完成段是厘米：经逆映射转回源像素后落在明/暗室四角范围内。
+    # 完成段是厘米：源像素端点由真实源行与同一裁窗比例重建，
+    # 落在明/暗室四角范围内且不按 y 符号猜室。
     segments_cm = figures.motion_segments(facts["rows"])
     assert segments_cm, "可见双室应有完成运动段"
-    mapping = ldb.chamber_mapping(
-        ldb._quad(unit["geometry"]["zones"]["light"]),
-        ldb._quad(unit["geometry"]["zones"]["dark"]), unit["options"])
-    converted, insufficient = outputs._ldb_cm_segments_to_px(
-        segments_cm, mapping)
+    converted, insufficient = outputs._ldb_cm_segments_to_px(facts["rows"])
     assert converted and insufficient == 0
     for x0, y0, x1, y1 in converted:
         for x, y in ((x0, y0), (x1, y1)):
@@ -258,6 +257,11 @@ def test_ldb_two_units_isolated(tmp_path):
         "points": [[20, 20], [380, 20], [380, 180], [20, 180]]}}}
     rows1 = test_ldb.source_rows(test_ldb.light_rows())
     rows2 = test_ldb.source_rows(test_ldb.light_rows())
+    # source_rows 夹具硬编码 unit1 的 id：第二只动物的行必须改成
+    # 自己的 unit_id，否则两只动物的观测在结果里交错、段无法归属。
+    for row in rows2:
+        row["unit_id"] = unit2["id"]
+        row["unit_name"] = "小鼠 2"
     window = _window(0.0, 4.0, rows1 + rows2)
     facts1 = ldb.process_unit(
         unit1, rows1, window,
@@ -442,3 +446,158 @@ def test_space_extent_margin_and_y_direction():
     figure, axes = figures._space_base(extent, [outline], "x", "y")
     assert axes.get_ylim() == (11.0, -1.0), "图像 y 轴向下"
     assert axes.get_aspect() == 1.0
+
+
+# -- LDB 源像素端点返修：两个固定自然反例 + 裁窗 + 缺失断段 --------------
+
+
+def _ldb_endpoint_rows(unit, positions, start, end):
+    rows = test_ldb.source_rows(positions)
+    window = _window(start, end, rows)
+    anchor = timeline.first_seen_in_window(
+        ldb.KEY, rows, window, unit["geometry"])
+    return ldb.process_unit(unit, rows, window, anchor), rows
+
+
+def _assert_endpoint(actual, expected) -> None:
+    assert len(actual) == len(expected)
+    for got, want in zip(actual, expected):
+        for a, b in zip(got, want):
+            assert abs(a - b) <= 1e-6, (got, want)
+
+
+def _assert_manifest_pair(manifest: dict, unit: dict, out_dir) -> None:
+    """单次核对四处清单一致 + 两图真实可解码。"""
+
+    figures_map = manifest["figures"][unit["id"]]
+    assert "unit_01_trajectory.png" in figures_map
+    assert "unit_01_heatmap.png" in figures_map
+    entry = next(item for item in manifest["units"]
+                 if item["unit_id"] == unit["id"])
+    assert entry["figure_files"] == figures_map
+    assert entry["figures"]["trajectory"] == "unit_01_trajectory.png"
+    assert entry["figures"]["heatmap"] == "unit_01_heatmap.png"
+    for name in ("unit_01_trajectory.png", "unit_01_heatmap.png"):
+        assert name in manifest["files"], name
+        _assert_png(out_dir / name)
+
+
+def test_ldb_doorway_crossing_segments_exact(tmp_path):
+    """反例 1：门区穿越。轨迹端点必须逐段回到源像素 90→98→102→110，
+    不再出现 90→108→92 的猜室折返；热图仍用真实 98/102。"""
+
+    unit = test_ldb.unit(doorway={"type": "quad",
+                                  "points": [[80, 90], [120, 90],
+                                             [120, 110], [80, 110]]})
+    facts, rows = _ldb_endpoint_rows(
+        unit, [(100, 90), (100, 98), (100, 102), (100, 110)], 0.0, 0.8)
+    assert facts["metadata"]["coordinate_unit"] == "cm"
+    snapshot = copy.deepcopy((facts["rows"], facts["summary"],
+                              facts["events"], facts["bins"],
+                              facts["metadata"]))
+
+    converted, insufficient = outputs._ldb_cm_segments_to_px(facts["rows"])
+    assert insufficient == 0
+    _assert_endpoint(converted, [(100.0, 90.0, 100.0, 98.0),
+                                 (100.0, 98.0, 100.0, 102.0),
+                                 (100.0, 102.0, 100.0, 110.0)])
+
+    result = _assemble(ldb, [facts])
+    job = _job("ldb", [unit])
+    manifest = outputs.write_outputs(tmp_path / "out", job, result)
+    _assert_manifest_pair(manifest, unit, tmp_path / "out")
+
+    # 热图资格与独立合同实现一致；曝光来自真实 98/102 行的 dt_s。
+    selected = figures.qualified_points(rows, x_key="x_px", y_key="y_px")
+    assert selected == _contract_points(rows, "x_px", "y_px")
+    assert sum(span for _, _, span in selected) == pytest.approx(0.8, abs=1e-9)
+
+    # 科学事实不变：导出前后观测/汇总/事件/分箱/元数据逐项相等。
+    assert (facts["rows"], facts["summary"], facts["events"],
+            facts["bins"], facts["metadata"]) == snapshot
+    assert result.summary[0] == facts["summary"]
+
+
+def test_ldb_dark_boundary_segments_exact(tmp_path):
+    """反例 2：无门区，暗室边界 y=105。边界点必须画成 105，
+    不再被猜成明室边界 95。"""
+
+    unit = test_ldb.unit()
+    facts, rows = _ldb_endpoint_rows(
+        unit, [(100, 150), (100, 105), (100, 150)], 0.0, 0.6)
+    snapshot = copy.deepcopy((facts["rows"], facts["summary"],
+                              facts["events"], facts["bins"],
+                              facts["metadata"]))
+
+    converted, insufficient = outputs._ldb_cm_segments_to_px(facts["rows"])
+    assert insufficient == 0
+    _assert_endpoint(converted, [(100.0, 150.0, 100.0, 105.0),
+                                 (100.0, 105.0, 100.0, 150.0)])
+
+    result = _assemble(ldb, [facts])
+    job = _job("ldb", [unit])
+    manifest = outputs.write_outputs(tmp_path / "out", job, result)
+    _assert_manifest_pair(manifest, unit, tmp_path / "out")
+    selected = figures.qualified_points(rows, x_key="x_px", y_key="y_px")
+    assert selected == _contract_points(rows, "x_px", "y_px")
+    assert (facts["rows"], facts["summary"], facts["events"],
+            facts["bins"], facts["metadata"]) == snapshot
+
+
+def test_ldb_cropped_window_keeps_ratio_and_segment_identity(tmp_path):
+    """有限裁窗：源像素端点用同一裁窗比例插值；段的时间边界、
+    frame 归属与存储的科学完成段不被改写，段数量不变。"""
+
+    unit = test_ldb.unit()
+    facts, _ = _ldb_endpoint_rows(
+        unit, [(100, 150), (100, 105), (100, 150)], 0.1, 0.3)
+    # 段 1：[0.1,0.2]（起点按窗起点裁切，比例 0.5）；
+    # 段 2：[0.2,0.3]（终点按窗尾裁切，比例 0.5）。
+    segments_cm = figures.motion_segments(facts["rows"])
+    assert len(segments_cm) == 2
+    converted, insufficient = outputs._ldb_cm_segments_to_px(facts["rows"])
+    assert insufficient == 0
+    _assert_endpoint(converted, [(100.0, 127.5, 100.0, 105.0),
+                                 (100.0, 105.0, 100.0, 127.5)])
+
+    identity = [(row.get("unit_id"), row.get("frame"),
+                 row.get("motion_start_s"), row.get("motion_end_s"),
+                 row.get("motion_x0"), row.get("motion_y0"),
+                 row.get("motion_x1"), row.get("motion_y1"))
+                for row in facts["rows"]]
+    result = _assemble(ldb, [facts])
+    job = _job("ldb", [unit])
+    manifest = outputs.write_outputs(tmp_path / "out", job, result)
+    _assert_manifest_pair(manifest, unit, tmp_path / "out")
+    # 导出只换绘图表示：存储段的 unit_id/frame/时间/厘米端点不变。
+    assert [(row.get("unit_id"), row.get("frame"),
+             row.get("motion_start_s"), row.get("motion_end_s"),
+             row.get("motion_x0"), row.get("motion_y0"),
+             row.get("motion_x1"), row.get("motion_y1"))
+            for row in facts["rows"]] == identity
+
+
+def test_ldb_missing_row_breaks_segment_no_bridge(tmp_path):
+    """缺失断段：中间行缺失即断开，不跨缺失补线；转换段数与
+    完成段一一对应，端点仍精确回到源像素。"""
+
+    unit = test_ldb.unit()
+    facts, _ = _ldb_endpoint_rows(
+        unit, [(100, 150), (100, 105), None, (100, 150)], 0.0, 0.8)
+    segments_cm = figures.motion_segments(facts["rows"])
+    assert len(segments_cm) == 1, "缺失行之后的点不与前段相连"
+    converted, insufficient = outputs._ldb_cm_segments_to_px(facts["rows"])
+    assert insufficient == 0
+    _assert_endpoint(converted, [(100.0, 150.0, 100.0, 105.0)])
+
+    result = _assemble(ldb, [facts])
+    job = _job("ldb", [unit])
+    manifest = outputs.write_outputs(tmp_path / "out", job, result)
+    figures_map = manifest["figures"][unit["id"]]
+    assert "unit_01_trajectory.png" in figures_map
+    assert "unit_01_heatmap.png" in figures_map
+    entry = next(item for item in manifest["units"]
+                 if item["unit_id"] == unit["id"])
+    assert entry["figures"]["trajectory"] == "unit_01_trajectory.png"
+    _assert_png(tmp_path / "out" / "unit_01_trajectory.png")
+    _assert_png(tmp_path / "out" / "unit_01_heatmap.png")

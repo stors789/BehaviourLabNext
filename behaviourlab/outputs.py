@@ -417,54 +417,112 @@ def _estimate_cm_space_figures(target: Path, rows, stem, style,
                        ylabel="y (估计 cm)")
 
 
+def _ldb_cm_usable(row: Mapping[str, Any]) -> bool:
+    """厘米完成段两端行的资格：与 timeline._valid_point 的 cm 资格
+    一致（detected、position_valid 非 false、jump 非 true、cm 有限），
+    另要求源像素可用——cm 由源像素映射而来，重建端点需要它。"""
+
+    if not row.get("detected"):
+        return False
+    if row.get("position_valid") is False or row.get("jump") is True:
+        return False
+    for key in ("x_cm", "y_cm", "x_px", "y_px"):
+        value = row.get(key)
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            return False
+    return True
+
+
 def _ldb_cm_segments_to_px(
-        segments: Sequence[tuple[float, float, float, float]],
-        mapping: Mapping[str, Any]) -> tuple[list[tuple[float, float, float,
-                                                         float]], int]:
-    """厘米完成段 → 源像素：明室 (+y)/暗室 (−y) 按 y_cm 符号选室，逆
-    homography 后用 ldb 前向映射往返校验；依据不足的段丢弃并计数，
-    不猜比例。"""
+        rows: Sequence[Mapping[str, Any]]
+        ) -> tuple[list[tuple[float, float, float, float]], int]:
+    """厘米完成段 → 源像素：用真实源行与同一裁窗比例重建端点。
 
-    import numpy as np
-
-    from .experiments import ldb as ldb_module
+    每个完成段附着在段终点行 (unit_id, frame)，厘米端点是两端观测行
+    cm 值按时间比例的插值（timeline.build_motion_segments 的定义）。
+    这里重建段起点行（同 unit 中段终点行之前最近的有效行），把同一
+    比例应用到两端行的源像素上得到绘图端点；厘米端点必须能由两端行
+    按同一比例重建——这是归属证明，不按 y 符号猜室（门区按像素到室
+    中心距离选室，cm_y 的符号不代表所选室）。无法证明的段丢弃并
+    计数，不静默选一个分室。
+    """
 
     converted: list[tuple[float, float, float, float]] = []
     insufficient = 0
-    for x0, y0, x1, y1 in segments:
-        pixels: list[tuple[float, float]] = []
-        ok = True
-        for cx, cy in ((x0, y0), (x1, y1)):
-            zone = "light" if cy >= 0 else "dark"
-            if zone == "light":
-                local = (cx + mapping["along_light"] / 2.0, cy)
-                matrix = mapping["light"]
+    grouped: dict[Any, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(row.get("unit_id"), []).append(row)
+    for unit_rows in grouped.values():
+        ordered = sorted(unit_rows,
+                         key=lambda item: (float(item["time_s"]),
+                                           item["frame"]))
+        previous: Mapping[str, Any] | None = None
+        for row in ordered:
+            if _ldb_cm_usable(row):
+                endpoints = None
+                values = [row.get("motion_x0"), row.get("motion_y0"),
+                          row.get("motion_x1"), row.get("motion_y1")]
+                if all(isinstance(value, (int, float))
+                       and math.isfinite(float(value)) for value in values):
+                    if previous is None:
+                        insufficient += 1
+                    else:
+                        endpoints = _ldb_segment_endpoints(previous, row)
+                        if endpoints is None:
+                            insufficient += 1
+                        else:
+                            converted.append(endpoints)
+                previous = row
             else:
-                local = (cx - mapping["offset"] + mapping["along_dark"] / 2.0,
-                         -cy)
-                matrix = mapping["dark"]
-            try:
-                inverse = np.linalg.inv(
-                    np.asarray(matrix, dtype="float64"))
-            except Exception:
-                ok = False
-                break
-            vector = inverse @ np.array([local[0], local[1], 1.0])
-            if abs(float(vector[2])) < 1e-12:
-                ok = False
-                break
-            px = (float(vector[0] / vector[2]), float(vector[1] / vector[2]))
-            back = ldb_module._apply_mapping(px, zone, mapping)
-            if back is None or math.hypot(back[0] - cx, back[1] - cy) > 1e-6:
-                ok = False
-                break
-            pixels.append(px)
-        if ok:
-            converted.append((pixels[0][0], pixels[0][1],
-                              pixels[1][0], pixels[1][1]))
-        else:
-            insufficient += 1
+                # 无效行断开上下文，与 build_motion_segments 的
+                # previous=None 语义一致；该行也不会是段端点。
+                previous = None
     return converted, insufficient
+
+
+def _ldb_segment_endpoints(start_row: Mapping[str, Any],
+                           end_row: Mapping[str, Any]
+                           ) -> tuple[float, float, float, float] | None:
+    """同一完成段、同一裁窗比例的源像素端点；归属无法证明返回 None。
+
+    段起点行 = 终点行之前最近的有效行。cm 端点必须能由两端行 cm 值
+    按 (motion_start_s/end_s − t_a)/(t_b − t_a) 重建（与
+    timeline._lerp 同公式，证明该段确实源于这两行），源像素端点用
+    同一比例在两行源像素间插值——只换绘图表示，不改存储的科学段。
+    """
+
+    t_a = float(start_row["time_s"])
+    t_b = float(end_row["time_s"])
+    span = t_b - t_a
+    if not math.isfinite(span) or span <= 0:
+        return None
+    start_s = float(end_row["motion_start_s"])
+    end_s = float(end_row["motion_end_s"])
+    if not (math.isfinite(start_s) and math.isfinite(end_s)):
+        return None
+    ratios = []
+    for moment in (start_s, end_s):
+        ratio = (moment - t_a) / span
+        if not math.isfinite(ratio) or ratio < -1e-9 or ratio > 1.0 + 1e-9:
+            return None
+        ratios.append(min(1.0, max(0.0, ratio)))
+    s_ratio, e_ratio = ratios
+    # 归属证明：cm 端点 = 两端行 cm 值按同一比例的插值。
+    for ratio, keys in ((s_ratio, ("motion_x0", "motion_y0")),
+                        (e_ratio, ("motion_x1", "motion_y1"))):
+        for key, axis in zip(keys, ("x_cm", "y_cm")):
+            a = float(start_row[axis])
+            b = float(end_row[axis])
+            predicted = a + (b - a) * ratio
+            if abs(float(end_row[key]) - predicted) > 1e-6:
+                return None
+    points = []
+    for ratio in (s_ratio, e_ratio):
+        points.append(tuple(
+            float(start_row[axis]) + (float(end_row[axis])
+                                      - float(start_row[axis])) * ratio
+            for axis in ("x_px", "y_px")))
+    return (points[0][0], points[0][1], points[1][0], points[1][1])
 
 
 def _ldb_space_figures(target: Path, rows, stem, style, figures_info: dict,
@@ -473,9 +531,7 @@ def _ldb_space_figures(target: Path, rows, stem, style, figures_info: dict,
                        geometry: Mapping[str, Any] | None,
                        options: Mapping[str, Any]) -> dict:
     """LDB：暗室可见且位置可用时的全装置源像素空间图。像素轴不标成
-    厘米；厘米完成段必须经可校验的逆映射回到源像素。"""
-
-    from .experiments import ldb as ldb_module
+    厘米；厘米完成段的源像素端点由真实源行与同一裁窗比例重建。"""
 
     zones = geometry.get("zones") if isinstance(geometry, Mapping) else None
     outlines: list[list[tuple[float, float]]] = []
@@ -491,26 +547,12 @@ def _ldb_space_figures(target: Path, rows, stem, style, figures_info: dict,
     if coordinate_unit == "px":
         segments = raw_segments
     elif coordinate_unit == "cm":
-        light_quad = _quad_outline(zones.get("light")) \
-            if isinstance(zones, Mapping) else None
-        dark_quad = _quad_outline(zones.get("dark")) \
-            if isinstance(zones, Mapping) else None
-        mapping = None
-        if light_quad and dark_quad:
-            try:
-                mapping = ldb_module.chamber_mapping(light_quad, dark_quad,
-                                                     options)
-            except ValidationError as error:
-                notes.append(f"完成段转换依据不足：{error}")
-        if mapping is None:
-            if raw_segments:
-                notes.append("完成段转换依据不足，未生成轨迹图")
-        else:
-            segments, insufficient = _ldb_cm_segments_to_px(
-                raw_segments, mapping)
-            if insufficient:
-                notes.append(
-                    f"{insufficient} 段完成段转换依据不足，未绘制")
+        # 厘米完成段的源像素端点由真实源行与同一裁窗比例重建；
+        # 不按 y 符号猜室逆映射（门区评分的 cm_y 符号不代表室）。
+        segments, insufficient = _ldb_cm_segments_to_px(rows)
+        if insufficient:
+            notes.append(
+                f"{insufficient} 段完成段转换依据不足，未绘制")
     elif raw_segments:
         notes.append("完成段转换依据不足，未生成轨迹图")
     extent = figures.space_extent(outlines, qualified)
