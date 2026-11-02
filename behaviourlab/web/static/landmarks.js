@@ -90,10 +90,14 @@
       if (el.newError) el.newError.textContent = "容差必须是有限正数";
       return;
     }
+    // 从选中的草稿/视频/动物条目继承同一份配置快照：视频方向、解释
+    // FPS 与 draft→video→unit 覆盖后的完整有效检测（option dataset
+    // 由模板按草稿上下文渲染）。会话层带完整有效检测冻结，单位层
+    // 保持该单位自己的覆盖原样——与 _settings_of 的覆盖顺序一致。
     const payload = {
       asset_id: option.dataset.asset,
       assay: option.dataset.assay,
-      orientation: 0,
+      orientation: JSON.parse(option.dataset.orientation || "0"),
       frames: parsed.frames,
       tolerance_px: tolerance,
       unit: {
@@ -101,18 +105,24 @@
         name: option.dataset.name,
         geometry: JSON.parse(option.dataset.geometry || "{}"),
         options: JSON.parse(option.dataset.options || "{}"),
-        detection: JSON.parse(option.dataset.detection || "{}"),
+        detection: JSON.parse(option.dataset.unitDetection || "{}"),
       },
       detection: JSON.parse(option.dataset.detection || "{}"),
-      fps_override: null,
+      fps_override: JSON.parse(option.dataset.fpsOverride || "null"),
       records: [],
     };
+    const revision = state.revision; // 创建期间切走即丢弃迟到响应
     try {
       const data = await api().request("/api/landmarks", {
         method: "POST", body: JSON.stringify(payload),
       });
+      if (state.revision !== revision) {
+        status("会话已创建；当前选择已变化，未自动打开", "muted");
+        return;
+      }
       await openSession(data.session);
     } catch (error) {
+      if (state.revision !== revision) return;
       if (el.newError) el.newError.textContent = error.message;
     }
   }

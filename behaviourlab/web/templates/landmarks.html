@@ -29,7 +29,10 @@
                   data-name="{{ unit.name }}"
                   data-geometry='{{ unit.geometry | tojson }}'
                   data-options='{{ unit.options | tojson }}'
-                  data-detection='{{ unit.detection | tojson }}'>
+                  data-detection='{{ unit.effective_detection | tojson }}'
+                  data-unit-detection='{{ unit.detection | tojson }}'
+                  data-orientation='{{ unit.orientation | tojson }}'
+                  data-fps-override='{{ unit.fps_override | tojson }}'>
             {{ item.asset.name }} · {{ unit.name }} · {{ unit.assay | upper }}
           </option>
           {% endfor %}

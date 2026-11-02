@@ -28,6 +28,7 @@ from ..detection import common_detection_defaults
 from ..engine import (
     COMMON_OUTPUT_DEFAULTS,
     COMMON_STYLE_DEFAULTS,
+    resolve_detection,
     snapshot_draft,
     validate_draft,
     validate_settings_value,
@@ -1353,6 +1354,10 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
                         continue
                     if not unit.get("geometry"):
                         continue
+                    # 同一视频可出现在多个草稿/单位中：每个条目携带自己
+                    # 的草稿上下文——视频方向/解释FPS与该方向下保存的
+                    # 几何，以及 draft→video→unit 覆盖后的完整有效检测
+                    # 快照（不套今天的全局设置，旧草稿不漂移）。
                     entry["units"].append({
                         "id": unit.get("id"),
                         "name": unit.get("name"),
@@ -1361,6 +1366,11 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
                         "geometry": unit.get("geometry"),
                         "options": unit.get("options") or {},
                         "detection": unit.get("detection") or {},
+                        "orientation": video.get("orientation") or 0,
+                        "fps_override": video.get("fps_override"),
+                        "effective_detection": resolve_detection(
+                            str(draft.get("assay")), draft=draft,
+                            video=video, unit=unit),
                     })
         media = []
         for asset_id, entry in by_asset.items():
