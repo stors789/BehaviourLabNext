@@ -315,10 +315,10 @@ def test_ldb_preview_and_result_page(client, store, tmp_path, monkeypatch):
         assert label in page, label
     assert "推断暗室" not in page, "可见模式不显示推断行"
     assert "没有可用的场地尺寸" not in page
-    # 清单没有图形时给诚实空态：不放空 src，也不谎称生成了轨迹/热图。
-    assert "暂无图表" in page
+    # 可见且位置可靠：轨迹/热图经同一清单进入结果页；不放空 src。
+    assert "暂无图表" not in page
     assert 'src=""' not in page
-    assert "_trajectory.png" not in page and "_heatmap.png" not in page
+    assert "unit_01_trajectory.png" in page and "unit_01_heatmap.png" in page
 
 
 def test_ldb_dark_initial_has_no_light_latency():

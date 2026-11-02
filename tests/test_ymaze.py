@@ -340,8 +340,9 @@ def test_y_preview_and_result_page(client, store, tmp_path, monkeypatch):
 
     unit_figures = job["manifest"]["units"][0]["figures"]
     assert unit_figures["sequence"], "一次 B 入臂也要有序列图"
-    assert not [key for key in ("trajectory", "heatmap", "activity", "zones")
-                if unit_figures.get(key)]
+    # Y 自动补齐估计厘米空间图：轨迹/热图与序列图同清单输出。
+    assert unit_figures["trajectory"] and unit_figures["heatmap"], \
+        unit_figures
     run_dir = Path(store.paths.runs) / payload["run_id"]
     sequence = unit_figures["sequence"]
     assert sequence in job["manifest"]["files"]

@@ -942,3 +942,157 @@ def activity_png(path: str | Path, rows: Iterable[Mapping[str, Any]], *,
     figure.tight_layout()
     figure.savefig(path, format="png", dpi=dpi)
     return True
+
+
+# -- 通用空间图（EPM/Y 估计厘米、LDB 源像素、Barnes 圆盘厘米） ------------
+
+
+def qualified_points(rows: Iterable[Mapping[str, Any]], *, x_key: str,
+                     y_key: str) -> list[tuple[float, float, float]]:
+    """位置资格合同：in_window、detected、dt_s>0、坐标有限、
+    position_valid 非 false、jump 非 true；行中有 motion_x 键而值为
+    null 时剔除（位置事实不完整），不补零、不换用原始中心。"""
+
+    points: list[tuple[float, float, float]] = []
+    for row in rows:
+        if not row.get("in_window") or not row.get("detected"):
+            continue
+        if row.get("position_valid") is False or row.get("jump") is True:
+            continue
+        if _motion_missing(row):
+            continue
+        span = _finite(row.get("dt_s"))
+        if span is None or span <= 0:
+            continue
+        x = _finite(row.get(x_key))
+        y = _finite(row.get(y_key))
+        if x is None or y is None:
+            continue
+        points.append((x, y, span))
+    return points
+
+
+def space_extent(outlines: Sequence[Sequence[Sequence[float]]],
+                 points: Sequence[tuple[float, float, float]], *,
+                 margin_ratio: float = 0.06,
+                 min_margin: float = 1.0) -> tuple[float, float, float, float] | None:
+    """包含仪器轮廓与合格位置的范围，留约 6%、至少 1 个坐标单位边距。"""
+
+    xs: list[float] = []
+    ys: list[float] = []
+    for polygon in outlines:
+        for x, y in polygon:
+            xs.append(float(x))
+            ys.append(float(y))
+    for x, y, _ in points:
+        xs.append(float(x))
+        ys.append(float(y))
+    if not xs:
+        return None
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+    margin_x = max(margin_ratio * (x_max - x_min), min_margin)
+    margin_y = max(margin_ratio * (y_max - y_min), min_margin)
+    return (x_min - margin_x, x_max + margin_x,
+            y_min - margin_y, y_max + margin_y)
+
+
+def _space_base(extent: tuple[float, float, float, float],
+                outlines: Sequence[Sequence[Sequence[float]]],
+                xlabel: str, ylabel: str) -> tuple[Figure, Any]:
+    """6×5 英寸、等比例轴、图像 y 轴向下的源坐标画布。"""
+
+    x_min, x_max, y_min, y_max = extent
+    figure = Figure(figsize=(6.0, 5.0))
+    FigureCanvasAgg(figure)
+    axes = figure.add_subplot(111)
+    axes.set_xlim(x_min, x_max)
+    axes.set_ylim(y_max, y_min)
+    axes.set_aspect("equal", adjustable="box")
+    axes.set_xlabel(xlabel)
+    axes.set_ylabel(ylabel)
+    for polygon in outlines:
+        if len(polygon) < 3:
+            continue
+        axes.add_patch(patches.Polygon(
+            [(float(x), float(y)) for x, y in polygon], closed=True,
+            fill=False, edgecolor="#8a8a8a", linewidth=0.8))
+    return figure, axes
+
+
+def space_heat_grid(points: Sequence[tuple[float, float, float]],
+                    extent: tuple[float, float, float, float],
+                    bins: int = HEATMAP_BINS
+                    ) -> tuple[list[list[float]], int, float]:
+    """范围上 40×40、按 dt_s 加权的观测曝光网格（秒/箱）。"""
+
+    x_min, x_max, y_min, y_max = extent
+    width = x_max - x_min
+    height = y_max - y_min
+    grid: list[list[float]] = [[0.0] * bins for _ in range(bins)]
+    used = 0
+    total = 0.0
+    for x, y, span in points:
+        if not (x_min <= x <= x_max and y_min <= y <= y_max):
+            continue
+        column = min(bins - 1, max(0, int((x - x_min) / width * bins))) \
+            if width > 0 else 0
+        row_index = min(bins - 1, max(0, int((y - y_min) / height * bins))) \
+            if height > 0 else 0
+        grid[row_index][column] += span
+        used += 1
+        total += span
+    return grid, used, total
+
+
+def _finish_space(figure: Figure, axes: Any, path: str | Path, title: str,
+                  dpi: int) -> None:
+    if title:
+        axes.set_title(title, fontsize=9, color="#333333")
+    figure.tight_layout()
+    figure.savefig(path, format="png", dpi=dpi)
+    figure.clf()
+
+
+def space_trajectory_png(path: str | Path, *, segments:
+                         Sequence[tuple[float, float, float, float]],
+                         outlines: Sequence[Sequence[Sequence[float]]],
+                         extent: tuple[float, float, float, float],
+                         xlabel: str, ylabel: str, title: str = "",
+                         style: Mapping[str, Any] | None = None) -> bool:
+    """源坐标系轨迹：只画传入的完成运动段端点，不补连线。"""
+
+    if not segments:
+        return False
+    color, _, line_width, dpi = _style(style)
+    figure, axes = _space_base(extent, outlines, xlabel, ylabel)
+    for x0, y0, x1, y1 in segments:
+        axes.plot([x0, x1], [y0, y1], color=color, linewidth=line_width,
+                  solid_capstyle="round")
+    _finish_space(figure, axes, path, title, dpi)
+    return True
+
+
+def space_heatmap_png(path: str | Path, *,
+                      points: Sequence[tuple[float, float, float]],
+                      outlines: Sequence[Sequence[Sequence[float]]],
+                      extent: tuple[float, float, float, float],
+                      xlabel: str, ylabel: str, title: str = "",
+                      style: Mapping[str, Any] | None = None,
+                      bins: int = HEATMAP_BINS) -> bool:
+    """按 dt_s 加权的观测曝光热图；色条单位为
+    "Observed exposure (s per bin)"，没有合格位置不出图。"""
+
+    grid, used, _ = space_heat_grid(points, extent, bins)
+    if not used:
+        return False
+    _, colormap, _, dpi = _style(style)
+    x_min, x_max, y_min, y_max = extent
+    figure, axes = _space_base(extent, outlines, xlabel, ylabel)
+    image = axes.imshow(grid, cmap=colormap, origin="upper", aspect="equal",
+                        extent=(x_min, x_max, y_max, y_min),
+                        interpolation="nearest")
+    figure.colorbar(image, ax=axes, fraction=0.046, pad=0.03,
+                    label="Observed exposure (s per bin)")
+    _finish_space(figure, axes, path, title, dpi)
+    return True

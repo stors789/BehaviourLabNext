@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from . import annotated, figures
-from .schema import sanitize_json
+from .schema import sanitize_json, ValidationError
 from .store import atomic_write_json
 
 SAFE_STEM = re.compile(r"[^A-Za-z0-9_-]+")
@@ -322,12 +323,258 @@ def _measurement_metadata_lines(metadata: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def _number(value: Any) -> float | None:
+    """有限数值或 None；布尔不当作数字。"""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _quad_outline(shape: Any) -> list[tuple[float, float]] | None:
+    """quad 形状的轮廓点；非法形状返回 None。"""
+
+    from .experiments.ldb import _polygon
+
+    return _polygon(shape)
+
+
+def _scale_outline(points: Sequence[Sequence[float]],
+                   scale: float) -> list[tuple[float, float]]:
+    """像素轮廓按同一有效尺度换算为估计厘米；只换算不重拟合。"""
+
+    return [(float(x) * scale, float(y) * scale) for x, y in points]
+
+
+def _space_pair(target: Path, rows: Sequence[Mapping[str, Any]], stem: str,
+                style: Mapping[str, Any] | None, figures_info: dict,
+                notes: list[str], name: str, *, segments, points, outlines,
+                extent, xlabel: str, ylabel: str) -> dict:
+    """共用出图：轨迹用完成段端点，热图用 dt_s 加权合格位置。"""
+
+    trajectory = f"{stem}_trajectory.png"
+    heatmap = f"{stem}_heatmap.png"
+    try:
+        if figures.space_trajectory_png(
+                target / trajectory, segments=segments, outlines=outlines,
+                extent=extent, xlabel=xlabel, ylabel=ylabel, title=name,
+                style=style):
+            figures_info["trajectory"] = trajectory
+        else:
+            notes.append("没有完成的连续运动段，未生成轨迹图")
+        if figures.space_heatmap_png(
+                target / heatmap, points=points, outlines=outlines,
+                extent=extent, xlabel=xlabel, ylabel=ylabel, title=name,
+                style=style):
+            figures_info["heatmap"] = heatmap
+        else:
+            notes.append("没有合格位置，未生成热图")
+    except (OSError, ValueError) as error:
+        notes.append(f"图形生成失败：{error}")
+        for key, filename in (("trajectory", trajectory),
+                              ("heatmap", heatmap)):
+            if not (target / filename).is_file():
+                figures_info[key] = None
+    return figures_info
+
+
+def _estimate_cm_space_figures(target: Path, rows, stem, style,
+                               figures_info: dict, notes: list[str], name: str,
+                               *, mode: str, unit_metadata: Mapping[str, Any],
+                               geometry: Mapping[str, Any] | None) -> dict:
+    """EPM/Y 自动：观测 x_cm/y_cm + 仪器轮廓按同一有效尺度换算为
+    估计厘米；不捏造场地宽高，尺度缺失就不出图。"""
+
+    if unit_metadata.get("mode") == "manual":
+        notes.append("纯人工记录，未生成空间图")
+        return figures_info
+    scale = _number(unit_metadata.get("cm_per_px_est"))
+    zones = geometry.get("zones") if isinstance(geometry, Mapping) else None
+    if not (scale is not None and scale > 0):
+        notes.append("估计厘米尺度缺失，未生成空间图")
+        return figures_info
+    if not isinstance(zones, Mapping) or not zones:
+        notes.append("缺少仪器几何，未生成空间图")
+        return figures_info
+    outlines: list[list[tuple[float, float]]] = []
+    for shape in zones.values():
+        points = _quad_outline(shape)
+        if points:
+            outlines.append(_scale_outline(points, scale))
+    if not outlines:
+        notes.append("仪器几何不是可绘制的轮廓，未生成空间图")
+        return figures_info
+    qualified = figures.qualified_points(rows, x_key="x_cm", y_key="y_cm")
+    segments = figures.motion_segments(rows)
+    extent = figures.space_extent(outlines, qualified)
+    if extent is None:
+        notes.append("没有可用的空间范围，未生成空间图")
+        return figures_info
+    return _space_pair(target, rows, stem, style, figures_info, notes, name,
+                       segments=segments, points=qualified, outlines=outlines,
+                       extent=extent, xlabel="x (估计 cm)",
+                       ylabel="y (估计 cm)")
+
+
+def _ldb_cm_segments_to_px(
+        segments: Sequence[tuple[float, float, float, float]],
+        mapping: Mapping[str, Any]) -> tuple[list[tuple[float, float, float,
+                                                         float]], int]:
+    """厘米完成段 → 源像素：明室 (+y)/暗室 (−y) 按 y_cm 符号选室，逆
+    homography 后用 ldb 前向映射往返校验；依据不足的段丢弃并计数，
+    不猜比例。"""
+
+    import numpy as np
+
+    from .experiments import ldb as ldb_module
+
+    converted: list[tuple[float, float, float, float]] = []
+    insufficient = 0
+    for x0, y0, x1, y1 in segments:
+        pixels: list[tuple[float, float]] = []
+        ok = True
+        for cx, cy in ((x0, y0), (x1, y1)):
+            zone = "light" if cy >= 0 else "dark"
+            if zone == "light":
+                local = (cx + mapping["along_light"] / 2.0, cy)
+                matrix = mapping["light"]
+            else:
+                local = (cx - mapping["offset"] + mapping["along_dark"] / 2.0,
+                         -cy)
+                matrix = mapping["dark"]
+            try:
+                inverse = np.linalg.inv(
+                    np.asarray(matrix, dtype="float64"))
+            except Exception:
+                ok = False
+                break
+            vector = inverse @ np.array([local[0], local[1], 1.0])
+            if abs(float(vector[2])) < 1e-12:
+                ok = False
+                break
+            px = (float(vector[0] / vector[2]), float(vector[1] / vector[2]))
+            back = ldb_module._apply_mapping(px, zone, mapping)
+            if back is None or math.hypot(back[0] - cx, back[1] - cy) > 1e-6:
+                ok = False
+                break
+            pixels.append(px)
+        if ok:
+            converted.append((pixels[0][0], pixels[0][1],
+                              pixels[1][0], pixels[1][1]))
+        else:
+            insufficient += 1
+    return converted, insufficient
+
+
+def _ldb_space_figures(target: Path, rows, stem, style, figures_info: dict,
+                       notes: list[str], name: str, *,
+                       unit_metadata: Mapping[str, Any],
+                       geometry: Mapping[str, Any] | None,
+                       options: Mapping[str, Any]) -> dict:
+    """LDB：暗室可见且位置可用时的全装置源像素空间图。像素轴不标成
+    厘米；厘米完成段必须经可校验的逆映射回到源像素。"""
+
+    from .experiments import ldb as ldb_module
+
+    zones = geometry.get("zones") if isinstance(geometry, Mapping) else None
+    outlines: list[list[tuple[float, float]]] = []
+    if isinstance(zones, Mapping):
+        for key in ("light", "dark", "doorway"):
+            points = _quad_outline(zones.get(key))
+            if points:
+                outlines.append(points)
+    qualified = figures.qualified_points(rows, x_key="x_px", y_key="y_px")
+    raw_segments = figures.motion_segments(rows)
+    coordinate_unit = unit_metadata.get("coordinate_unit")
+    segments: list[tuple[float, float, float, float]] = []
+    if coordinate_unit == "px":
+        segments = raw_segments
+    elif coordinate_unit == "cm":
+        light_quad = _quad_outline(zones.get("light")) \
+            if isinstance(zones, Mapping) else None
+        dark_quad = _quad_outline(zones.get("dark")) \
+            if isinstance(zones, Mapping) else None
+        mapping = None
+        if light_quad and dark_quad:
+            try:
+                mapping = ldb_module.chamber_mapping(light_quad, dark_quad,
+                                                     options)
+            except ValidationError as error:
+                notes.append(f"完成段转换依据不足：{error}")
+        if mapping is None:
+            if raw_segments:
+                notes.append("完成段转换依据不足，未生成轨迹图")
+        else:
+            segments, insufficient = _ldb_cm_segments_to_px(
+                raw_segments, mapping)
+            if insufficient:
+                notes.append(
+                    f"{insufficient} 段完成段转换依据不足，未绘制")
+    elif raw_segments:
+        notes.append("完成段转换依据不足，未生成轨迹图")
+    extent = figures.space_extent(outlines, qualified)
+    if extent is None:
+        notes.append("没有可用的空间范围，未生成空间图")
+        return figures_info
+    return _space_pair(target, rows, stem, style, figures_info, notes, name,
+                       segments=segments, points=qualified, outlines=outlines,
+                       extent=extent, xlabel="x (px)", ylabel="y (px)")
+
+
+def _barnes_space_figures(target: Path, rows, stem, style, figures_info: dict,
+                          notes: list[str], name: str, *,
+                          unit_metadata: Mapping[str, Any],
+                          geometry: Mapping[str, Any] | None,
+                          options: Mapping[str, Any]) -> dict:
+    """Barnes：圆盘物理坐标（cm，y 轴向下），范围固定 ±1.1R；几何
+    叠画与物理坐标使用同一既有仿射变换。"""
+
+    from .experiments import barnes as barnes_module
+
+    diameter = _number(unit_metadata.get("disc_diameter_cm"))
+    arena = geometry.get("arena") if isinstance(geometry, Mapping) else None
+    if not (diameter is not None and diameter > 0) or arena is None:
+        notes.append("圆盘直径或几何缺失，未生成空间图")
+        return figures_info
+    radius = diameter / 2.0
+    try:
+        ellipse, holes = barnes_module.require_geometry(geometry, options)
+    except ValidationError as error:
+        notes.append(f"仪器几何不可用：{error}")
+        return figures_info
+    matrix = barnes_module.affine_matrix(ellipse, diameter)
+    outlines: list[list[tuple[float, float]]] = [
+        [(radius * math.cos(2.0 * math.pi * index / 36),
+          radius * math.sin(2.0 * math.pi * index / 36))
+         for index in range(36)]]
+    hole_radius = _number(unit_metadata.get("hole_radius_cm")) or 0.0
+    for hole in holes:
+        center_cm = barnes_module.to_cm(matrix, ellipse[0], hole["center"])
+        if hole_radius > 0:
+            outlines.append([
+                (center_cm[0] + hole_radius * math.cos(
+                    2.0 * math.pi * index / 24),
+                 center_cm[1] + hole_radius * math.sin(
+                    2.0 * math.pi * index / 24))
+                for index in range(24)])
+    qualified = figures.qualified_points(rows, x_key="x_cm", y_key="y_cm")
+    segments = figures.motion_segments(rows)
+    extent = (-1.1 * radius, 1.1 * radius, -1.1 * radius, 1.1 * radius)
+    return _space_pair(target, rows, stem, style, figures_info, notes, name,
+                       segments=segments, points=qualified, outlines=outlines,
+                       extent=extent, xlabel="x (cm)", ylabel="y (cm)")
+
+
 def _unit_figures(target: Path, summary: Mapping[str, Any],
                   rows: Sequence[Mapping[str, Any]], stem: str,
                   style: Mapping[str, Any] | None, *,
                   events: Sequence[Mapping[str, Any]] | None = None,
                   bins: Sequence[Mapping[str, Any]] | None = None,
-                  suppress_positions: bool = False) -> dict:
+                  suppress_positions: bool = False,
+                  unit_metadata: Mapping[str, Any] | None = None,
+                  geometry: Mapping[str, Any] | None = None,
+                  options: Mapping[str, Any] | None = None) -> dict:
     """每动物可用图形：活动曲线不依赖场地宽高，轨迹/热图才需要。
 
     ``suppress_positions``（tracking_reliable=false / position_available=
@@ -443,6 +690,26 @@ def _unit_figures(target: Path, summary: Mapping[str, Any],
                         figures_info[key] = None
         else:
             missing_size_note = True
+    elif mode in ("epm", "ymaze") and not suppress_positions:
+        info = _estimate_cm_space_figures(
+            target, rows, stem, style, figures_info, notes, name,
+            mode=mode, unit_metadata=unit_metadata or {}, geometry=geometry)
+        if info is not None:
+            figures_info = info
+    elif mode == "ldb" and not suppress_positions:
+        info = _ldb_space_figures(
+            target, rows, stem, style, figures_info, notes, name,
+            unit_metadata=unit_metadata or {}, geometry=geometry,
+            options=options or {})
+        if info is not None:
+            figures_info = info
+    elif mode == "barnes" and not suppress_positions:
+        info = _barnes_space_figures(
+            target, rows, stem, style, figures_info, notes, name,
+            unit_metadata=unit_metadata or {}, geometry=geometry,
+            options=options or {})
+        if info is not None:
+            figures_info = info
     elif has_size:
         center = figures.center_rect_for(summary)
         trajectory = f"{stem}_trajectory.png"
@@ -640,6 +907,9 @@ def write_outputs(directory: str | Path, job: Mapping[str, Any],
                      if row.get("unit_id") not in set(frozen_order)]
     metadata_units = metadata.get("units") if isinstance(metadata, Mapping) \
         else None
+    frozen_units = {unit.get("id"): unit
+                    for unit in (job.get("units") or [])
+                    if isinstance(unit, Mapping) and unit.get("id")}
     units: list[dict] = []
     figure_map: dict[str, list[str]] = {}
     for index, row in enumerate(ordered_rows, start=1):
@@ -653,6 +923,7 @@ def write_outputs(directory: str | Path, job: Mapping[str, Any],
         unit_meta = (metadata_units or {}).get(unit_id) \
             if isinstance(metadata_units, Mapping) else None
         unit_meta = unit_meta if isinstance(unit_meta, Mapping) else {}
+        frozen = frozen_units.get(unit_id) or {}
         suppress = (unit_meta.get("tracking_reliable") is False
                     or unit_meta.get("position_available") is False)
         if assay_of == "ldb" and unit_meta.get("dark_box_invisible"):
@@ -660,7 +931,10 @@ def write_outputs(directory: str | Path, job: Mapping[str, Any],
             suppress = True
         info = _unit_figures(target, row, rows, stem, style, events=events,
                              bins=unit_bins,
-                             suppress_positions=bool(suppress))
+                             suppress_positions=bool(suppress),
+                             unit_metadata=unit_meta,
+                             geometry=frozen.get("geometry") or {},
+                             options=frozen.get("options") or {})
         names = [info[key] for key in ("trajectory", "heatmap", "activity",
                                        "objects", "exploration", "zones",
                                        "sequence")
