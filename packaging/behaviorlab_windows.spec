@@ -91,8 +91,11 @@ datas += collect_data_files("clr_loader")
 for distribution in ("pywebview", "pythonnet", "clr_loader", "av",
                      "opencv-python", "numpy", "matplotlib"):
     datas += copy_metadata(distribution)
-binaries = collect_dynamic_libs("webview", "pythonnet", "clr_loader",
-                                "av", "cv2")
+# 官方 6.22.3 API 为 collect_dynamic_libs(package, destdir=None,
+# search_patterns=...)：一次一个包，逐包调用后合并。
+binaries: list = []
+for _package in ("webview", "pythonnet", "clr_loader", "av", "cv2"):
+    binaries += collect_dynamic_libs(_package)
 
 # PyAV 的 FFmpeg DLL 按包旁 av.libs 原布局进入 bundle。
 for item in sorted(AV_LIBS_DIR.iterdir()):
@@ -100,7 +103,9 @@ for item in sorted(AV_LIBS_DIR.iterdir()):
         datas.append((str(item), "av.libs"))
 
 a = Analysis(
-    ["launch.py"],
+    # 官方 Analysis 把相对脚本相对 spec 所在目录解析：必须给绝对路径，
+    # 否则会去找 packaging/launch.py。pathex 只影响模块搜索。
+    [str(PROJECT_ROOT / "launch.py")],
     pathex=[str(PROJECT_ROOT)],
     binaries=binaries,
     datas=datas,

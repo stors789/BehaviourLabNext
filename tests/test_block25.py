@@ -172,6 +172,57 @@ def test_frozen_worker_success_and_unwritable_log(monkeypatch, tmp_path):
     assert sys.stdout is None and sys.stderr is None
 
 
+def test_frozen_worker_import_failure_reaches_log_and_progress(
+        monkeypatch, tmp_path):
+    """精确在 worker 导入处注入失败：必须进入日志/进度边界。
+
+    worker 顶层导入 outputs 与科学依赖，导入本身的 ImportError/DLL
+    失败不能逃出 main——要先补齐缺失标准流，再在同一异常边界内导入
+    并调用；失败写 traceback 与 progress.error 后返回 1，不弹错误框。
+    """
+
+    job_dir = tmp_path / "任务 一"
+    job_dir.mkdir()
+    log = job_dir / "worker.log"
+    log.write_text("预存一行\n", encoding="utf-8")
+    job = job_dir / "job.json"
+    job.write_text("{}", encoding="utf-8")
+    progress = tmp_path / "progress.json"
+
+    class _BoomFinder:
+        """worker 导入即抛受控 ImportError，模拟真实 DLL/依赖失败。"""
+
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname == "behaviourlab.worker":
+                raise ImportError("受控依赖 DLL 导入失败")
+            return None
+
+    boxes: list[str] = []
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    # from-import 会优先命中父包属性：必须同时清除模块缓存与属性，
+    # 让导入真正走 meta_path，在 worker 导入处精确注入失败。
+    monkeypatch.delitem(sys.modules, "behaviourlab.worker")
+    monkeypatch.delattr(sys.modules["behaviourlab"], "worker", raising=False)
+    monkeypatch.setattr(sys, "meta_path",
+                        [_BoomFinder(), *sys.meta_path])
+    monkeypatch.setattr(launcher_module, "show_native_error",
+                        lambda message: boxes.append(message))
+
+    code = main([WORKER_FLAG, str(job), str(tmp_path / "stage"),
+                 str(progress)])
+    assert code == 1, "导入失败返回 1，不逃出 main"
+    text = log.read_text(encoding="utf-8")
+    assert text.splitlines()[0] == "预存一行", "预存日志前行保留"
+    assert "Traceback" in text
+    assert "受控依赖 DLL 导入失败" in text, "导入失败进入 worker.log"
+    payload = json.loads(progress.read_text(encoding="utf-8"))
+    assert payload["error"].startswith("ImportError")
+    assert "受控依赖 DLL 导入失败" in payload["error"], "progress.error 可读"
+    assert sys.stdout is None and sys.stderr is None, "标准流恢复为 None"
+    assert boxes == [], "不触发桌面错误框"
+
+
 # -- 夹具 3：构建配方声明检查 ---------------------------------------------
 
 SPEC_PATH = Path(launcher_module.__file__).resolve().parents[1] / (
@@ -179,6 +230,24 @@ SPEC_PATH = Path(launcher_module.__file__).resolve().parents[1] / (
 
 
 def _spec_globals(recorder):
+    spec_dir = SPEC_PATH.parent
+
+    def fake_analysis(scripts, **kwargs):
+        # 约束官方 6.22.3 路径语义：相对脚本相对 spec 所在目录解析，
+        # 且文件必须存在（pathex 不影响脚本路径）。
+        resolved = []
+        for script in scripts:
+            candidate = Path(script)
+            if not candidate.is_absolute():
+                candidate = spec_dir / candidate
+            if not candidate.is_file():
+                raise SystemExit(f"ERROR: script '{candidate}' not found")
+            resolved.append(str(candidate))
+        recorder["analysis_scripts"] = resolved
+        recorder["analysis_kwargs"] = kwargs
+        return types.SimpleNamespace(pure=object(), scripts=[], binaries=[],
+                                     datas=[])
+
     fake_hooks = types.ModuleType("PyInstaller.utils.hooks")
 
     def collect_submodules(package):
@@ -193,8 +262,10 @@ def _spec_globals(recorder):
         recorder["metadata"].append(distribution)
         return []
 
-    def collect_dynamic_libs(*packages, **kwargs):
-        recorder["dynamic_libs"].append(tuple(packages))
+    # 官方签名 collect_dynamic_libs(package, destdir=None,
+    # search_patterns=...)：一次只接受一个包；多包位置参数必须 TypeError。
+    def collect_dynamic_libs(package, destdir=None, search_patterns=None):
+        recorder["dynamic_libs"].append(package)
         return []
 
     fake_hooks.collect_submodules = collect_submodules
@@ -205,18 +276,16 @@ def _spec_globals(recorder):
     fake_utils.hooks = fake_hooks
     fake_pyinstaller = types.ModuleType("PyInstaller")
     fake_pyinstaller.utils = fake_utils
-    return {
-        "SPECPATH": str(SPEC_PATH.parent),
-        "Analysis": lambda *args, **kwargs: recorder["analysis"].update(
-            args=args, kwargs=kwargs)
-        or types.SimpleNamespace(pure=object(), scripts=[], binaries=[],
-                                 datas=[]),
+    spec_globals = {
+        "SPECPATH": str(spec_dir),
+        "Analysis": fake_analysis,
         "PYZ": lambda *args, **kwargs: object(),
         "EXE": lambda *args, **kwargs: recorder["exe"].update(
             args=args, kwargs=kwargs) or object(),
         "COLLECT": lambda *args, **kwargs: recorder["collect"].update(
             args=args, kwargs=kwargs) or object(),
-    }, fake_pyinstaller, fake_utils, fake_hooks
+    }
+    return spec_globals, fake_pyinstaller, fake_utils, fake_hooks
 
 
 def _run_spec(monkeypatch, recorder, *, platform="win32",
@@ -245,26 +314,32 @@ def test_spec_rejects_wrong_platforms(monkeypatch):
     for kwargs in ({"platform": "linux"},
                    {"version": (3, 12, 0, "final", 0)},
                    {"maxsize": 2 ** 31 - 1}):
-        recorder = {"submodules": [], "data_files": [], "metadata": [],
-                    "dynamic_libs": [], "analysis": {}, "exe": {},
-                    "collect": {}}
+        recorder = _fresh_recorder()
         with pytest.raises(SystemExit, match="拒绝执行"):
             _run_spec(monkeypatch, recorder, **kwargs)
-        assert recorder["analysis"] == {}, "拒绝时不进入收集"
+        assert recorder["analysis_scripts"] is None, "拒绝时不进入收集"
+
+
+def _fresh_recorder():
+    return {"submodules": [], "data_files": [], "metadata": [],
+            "dynamic_libs": [], "analysis_scripts": None,
+            "analysis_kwargs": {}, "exe": {}, "collect": {}}
 
 
 def test_spec_accepts_windows_64_python311(monkeypatch):
     """Windows 64 位 3.11 条件接受；资源/动态模块/EXE/COLLECT 声明齐全。"""
 
-    recorder = {"submodules": [], "data_files": [], "metadata": [],
-                "dynamic_libs": [], "analysis": {}, "exe": {},
-                "collect": {}}
+    recorder = _fresh_recorder()
     _run_spec(monkeypatch, recorder)
 
-    analysis_args, analysis_kwargs = (recorder["analysis"]["args"],
-                                      recorder["analysis"]["kwargs"])
-    assert analysis_args[0] == ["launch.py"], "输入是同一主入口"
-    assert str(SPEC_PATH.parents[1]) in analysis_kwargs["pathex"]
+    project_root = SPEC_PATH.parents[1]
+    expected_entry = str(project_root / "launch.py")
+    # 入口按官方语义解析为根目录 launch.py 的绝对路径且真实存在。
+    assert recorder["analysis_scripts"] == [expected_entry]
+    assert Path(expected_entry).is_file()
+
+    analysis_kwargs = recorder["analysis_kwargs"]
+    assert str(project_root) in analysis_kwargs["pathex"]
 
     datas = analysis_kwargs["datas"]
     destinations = {destination for _, destination in datas}
@@ -297,8 +372,9 @@ def test_spec_accepts_windows_64_python311(monkeypatch):
                                          "clr_loader", "av",
                                          "opencv-python", "numpy",
                                          "matplotlib"}
-    assert recorder["dynamic_libs"] == [("webview", "pythonnet",
-                                         "clr_loader", "av", "cv2")]
+    assert recorder["dynamic_libs"] == ["webview", "pythonnet",
+                                        "clr_loader", "av", "cv2"], \
+        "5 包各调用一次官方单包签名"
     assert analysis_kwargs["hooksconfig"] == {
         "matplotlib": {"backends": ["agg"]}}
 
@@ -318,13 +394,11 @@ def test_spec_accepts_windows_64_python311(monkeypatch):
 def test_spec_rejects_missing_av_libs(monkeypatch, tmp_path):
     """av.libs 缺失时明确构建失败，不安静跳过。"""
 
-    recorder = {"submodules": [], "data_files": [], "metadata": [],
-                "dynamic_libs": [], "analysis": {}, "exe": {},
-                "collect": {}}
+    recorder = _fresh_recorder()
     fake_av = str(tmp_path / "nope" / "av" / "__init__.py")
     with pytest.raises(SystemExit, match="av.libs"):
         _run_spec(monkeypatch, recorder, av_file=fake_av)
-    assert recorder["analysis"] == {}, "失败时不产出任何声明"
+    assert recorder["analysis_scripts"] is None, "失败时不产出任何声明"
 
 
 def test_spec_compiles_and_template_assets_covered():

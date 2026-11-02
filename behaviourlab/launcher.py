@@ -47,7 +47,6 @@ def _run_private_worker(rest: list[str]) -> int:
             f"私有工作进程参数必须为 {WORKER_FLAG} JOB STAGE PROGRESS",
         )
         return 2
-    from . import worker as worker_module
 
     job_file = Path(rest[0])
     progress_path = Path(rest[2])
@@ -69,6 +68,11 @@ def _run_private_worker(rest: list[str]) -> int:
                 if sys.stderr is None:
                     sys.stderr = log_handle
             try:
+                # worker 顶层会导入 outputs 与科学依赖：导入本身必须在
+                # 同一异常边界内，真正的 ImportError/DLL 失败才会进入
+                # 日志与 progress 错误，而不是直接逃出 main。
+                from . import worker as worker_module
+
                 return int(worker_module.main(rest[0], rest[1], rest[2]))
             except SystemExit as exit_call:  # worker 不会这样退出，防御处理
                 return int(exit_call.code or 0)
