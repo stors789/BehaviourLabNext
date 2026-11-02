@@ -22,11 +22,78 @@ from pathlib import Path
 from typing import Any
 
 from .config import DataPaths
+from .runtime import WORKER_FLAG
 from .service import AlreadyRunningError, LocalService
 
 LOGGER = logging.getLogger("behaviourlab")
 
 LOCK_TAKEN_MESSAGE = ("此数据目录已有运行实例，请关闭原实例或选择其他数据目录")
+
+
+def _run_private_worker(rest: list[str]) -> int:
+    """冻结 EXE 后台工作进程：只分析，不弹错误框、不建数据根、无 GUI。
+
+    冻结 windowed 程序可能 ``sys.stdout``/``sys.stderr`` 为 None：这里
+    以 job_file 父目录的 ``worker.log``（UTF-8、追加、行缓冲）补上缺失
+    的标准流，已有重定向流原样保留；结束或异常后恢复原流并关闭自己
+    打开的句柄。早期异常（读任务/建目录/依赖导入）能写 stderr 就
+    traceback，再原子写 progress ``{error}`` 并返回 1；日志/进度本身
+    写失败只追加原因，不把失败变成功。
+    """
+
+    if len(rest) != 3:
+        _write_stream(
+            sys.stderr,
+            f"私有工作进程参数必须为 {WORKER_FLAG} JOB STAGE PROGRESS",
+        )
+        return 2
+    from . import worker as worker_module
+
+    job_file = Path(rest[0])
+    progress_path = Path(rest[2])
+    original_stdout, original_stderr = sys.stdout, sys.stderr
+    log_handle = None
+    try:
+        try:
+            # 任务目录由调度器创建并保存 job.json/progress.json/worker.log。
+            log_handle = open(job_file.parent / "worker.log", "a",
+                              encoding="utf-8", buffering=1)
+        except OSError as error:
+            log_handle = None
+            LOGGER.error("worker.log 打开失败，执行继续但本任务无日志：%s",
+                         error)
+        try:
+            if log_handle is not None:
+                if sys.stdout is None:
+                    sys.stdout = log_handle
+                if sys.stderr is None:
+                    sys.stderr = log_handle
+            try:
+                return int(worker_module.main(rest[0], rest[1], rest[2]))
+            except SystemExit as exit_call:  # worker 不会这样退出，防御处理
+                return int(exit_call.code or 0)
+            except BaseException as error:
+                try:
+                    if sys.stderr is not None:
+                        traceback.print_exc()
+                    else:
+                        LOGGER.error("工作进程早期失败：\n%s",
+                                     traceback.format_exc())
+                except Exception:
+                    pass
+                try:
+                    from .store import atomic_write_json
+
+                    atomic_write_json(progress_path, {
+                        "error": f"{type(error).__name__}: {error}"})
+                except OSError as write_error:
+                    LOGGER.error("写入进度失败：%s", write_error)
+                return 1
+        finally:
+            sys.stdout, sys.stderr = original_stdout, original_stderr
+    finally:
+        if log_handle is not None:
+            log_handle.close()
 
 
 def configure_logging(paths: DataPaths) -> None:
@@ -122,6 +189,12 @@ def _record_server(paths: DataPaths, url: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # 私有 worker 分派必须在常规 argparse/导入 WebApp/建 Store/Jobs/
+    # HTTP/GUI 之前：冻结 EXE 的后台 worker 只做分析，不创建数据根，
+    # 也不触发第 24 块的启动错误 MessageBox。
+    if argv and argv[0] == WORKER_FLAG:
+        return _run_private_worker(argv[1:])
     args = build_parser().parse_args(argv)
     paths = DataPaths.from_dir(args.data_dir)
     service: LocalService | None = None

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from . import outputs
+from .runtime import WORKER_FLAG, worker_command  # noqa: F401  命令分派唯一定义在 runtime
 from .store import atomic_write_json, read_json_file
 
 PROGRESS_INTERVAL_S = 0.2
@@ -66,15 +67,6 @@ class _ProgressWriter:
         except OSError:
             # 进度写不进去不能中断分析本身；失败原因随后仍在 worker.log。
             pass
-
-
-def worker_command(job_path: str | os.PathLike[str],
-                   stage_dir: str | os.PathLike[str],
-                   progress_path: str | os.PathLike[str]) -> list[str]:
-    """独立的子进程命令：每个路径都是单独参数，不经过 shell 拼接。"""
-
-    return [sys.executable, "-m", "behaviourlab.worker",
-            str(job_path), str(stage_dir), str(progress_path)]
 
 
 def run_frozen_job(resolved: Mapping[str, Any], *,
@@ -142,13 +134,18 @@ def execute_job_file(job_path: str | os.PathLike[str],
         writer.close()
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    if len(args) != 3:
-        print("用法：python -m behaviourlab.worker JOB STAGE PROGRESS",
-              file=sys.stderr)
-        return 2
-    return execute_job_file(args[0], args[1], args[2])
+def main(job: str | None = None, stage: str | None = None,
+         progress: str | None = None) -> int:
+    """工作进程入口：三个路径直调（私有分派）或从 ``-m`` 参数读取。"""
+
+    if job is None or stage is None or progress is None:
+        args = list(sys.argv[1:])
+        if len(args) != 3:
+            print("用法：python -m behaviourlab.worker JOB STAGE PROGRESS",
+                  file=sys.stderr)
+            return 2
+        job, stage, progress = args
+    return execute_job_file(job, stage, progress)
 
 
 if __name__ == "__main__":  # pragma: no cover - 子进程入口

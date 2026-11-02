@@ -19,7 +19,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from . import engine, worker
+from . import engine, runtime, worker
 from .config import ALGORITHM_VERSION, DataPaths
 from .processes import JobOwnerRegistry, OwnershipError, spawn_managed
 from .schema import ValidationError, is_valid_id, new_id
@@ -1092,8 +1092,9 @@ class JobScheduler:
 
     def _run_process(self, context: Mapping[str, Any]) -> int:
         job_path = context["task_dir"] / "job.json"
-        command = worker.worker_command(job_path, context["stage"],
-                                        context["progress_path"])
+        # 分派命令唯一定义在 runtime：源码走 -m，冻结 EXE 走私有 flag。
+        command = runtime.worker_command(job_path, context["stage"],
+                                         context["progress_path"])
         root = str(Path(__file__).resolve().parents[1])
         env = dict(os.environ)
         env["PYTHONUTF8"] = "1"
