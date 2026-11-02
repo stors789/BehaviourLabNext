@@ -139,7 +139,13 @@ def main(argv: list[str] | None = None) -> int:
 
         nonlocal service
         if service is not None:
-            stopped = service.stop()
+            try:
+                stopped = service.stop()
+            except Exception:
+                # 清理异常（如所有权记录删除失败）作为补充日志处理：
+                # 不替换最初的启动异常/cause，也不把未完成当成功。
+                LOGGER.exception("服务清理未完成")
+                stopped = False
             if stopped:
                 atexit.unregister(service.stop)
             return stopped

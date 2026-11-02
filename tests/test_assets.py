@@ -291,6 +291,14 @@ def test_background_validate_decodable_before_replace(client, store, tmp_path):
     assert empty.status_code == 400
     assert empty.get_json()["error"]["fields"][0]["field"] == "path"
 
+    # 0 字节 PNG 不再冒泡成服务器内部错误，而是可理解的背景业务错误。
+    zero_byte = tmp_path / "zero.png"
+    zero_byte.write_bytes(b"")
+    zero = client.post("/api/backgrounds/validate",
+                       json={"path": str(zero_byte)})
+    assert zero.status_code == 400
+    assert "背景文件为空" in zero.get_json()["error"]["message"]
+
 
 def test_media_routes_only_accept_registered_names(client):
     assert client.get("/api/backgrounds/not-a-name.png").status_code == 404

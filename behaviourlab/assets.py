@@ -272,6 +272,14 @@ def validate_background_path(path: str) -> None:
         data = file_path.read_bytes()
     except OSError as error:
         raise BackgroundError(f"背景文件不可读取：{error}") from error
-    image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if not data:
+        raise BackgroundError("背景文件为空")
+    try:
+        image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8),
+                             cv2.IMREAD_COLOR)
+    except Exception as error:
+        # cv2 对空内容/畸形数据可能直接抛错：统一转成可理解的背景
+        # 业务错误，而不是让接口冒泡成服务器内部错误。
+        raise BackgroundError(f"背景无法解码：{error}") from error
     if image is None or getattr(image, "ndim", 0) != 3:
         raise BackgroundError("背景无法解码为彩色图像")

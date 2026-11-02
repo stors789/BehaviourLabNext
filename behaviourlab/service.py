@@ -66,11 +66,13 @@ def check_health(url: str, data_root: str | Path) -> tuple[bool, str]:
 
 
 def _default_server_factory(app: Any, host: str, port: int, threads: int) -> Any:
-    """创建 Waitress 服务；部分构造/bind 失败时收掉自己创建的 dispatcher。
+    """创建 Waitress 服务；部分构造/bind 失败时显式收齐所属资源。
 
-    Waitress 在 bind 之前就创建 ``ThreadedTaskDispatcher`` 并启动工作
-    线程：端口被占等 bind 失败会把这些线程留在半构造对象里。这里由
-    工厂自己持有 dispatcher 并在失败时 shutdown 回收。
+    Waitress 在 bind 之前就创建 ``ThreadedTaskDispatcher``（线程立即
+    启动）和 trigger 管道，并把自己注册进 asyncore map：bind 失败时
+    这些资源留在被丢弃的半构造对象里，只等垃圾回收。这里让工厂持有
+    自己的 map 与 dispatcher，失败时逐项显式 close，再保留原始 bind
+    异常抛出；不依赖进程退出或垃圾回收代替收尾。
     """
 
     from waitress import create_server
@@ -78,16 +80,28 @@ def _default_server_factory(app: Any, host: str, port: int, threads: int) -> Any
 
     dispatcher = ThreadedTaskDispatcher()
     dispatcher.set_thread_count(threads)
+    owned_map: dict = {}
     try:
         return create_server(
             app,
             host=host,
             port=port,
             threads=threads,
+            map=owned_map,
             _dispatcher=dispatcher,
             clear_untrusted_proxy_headers=True,
         )
     except BaseException:
+        # 半构造对象登记在本实例 map 里（trigger 管道、未完成的监听
+        # socket 等）：逐项显式关闭，只处理本实例资源。
+        for entry in list(owned_map.values()):
+            close = getattr(entry, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except Exception:
+                LOGGER.exception("关闭 Waitress 部分构造资源失败")
         try:
             dispatcher.shutdown(cancel_pending=True, timeout=1.0)
         except Exception:
@@ -281,10 +295,20 @@ class LocalService:
             # 释放责任都在这里（Store 关闭之后）；注册表未被本实例
             # 持有时 held 为 False，不会碰其他实例的锁。
             if self._owner.held:
-                self._owner.release()
+                try:
+                    self._owner.release()
+                except Exception:
+                    # 释放失败（如记录删除权限错误）只补日志并标记未
+                    # 完成：不替换最初的启动异常/cause，也不冒称成功；
+                    # 可再次 stop 重试。
+                    LOGGER.exception("释放数据根所有权失败")
+                    complete = False
             self._owner_acquired = False
             self._server = None
             self._thread = None
+            if not complete:
+                LOGGER.warning("所有权释放未完成，保留可收尾状态")
+                return False
             self._stopped = True
             LOGGER.info("本地服务已停止")
             return True

@@ -288,6 +288,80 @@ def test_waitress_factory_recovers_dispatcher_on_bind_failure(monkeypatch):
     assert dispatcher.threads == set(), "bind 失败后 dispatcher 线程已回收"
 
 
+def test_waitress_factory_closes_owned_map_on_failure(monkeypatch):
+    """工厂失败分支必须逐项显式 close 本实例 map 登记的资源。"""
+
+    import os as os_module
+
+    import waitress as waitress_module
+
+    from behaviourlab.service import _default_server_factory
+
+    captured = {}
+
+    def failing_create_server(*args, **kwargs):
+        owned_map = kwargs["map"]
+        captured["map"] = owned_map
+        captured["dispatcher"] = kwargs["_dispatcher"]
+        # 模拟半构造已登记的资源：trigger 管道两端各自登记。
+        read_fd, write_fd = os_module.pipe()
+        captured["pipe"] = (read_fd, write_fd)
+
+        class _Registered:
+            def __init__(self, fd):
+                self._fd = fd
+                self.closed = False
+
+            def fileno(self):
+                return self._fd
+
+            def close(self):
+                if not self.closed:
+                    self.closed = True
+                    os_module.close(self._fd)
+
+        owned_map[read_fd] = _Registered(read_fd)
+        owned_map[write_fd] = _Registered(write_fd)
+        raise OSError("端口被占用")
+
+    monkeypatch.setattr(waitress_module, "create_server", failing_create_server)
+    with pytest.raises(OSError):
+        _default_server_factory(object(), "127.0.0.1", 39012, 1)
+    assert all(entry.closed for entry in captured["map"].values())
+    # 显式收尾（非垃圾回收）：pipe 两端文件描述符已不存在。
+    with pytest.raises(OSError):
+        os_module.fstat(captured["pipe"][0])
+    with pytest.raises(OSError):
+        os_module.fstat(captured["pipe"][1])
+    assert captured["dispatcher"].threads == set()
+
+
+def test_waitress_factory_real_bind_failure_closes_resources(monkeypatch):
+    """真实构造链：trigger/监听 socket 先登记再 bind 失败，必须被显式关闭。"""
+
+    import waitress as waitress_module
+    from waitress.server import TcpWSGIServer
+
+    from behaviourlab.service import _default_server_factory
+
+    captured = {}
+
+    def failing_bind(self):
+        captured["map"] = self._map
+        captured["entries"] = list(self._map.values())
+        raise OSError("端口被占用")
+
+    monkeypatch.setattr(TcpWSGIServer, "bind_server_socket", failing_bind)
+    with pytest.raises(OSError):
+        _default_server_factory(object(), "127.0.0.1", 39013, 2)
+    assert captured["entries"], "半构造对象已登记 trigger/监听资源"
+    for entry in captured["entries"]:
+        trigger_closed = getattr(entry, "_closed", None)
+        socket_gone = getattr(entry, "socket", None) is None
+        assert trigger_closed or socket_gone, f"所属资源未显式关闭：{entry!r}"
+    assert len(captured["map"]) == 0, "asyncore map 中无残留登记"
+
+
 def test_port_bind_failure_leaves_nothing_behind(harness, monkeypatch):
     """占端口构造失败：无剩余线程/Store/持锁，原异常日志不被替换。"""
 
@@ -330,3 +404,49 @@ def test_service_construction_failure_recovers_store(harness, monkeypatch):
     startup = (harness["paths"].logs / "startup.log").read_text(
         encoding="utf-8")
     assert "无法申请空闲端口" in startup
+
+
+def test_owner_release_failure_does_not_mask_original_error(
+        harness, monkeypatch, caplog):
+    """精确注入所属记录删除权限失败：主错误仍是原始 GUI 错误。
+
+    清理异常只作为补充日志；退出码 1 可判定清理状态；解除注入后
+    同一实例可继续收尾，不产生新的未处理异常覆盖主因。
+    """
+
+    import logging
+
+    def failing_window(url):
+        raise DesktopRuntimeError(
+            "无法启动桌面窗口：实际渲染引擎是“mshtml”。请安装或修复 "
+            "WebView2 后重新启动程序。")
+
+    registry = harness["jobs"].owner
+    real_release = registry.release
+    blocked = {"on": True}
+
+    def failing_release():
+        if blocked["on"]:
+            raise PermissionError("拒绝删除所属记录")
+        return real_release()
+
+    monkeypatch.setattr(desktop_module, "open_window", failing_window)
+    monkeypatch.setattr(registry, "release", failing_release)
+    with caplog.at_level(logging.ERROR, logger="behaviourlab"):
+        code = main(["--data-dir", str(harness["paths"].root)])
+    assert code == 1, "清理未完成不得返回 0"
+    # 原始 GUI 错误仍是启动日志主因。
+    startup = (harness["paths"].logs / "startup.log").read_text(
+        encoding="utf-8")
+    assert "mshtml" in startup and "DesktopRuntimeError" in startup
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("释放数据根所有权失败" in message for message in messages), \
+        "清理失败作为补充日志出现"
+    assert any("退出时清理未完成" in message for message in messages), \
+        "入口侧同样只补日志，不向外冒泡"
+    # 释放失败保留所有权与可收尾状态。
+    assert registry.held is True
+    assert harness["store"].closed is True, "Store 已先于释放关闭"
+    blocked["on"] = False
+    assert harness["service"].stop() is True, "解除阻塞后可继续收尾"
+    assert registry.held is False, "最终完成释放"
