@@ -65,6 +65,7 @@ def geometry_field(
     fixed: bool = False,
     modes: list[str] | None = None,
     role: str | None = None,
+    help: str | None = None,
 ) -> dict:
     """一步几何的绘制契约；count 为 0 表示点数可变，min_points 为下限。"""
 
@@ -90,6 +91,8 @@ def geometry_field(
         item["modes"] = list(modes)
     if role is not None:
         item["role"] = role
+    if help is not None:
+        item["help"] = help
     return item
 
 

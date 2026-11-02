@@ -76,8 +76,9 @@ SPEC = {
         geometry_field("dark", "暗室边界", "polygon", min_points=3),
         geometry_field("doorway", "门区", "polygon", min_points=3,
                        optional=True),
-        geometry_field("mask", "遮挡区域", "polygon", min_points=3,
-                       optional=True),
+        geometry_field("mask", "检测范围", "polygon", min_points=3,
+                       optional=True,
+                       help="仅在圈内检测；圈外不参与检测"),
     ],
     "metrics": [
         metric("light_time_s", "明室时间", "s"),

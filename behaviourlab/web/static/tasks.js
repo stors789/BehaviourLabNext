@@ -27,6 +27,23 @@
   const state = { batches: [], query: "", timer: null, pending: new Set(),
     errors: new Map() };
 
+  // 列表范围：项目页把自己的 project_id 交给任务列表，之后所有刷新（轮询、
+  // 重试、动作后）都用同一个 URL；全局任务页没有范围，照旧列出全部任务。
+  const projectScope = (root.dataset.project || "").trim();
+
+  function listUrl() {
+    return projectScope
+      ? "/api/jobs?project_id=" + encodeURIComponent(projectScope)
+      : "/api/jobs";
+  }
+
+  function inScope(batch) {
+    // 服务端已按项目过滤；这里再挡一次，属主不符的卡片一律不渲染。
+    if (!projectScope) return true;
+    if (!Object.prototype.hasOwnProperty.call(batch, "project_id")) return true;
+    return batch.project_id === projectScope;
+  }
+
   // -- 读取 -------------------------------------------------------------
   async function request(url, options) {
     let response;
@@ -63,12 +80,12 @@
 
   async function refresh() {
     try {
-      const data = await request("/api/jobs");
-      state.batches = data.batches || [];
+      const data = await request(listUrl());
+      state.batches = (data.batches || []).filter(inScope);
       if (el.error) el.error.hidden = true;
       render();
     } catch (error) {
-      // 读取失败保留最后一次真实状态，不显示成零任务。
+      // 读取失败保留最后一次真实状态，不显示成零任务，也不退成全局列表。
       if (el.error) {
         el.error.hidden = false;
         el.errorText.textContent = "读取任务失败：" + error.message;
@@ -293,7 +310,8 @@
   const seed = document.querySelector("#task-seed");
   if (seed) {
     try {
-      state.batches = JSON.parse(seed.textContent || "[]");
+      const parsed = JSON.parse(seed.textContent || "[]");
+      state.batches = (Array.isArray(parsed) ? parsed : []).filter(inScope);
     } catch (error) {
       state.batches = [];
     }

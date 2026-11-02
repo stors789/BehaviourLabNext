@@ -440,6 +440,8 @@ class FrameReader:
         self._last_raw = raw
         self._record_clock(raw)
         self._add_anchor(raw)
+        # 顺序解码顺带进有界图像缓存：按索引回读相邻帧不必重解同一段。
+        self._store_image(raw.index, raw.image)
         return raw
 
     def _store_image(self, index: int, image: Any) -> None:
@@ -615,6 +617,95 @@ class FrameReader:
                     )
                 yield raw, meta
 
+    # -- 时间定位 -------------------------------------------------------
+    # 时间→真实索引→指定帧读取：只复用本读取器的索引计数、时钟元信息、
+    # 缓存与关键帧锚点，不另建解码器、坐标或第二套时钟。
+
+    def _forward_time(
+        self, limit: float, best: tuple[int, ClockMeta] | None
+    ) -> tuple[int, ClockMeta]:
+        """顺序向前解码，返回 time_s≤limit 的最后一帧；坏时钟照旧报错。"""
+
+        while True:
+            try:
+                raw = self._next_raw()
+            except StopIteration:
+                break
+            meta = self._info_cache.get(raw.index)
+            if meta is None or meta.time_s is None:
+                raise ClockError(
+                    f"源时钟在第 {raw.index} 帧起不可解释，"
+                    "请设置显式解释帧率"
+                )
+            if meta.time_s <= limit:
+                # 候选帧原图进有界图像缓存：定位与取像素不必再解一遍。
+                self._store_image(raw.index, raw.image)
+                best = (raw.index, meta)
+            elif best is not None:
+                break
+        if best is None:
+            raise FrameReadError("时间点之前没有可解码帧")
+        return best
+
+    def _cached_time_frame(self, limit: float) -> tuple[int, ClockMeta] | None:
+        """已解码窗口内的证据：同一遍顺序解码的相邻两帧即可定出答案。"""
+
+        times = {index: meta.time_s for index, meta in self._info_cache.items()
+                 if meta.time_s is not None}
+        for index in sorted(times):
+            if times[index] <= limit:
+                continue
+            previous = index - 1
+            if previous in times and times[previous] <= limit:
+                return previous, self._info_cache[previous]
+            # 窗口不连续或前一帧不可解释：这条证据不成立，退回顺序解码。
+            return None
+        return None
+
+    def _pts_time_frame(self, target: float) -> int:
+        """可靠 PTS 下按已验证的源时间顺序定位；不用名义帧率猜帧号。"""
+
+        limit = target + TIME_EPS
+        cached = self._cached_time_frame(limit)
+        if cached is not None:
+            return cached[0]
+        # 当前位置已看过且还没越过目标：继续向前，不回到第 0 帧重建。
+        if not self._clock_dirty and self._last_raw is not None \
+                and self._last_raw.index == self._decoded - 1:
+            meta = self._info_cache.get(self._last_raw.index)
+            if meta is not None and meta.time_s is not None \
+                    and meta.time_s <= limit:
+                self._store_image(self._last_raw.index, self._last_raw.image)
+                return self._forward_time(
+                    limit, (self._last_raw.index, meta))[0]
+        # 目标在已解码窗口之前（或缓存已淘汰）：只能从头顺序定位。
+        self.rewind()
+        return self._forward_time(limit, None)[0]
+
+    def _fps_time_index(self, target: float) -> int:
+        """显式解释帧率下源时间就是 index/fps_override，直接算真实索引。"""
+
+        fps = float(self.fps_override)
+        return max(0, int(math.floor((target + TIME_EPS) * fps)))
+
+    def frame_at_time(self, target: float, orientation: int = 0) -> FrameInfo:
+        """返回 time_s≤target（沿用 TIME_EPS）的最后一帧；不回填请求时间。"""
+
+        target = validate_time(target)
+        validate_orientation(orientation)
+        with self._lock:
+            index = (self._fps_time_index(target) if self.fps_override is not None
+                     else self._pts_time_frame(target))
+            try:
+                # 按真实索引取像素与时钟：命中缓存或从最近锚点顺序恢复。
+                return self.info(index, orientation)
+            except FrameReadError:
+                last = self._decoded - 1
+                if self.fps_override is None or last < 0 or index < self._decoded:
+                    raise
+                # 超过真实 EOF：沿用“返回最后可解码帧”，时间仍是该帧时间。
+                return self.info(last, orientation)
+
     def decoded_count(self) -> int:
         return self._decoded
 
@@ -754,42 +845,15 @@ def read_frame_at_time(
 ) -> FrameInfo:
     """返回 time_s≤t 的最后一帧；不把 t 回填为源时间。"""
 
-    target = validate_time(time_s)
+    validate_time(time_s)
     validate_orientation(orientation)
     validate_fps_override(fps_override)
     reader = _reader_for(
         path, pool=pool, decoder_factory=decoder_factory,
         fps_override=fps_override,
     )
-    with reader._lock:
-        reader.rewind()
-        best: tuple[RawFrame, ClockMeta] | None = None
-        while True:
-            try:
-                raw = reader._next_raw()
-            except StopIteration:
-                break
-            meta = reader._info_cache.get(raw.index)
-            if meta is None or meta.time_s is None:
-                raise ClockError(
-                    f"源时钟在第 {raw.index} 帧起不可解释，请设置显式解释帧率"
-                )
-            if meta.time_s <= target + TIME_EPS:
-                best = (raw, meta)
-            elif best is not None:
-                break
-        if best is None:
-            raise FrameReadError("时间点之前没有可解码帧")
-        raw, meta = best
-        image = reader._image_at(raw)
-        return FrameInfo(
-            image=_orient(image, orientation),
-            index=raw.index,
-            time_s=float(meta.time_s),
-            pts=meta.pts,
-            time_base=meta.time_base,
-            clock_source=meta.clock_source,
-        )
+    # 定位在读取器内部完成：先定真实源索引，再按索引读像素与时钟。
+    return reader.frame_at_time(float(time_s), orientation)
 
 
 class VideoSource:

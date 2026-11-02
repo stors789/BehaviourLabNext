@@ -551,19 +551,25 @@ def load_static_background(path: str | Path, orientation: int,
 
 def interpreted_duration(metadata: Mapping[str, Any],
                          video: Mapping[str, Any]) -> float | None:
-    """把已知时长换到与 Frame.time_s 相同的解释时钟；无法换算时返回 None。"""
+    """把已知时长换到与 Frame.time_s 相同的解释时钟；无法换算时返回 None。
+
+    有合法解释帧率且帧数可信时，帧数/解释帧率本身就能定出终点，不要求
+    同时有原容器时长；缺帧数时才退回“原时长×原帧率/解释帧率”。
+    """
+
+    override = video.get("fps_override")
+    valid_override = is_number(override) and float(override) > 0
+    frames = metadata.get("frame_count")
+    if valid_override and is_number(frames) and float(frames) > 0:
+        # 覆盖帧率下帧时间按 index/fps_override 解释，原始容器时长不能直接使用。
+        return float(frames) / float(override)
 
     duration = metadata.get("duration_s")
     if not is_number(duration) or float(duration) <= 0:
         return None
     seconds = float(duration)
-    override = video.get("fps_override")
-    if not is_number(override) or float(override) <= 0:
+    if not valid_override:
         return seconds
-    # 覆盖帧率下帧时间按 index/fps_override 解释，原始容器时长不能直接使用。
-    frames = metadata.get("frame_count")
-    if is_number(frames) and float(frames) > 0:
-        return float(frames) / float(override)
     source_fps = metadata.get("fps")
     if is_number(source_fps) and float(source_fps) > 0:
         return seconds * float(source_fps) / float(override)

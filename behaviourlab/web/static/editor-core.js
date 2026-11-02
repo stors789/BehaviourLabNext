@@ -1252,6 +1252,35 @@
     return objects;
   }
 
+  // 解释帧率下的有效时长，与 detection.interpreted_duration 同一规则：
+  // 合法覆盖＋可信帧数直接给 frame_count/fps_override；否则用原容器时长
+  // （有覆盖时按原帧率换算）。事实不足返回 null，不猜片尾。
+  function effectiveVideoDuration(meta, video) {
+    const source = meta && typeof meta === "object" ? meta : {};
+    const declaredOverride = video && typeof video === "object"
+      ? video.fps_override : null;
+    const override = declaredOverride == null ? NaN : Number(declaredOverride);
+    const validOverride = Number.isFinite(override) && override > 0;
+    const frames = Number(source.frame_count);
+    if (validOverride && Number.isFinite(frames) && frames > 0) {
+      return frames / override;
+    }
+    const declared = Number(source.duration_s);
+    if (!Number.isFinite(declared) || declared <= 0) return null;
+    if (!validOverride) return declared;
+    const sourceFps = Number(source.fps);
+    return Number.isFinite(sourceFps) && sourceFps > 0
+      ? declared * sourceFps / override : null;
+  }
+
+  // 时间窗输入框的初值：用户正在输入 > 已保存值 > 可证实的有效时长；
+  // 有效时长也未知时留空，不把当前所看帧伪装成片尾。
+  function windowFieldValue(typed, saved, fallback) {
+    if (typed != null) return typed;
+    if (saved != null) return saved;
+    return fallback == null ? null : fallback;
+  }
+
   // 动物时间窗：界面值转配置值。relative 的首次检测由服务端计算，这里只
   // 校验“偏移可为负、持续时间必须为正”，不补默认值也不改窗口计算。
   function normalizeWindow(mode, values) {
@@ -1382,6 +1411,8 @@
     stableStringify,
     normalizeWindow,
     assignWindow,
+    effectiveVideoDuration,
+    windowFieldValue,
     reconcileVideos,
     selectionNeedsSave,
     persistSelection,

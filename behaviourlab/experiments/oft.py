@@ -54,8 +54,9 @@ SPEC = {
     ],
     "geometry": [
         geometry_field("arena", "场地四角", "quad", count=4),
-        geometry_field("mask", "遮挡区域", "polygon", min_points=3,
-                       optional=True),
+        geometry_field("mask", "检测范围", "polygon", min_points=3,
+                       optional=True,
+                       help="仅在圈内检测；圈外不参与检测"),
     ],
     "metrics": [
         metric("center_percent", "中心区占比", "%"),

@@ -1031,12 +1031,21 @@
       rest.toFixed(digits).padStart(width, "0");
   }
 
+  // 解释帧率下的有效时长，与 detection.interpreted_duration 同一规则；
+  // 事实不足返回 null，不猜片尾。
+  function knownVideoDuration() {
+    const video = currentVideo();
+    const asset = video ? assetById(video.asset_id) : null;
+    return window.BLCore.effectiveVideoDuration(
+      (asset && asset.metadata) || {}, video);
+  }
+
   function videoDuration() {
+    const known = knownVideoDuration();
+    if (known != null) return known;
     const video = currentVideo();
     const asset = video ? assetById(video.asset_id) : null;
     const meta = (asset && asset.metadata) || {};
-    const declared = Number(meta.duration_s);
-    if (Number.isFinite(declared) && declared > 0) return declared;
     const fps = (video && video.fps_override) || Number(meta.fps) || 25;
     return (state.lastFrame + 1) / fps;
   }
@@ -1862,6 +1871,15 @@
       }
     });
     body.append(list);
+    // 步骤自带的说明（如“仅在圈内检测；圈外不参与检测”）紧跟步骤列表，
+    // 只在当前步骤有说明时出现。
+    const stepHelp = currentSpec();
+    if (stepHelp && stepHelp.help) {
+      const help = document.createElement("p");
+      help.className = "muted step-help";
+      help.textContent = stepHelp.help;
+      body.append(help);
+    }
     appendModeControl(body);
     if (state.assay === "ymaze") {
       // 场地页选择记录方式：自动追踪 / 人工记录（人工切换需确认已有记录）。
@@ -3278,7 +3296,8 @@
     const opts = options || {};
     const allowRelative = opts.allowRelative !== false;
     const video = currentVideo();
-    const duration = videoDuration();
+    // 新窗的默认终点只取能证实的有效时长；未知时留空，不把当前帧当片尾。
+    const duration = knownVideoDuration();
     const edit = windowEditOf(unit);
     const current = unit.window && typeof unit.window === "object" ? unit.window : null;
     const mode = edit ? edit.mode
@@ -3325,20 +3344,19 @@
       input.dataset.windowField = field;
       // 只有真正有下限的字段才设 min：相对偏移允许负值。
       if (minimum != null) input.min = String(minimum);
-      const value = raw && raw[field] != null ? raw[field] : fallback;
+      // 用户正在输入 > 已保存值 > 有效时长；未知时长留空。
+      const typed = raw && raw[field] != null ? raw[field] : null;
+      const saved = current && current[field] != null ? current[field] : null;
+      const value = window.BLCore.windowFieldValue(typed, saved, fallback);
       input.value = value == null ? "" : String(value);
       return input;
     };
 
     const startInput = numberInput("start_s",
-      current && current.start_s != null ? current.start_s
-        : (video && video.window && video.window.start_s) || 0, 0);
-    const endInput = numberInput("end_s",
-      current && current.end_s != null ? current.end_s : duration, 0);
-    const offsetInput = numberInput("offset_s",
-      current && current.offset_s != null ? current.offset_s : 0, null);
-    const spanInput = numberInput("duration_s",
-      current && current.duration_s != null ? current.duration_s : 2, 0);
+      (video && video.window && video.window.start_s) || 0, 0);
+    const endInput = numberInput("end_s", duration, 0);
+    const offsetInput = numberInput("offset_s", 0, null);
+    const spanInput = numberInput("duration_s", 2, 0);
 
     const exactRow = fieldRow([["起点（秒）", startInput], ["终点（秒）", endInput]]);
     const relativeRow = fieldRow([["偏移（秒）", offsetInput], ["持续时间（秒）", spanInput]]);

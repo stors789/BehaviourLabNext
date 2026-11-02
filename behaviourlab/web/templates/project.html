@@ -184,10 +184,14 @@
 
   <div class="section-head">
     <h2>批次</h2>
-    <span class="meta">{{ jobs | length }}</span>
+    <span class="meta" data-task-count>{{ jobs | length }} 个批次</span>
+  </div>
+  <div class="error-banner" id="task-read-error" hidden>
+    <span data-error-text></span>
+    <button class="button small" type="button" id="task-retry">重试</button>
   </div>
   {% if jobs %}
-  <ul class="batch-list" id="task-list" data-selected="">
+  <ul class="batch-list" id="task-list" data-selected="" data-project="{{ project.id }}">
     {% for batch in jobs %}
     {{ batches_tpl.batch_row(batch) }}
     {% endfor %}
