@@ -875,7 +875,10 @@ def _unit_payloads(job: Mapping[str, Any], result: Any,
 
 def _run_video(target: Path, job: Mapping[str, Any],
                units: Sequence[Mapping[str, Any]],
-               events: Sequence[Mapping[str, Any]]) -> tuple[str, float] | None:
+               events: Sequence[Mapping[str, Any]], *,
+               progress: Callable[[float, str], None] | None = None,
+               cancel: Callable[[], bool] | None = None
+               ) -> tuple[str, float] | None:
     """按 run 生成一份叠画视频；关闭开关时既不生成也不声明。"""
 
     output = job.get("output")
@@ -884,13 +887,15 @@ def _run_video(target: Path, job: Mapping[str, Any],
         return None
     name = "annotated.mp4"
     _, seconds = annotated.write_run_video(
-        target / name, job=job, units=units, events=events)
+        target / name, job=job, units=units, events=events,
+        progress=progress, cancel=cancel)
     return name, float(seconds)
 
 
 def write_outputs(directory: str | Path, job: Mapping[str, Any],
                   result: Any, *,
-                  progress: Callable[[float, str], None] | None = None
+                  progress: Callable[[float, str], None] | None = None,
+                  cancel: Callable[[], bool] | None = None
                   ) -> dict:
     """把一份 AnalysisResult 写成声明清单；唯一导出实现。
 
@@ -986,14 +991,22 @@ def write_outputs(directory: str | Path, job: Mapping[str, Any],
         units.append({"unit_id": unit_id, "unit_name": row.get("unit_name"),
                       "summary": row, "figures": info, "figure_files": names,
                       "annotated_video": None})
-        report(0.75 + 0.2 * len(units) / max(1, len(ordered_rows)),
+        # 结果文件与各动物图只占开头一段：叠画视频是长阶段，需要自己的区间。
+        report(0.75 + 0.09 * len(units) / max(1, len(ordered_rows)),
                "正在导出结果")
 
     # 一份 run 视频：所有动物共用一个流，按各自窗口叠各自几何与轨迹层。
+    if cancel is not None and cancel():
+        raise RuntimeError("导出已取消")
+    video_progress = None
+    if progress is not None:
+        def video_progress(fraction: float, message: str = "") -> None:
+            span = max(0.0, min(1.0, float(fraction)))
+            progress(0.84 + 0.145 * span, message)
     video = _run_video(
         target, job,
         _unit_payloads(job, result, summary_rows, observation_rows),
-        event_rows)
+        event_rows, progress=video_progress, cancel=cancel)
     if video:
         files.append(video[0])
         for entry in units:

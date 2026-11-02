@@ -42,6 +42,10 @@ jobs.py（Owned 顺序调度、私有子进程分派） ─ worker.py（后台�
 
 - 源时钟：显式 PTS/曝光区间优先，`fps_override` 只建立解释时钟，不宣称修复源 PTS（media.py）。无覆盖且取不到有效源帧率时，名义源帧率取默认 20（`source_fps_source=default`、`source_fps_note` 说明），时钟仍是真实 PTS。
 - 按时间取帧：先定位真实源索引再按索引读（`fps_override` 下 `index=⌊(t+ε)·fps⌋`；可靠 PTS 下只用已验证的顺序时间/缓存证据找目标，不用名义帧率猜帧号），缓存淘汰后按已验证的关键帧锚点（索引+PTS+时间）做一次有界 seek 恢复、失败才顺序重读；超过真实 EOF 仍返回最后可解码帧（media.py `FrameReader.frame_at_time`）。
+- seek 未获证实（越过锚点、探测耗尽、抛错）即作废当前位置：关闭解码器、清零索引计数与时钟状态，再从头顺序读到目标；连续多次失败停用 seek，剩余目标只顺序前进（media.py `_invalidate_position`）。不猜位置、不返回错帧像素。
+- 索引证据（锚点+首帧绝对 PTS）绑定产生它的**源文件身份**与解释帧率：换文件、换时钟参数时目标读取器拒绝采纳，退回顺序读取；规划→取像素之间源身份变化时报错放弃本次背景，不把旧索引/时间嫁接到新读取器（media.py `IndexEvidence`、detection `_build_temporal_background`）。
+- 叠画视频（annotated.py `write_run_video`）：切分点用二分只取当前曝光内部的切点；每只动物一次性把完成段端点换算成像素并按完成时刻建游标，轨迹只把**新完成段**追加进同色增量层（覆盖度乘积）后整层合成一次，每帧成本随已画像素/画布增长而不随历史段数重放；观测按 `frame` 预建索引（重复 frame 取首条）。编码前画面与逐段重放相比，差异只出现在抗锯齿部分覆盖像素（实测 ≤2 灰阶），完全覆盖与未画像素逐值相同。
+- 输出校验与进度：`verify_video` 流式逐帧核对数量/PTS/duration（不把整段像素驻留内存）；定位、编码、校验三个阶段都有取消检查与真实进度（未知总数只报阶段+已处理数），取消或失败关闭容器并删除未完成 MP4。
 - 缺失语义：缺席帧保留行、`detected=False`、`x_px=None`；窗口外上下文帧 `in_window=False`；缺失/未知/零值分开，不用 0 冒充。
 - 坐标：几何保存为当前方向下的原分辨率像素（analyze 页画布）；物理坐标只出现在 `x_cm/y_cm` 等测量字段并带 `coordinate_unit`；EPM/Y-迷宫的物理尺度是估计值（`cm_estimated`）。
 - 冻结：`engine.py` 把草稿+默认快照冻结为 `frozen_job.json`，含源身份（路径/大小/mtime）；分析只消费冻结件，重跑产生新 `run_id`，发布以 `result_manifest.json` 声明文件清单为准（`runs.py`/`web/app.py` 下载边界）。

@@ -13,7 +13,7 @@ import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 
 from .schema import Frame, ValidationError, is_number
 
@@ -41,6 +41,8 @@ MAX_READERS = 4
 INFO_CACHE_COUNT = 64
 ANCHOR_LIMIT = 2048
 SEEK_DECODE_LIMIT = 4096
+# 连续这么多次 seek 未获证实就停用 seek：后续只顺序读取，避免每个目标重扫。
+SEEK_FAILURE_LIMIT = 2
 TIME_EPS = 1e-9
 
 # 取不到有效源帧率、也没有合法覆盖时的名义源帧率。它只参与采样与
@@ -228,15 +230,29 @@ class FrameInfo:
 class IndexEvidence:
     """一遍扫描留下的有界索引证据：可信锚点 + 首帧绝对 PTS。
 
-    只记录已验证的（索引, PTS, 时间）；换文件或换时钟模式不得复用。
+    只记录已验证的（索引, PTS, 时间）。证据绑定**产生它的源文件身份**与
+    解释时钟参数：换文件、换解释帧率或换时钟模式都不得复用——索引与时间的
+    对应关系只对那一份源成立。
     """
 
     clock_source: str
     first_abs: float | None
     anchors: tuple[tuple[int, int, float | None], ...]
+    identity: tuple = ()
+    fps_override: float | None = None
 
     def __bool__(self) -> bool:
         return bool(self.anchors)
+
+
+def identity_key(identity: Mapping[str, Any] | None) -> tuple:
+    """源文件身份的稳定比较键；取不到身份时返回空元组。"""
+
+    if not isinstance(identity, Mapping):
+        return ()
+    return (int(identity.get("device") or 0), int(identity.get("inode") or 0),
+            int(identity.get("size") or 0), int(identity.get("mtime_ns") or 0),
+            int(identity.get("ctime_ns") or 0))
 
 
 def file_identity(path: str | Path) -> dict:
@@ -359,6 +375,8 @@ class FrameReader:
         self._previous_abs: float | None = None
         self._clock_error_index: int | None = None
         self._clock_dirty = False
+        self._seek_failures = 0
+        self._seek_disabled = False
         self._anchors: list[tuple[int, int]] = []
         self._info_cache: OrderedDict[int, ClockMeta] = OrderedDict()
         self._image_cache: OrderedDict[int, Any] = OrderedDict()
@@ -473,6 +491,7 @@ class FrameReader:
             self._anchors = thinned
 
     def _next_raw(self) -> RawFrame:
+        self._ensure_open()
         try:
             raw = next(self._iterator)
         except StopIteration:
@@ -518,6 +537,7 @@ class FrameReader:
         return raw.image
 
     def _raw_at(self, index: int) -> RawFrame:
+        self._ensure_open()
         if index == self._decoded - 1 and self._last_raw is not None:
             return self._last_raw
         cached = self._image_cache.get(index)
@@ -578,11 +598,44 @@ class FrameReader:
         self._clock_dirty = False
         self._store_image(raw.index, raw.image)
 
+    def _invalidate_position(self, *, seek_failed: bool = False) -> None:
+        """丢弃“当前位置”：底层解码器可能已被 seek 移动，索引计数不再可信。
+
+        只重置位置与时钟状态，保留按索引缓存的原帧（同一文件身份下仍有效）。
+        下一次读取从头重建解码器；不重复重试、不猜测位置。连续失败的 seek
+        会被停用，后续只用顺序读取走完，避免每个目标都重扫一遍。
+        """
+
+        if seek_failed:
+            self._seek_failures += 1
+            if self._seek_failures >= SEEK_FAILURE_LIMIT:
+                self._seek_disabled = True
+        if self._decoder is not None:
+            try:
+                self._decoder.close()
+            except Exception:
+                pass
+            self._decoder = None
+            self._iterator = iter(())
+        self._decoded = 0
+        self._last_raw = None
+        self._first_abs = None
+        self._previous_abs = None
+        self._clock_dirty = False
+        self._info_cache.clear()
+
+    def _ensure_open(self) -> None:
+        if self._decoder is None:
+            self._open()
+
     def _try_seek(self, anchor: tuple[int, int, float | None]) -> bool:
+        """按锚点 seek 并在 PTS 上核对归属；任何不能证实的结果都丢弃位置。"""
+
         anchor_index, anchor_pts = anchor[0], anchor[1]
         try:
             self._decoder.seek(anchor_pts, keyframe=True)
         except Exception:
+            self._invalidate_position(seek_failed=True)
             return False
         iterator = iter(self._decoder.frames())
         for _ in range(SEEK_DECODE_LIMIT):
@@ -591,15 +644,20 @@ class FrameReader:
             except StopIteration:
                 break
             except Exception:
+                self._invalidate_position(seek_failed=True)
                 return False
             if raw.pts is None:
+                self._invalidate_position(seek_failed=True)
                 return False
             if raw.pts > anchor_pts:
                 # seek 落在锚点之后，无法恢复原索引计数。
+                self._invalidate_position(seek_failed=True)
                 return False
             if raw.pts == anchor_pts:
                 if not raw.keyframe:
+                    self._invalidate_position(seek_failed=True)
                     return False
+                self._seek_failures = 0
                 raw.index = anchor_index
                 self._iterator = iterator
                 self._decoded = anchor_index + 1
@@ -610,13 +668,19 @@ class FrameReader:
                 else:
                     self._adopt_anchor_clock(raw, time_s)
                 return True
+        # 探测耗尽仍未落到锚点：同样不能假设位置没变。
+        self._invalidate_position(seek_failed=True)
         return False
 
     def _backward_to(self, index: int) -> None:
-        anchor = self._select_anchor(index)
+        anchor = self._select_anchor(index) if not self._seek_disabled else None
         if anchor is not None and self._try_seek(anchor):
             return
-        self.rewind()
+        # 锚点不可用或 seek 未获证实：从头重建（一次，不循环重试）。
+        if self._decoder is None:
+            self._open()
+        else:
+            self.rewind()
 
     def frame(self, index: int, orientation: int = 0) -> Any:
         validate_index(index)
@@ -828,19 +892,33 @@ class FrameReader:
 
     # -- 索引证据与按索引取像素 -----------------------------------------
     def index_evidence(self) -> IndexEvidence:
-        """导出这一遍已验证的有界索引证据；不导出像素。"""
+        """导出这一遍已验证的有界索引证据；不导出像素。
+
+        证据带上产生它的源文件身份与解释时钟参数：换文件、换解释帧率或换
+        时钟模式时，目标读取器必须拒绝这份证据。
+        """
 
         return IndexEvidence(self.clock_source, self._first_abs,
-                             tuple(self._anchors))
+                             tuple(self._anchors), identity_key(self.identity),
+                             self.fps_override)
 
     def seed_index_evidence(self, evidence: IndexEvidence | None) -> bool:
-        """复用同一文件、同一时钟模式的索引证据；模式不符或已有证据则拒绝。"""
+        """复用同一文件、同一解释时钟的索引证据；不相符一律拒绝。
+
+        只比 ``clock_source`` 不足以证明索引归属：同一路径可能已被替换成
+        另一份关键帧布局不同的文件。身份、解释帧率、时钟模式三者都对上才
+        采纳，否则退回顺序读取（结果仍正确，只是慢）。
+        """
 
         if evidence is None or not evidence:
             return False
         if self._anchors or self._first_abs is not None:
             return False
         if evidence.clock_source != self.clock_source:
+            return False
+        if not evidence.identity or evidence.identity != identity_key(self.identity):
+            return False
+        if evidence.fps_override != self.fps_override:
             return False
         self._anchors = list(evidence.anchors)
         self._first_abs = evidence.first_abs
@@ -861,12 +939,13 @@ class FrameReader:
             at_target = (self._last_raw is not None
                          and self._last_raw.index == index
                          and self._decoded == index + 1)
-            if not at_target:
+            if not at_target and not self._seek_disabled:
                 anchor = self._select_anchor(index)
                 # 只在能省解码时 seek：目标在当前位之前，或锚点在当前位之后。
                 if anchor is not None and (
                         index < self._decoded - 1
                         or anchor[0] > self._decoded - 1):
+                    # 返回 False 时位置已被作废，_raw_at 会从头顺序读。
                     self._try_seek(anchor)
             raw = self._raw_at(index)
             return _orient(self._image_at(raw), orientation)
@@ -1182,18 +1261,26 @@ class VideoSource:
                   evidence: IndexEvidence | None = None) -> Iterator[Any]:
         """按真实索引产出方向像素；复用同一池内的像素读取器与索引证据。
 
-        只有确定要用的帧才会解码成像素，供两段式背景取样使用。
+        只有确定要用的帧才会解码成像素，供两段式背景取样使用。规划与取像素
+        必须属于同一份源：目标读取器的身份与证据身份不符时明确报源文件变化，
+        不把旧索引/时间嫁接到新 READER 上。
         """
 
         angle = self.orientation if orientation is None else orientation
+        planned = evidence if evidence is not None else self.index_evidence()
         reader = self._pool.get(
             self.path,
             fps_override=self.fps_override,
             decode_images=True,
             defer_images=True,
         )
-        reader.seed_index_evidence(
-            evidence if evidence is not None else self.index_evidence())
+        if isinstance(planned, IndexEvidence) and planned.identity \
+                and planned.identity != identity_key(reader.identity):
+            raise VideoSourceError(
+                "源文件在背景规划与取像素之间发生变化（身份不同），"
+                "已放弃本次取帧")
+        if planned is not None:
+            reader.seed_index_evidence(planned)
         for index in indices:
             yield reader.frame_at_index(index, angle)
 

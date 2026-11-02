@@ -121,7 +121,7 @@ def execute_job_file(job_path: str | os.PathLike[str],
         if cancel is not None and cancel():
             raise RuntimeError("分析已取消")
         manifest = outputs.export_result(stage, frozen, result,
-                                         progress=writer)
+                                         progress=writer, cancel=cancel)
         merged = _merge_manifest(manifest, frozen, list(manifest.get("files") or []))
         atomic_write_json(stage / "result_manifest.json", merged)
         writer(1.0, "已完成")

@@ -707,6 +707,13 @@ def _build_temporal_background(asset: Mapping[str, Any],
     metadata = asset.get("metadata") or {}
     pool = media.ReaderPool(max_readers=2)
     try:
+        # 规划、取像素与发布必须属于同一份源：先记下身份，两次阶段结束都核对。
+        try:
+            source_identity = media.identity_key(media.file_identity(path))
+        except (OSError, TypeError):
+            # 身份不可归属（路径不存在或测试替身）：不做绑定核对，也不采纳
+            # 任何旧索引证据；真实读取仍由 ReaderPool 拒绝不可读的源。
+            source_identity = ()
         # 规划阶段只读时刻/曝光：解码但不转 BGR、不复制方向像素。
         source = media.VideoSource(
             path, start_s=start, end_s=end_value, orientation=orientation,
@@ -719,6 +726,9 @@ def _build_temporal_background(asset: Mapping[str, Any],
             source, start=start, sample_end=sample_end, samples=samples,
             cancel=cancel,
         )
+        if source_identity:
+            _require_same_source(media, path, source_identity,
+                                 "背景规划与取像素之间")
         if cancel is not None and cancel():
             raise DetectionError("已取消")
         # 只对确定下来的源帧取像素：中间帧不再转 BGR、复制或转灰。
@@ -731,10 +741,27 @@ def _build_temporal_background(asset: Mapping[str, Any],
                     raise DetectionError("已取消")
                 yield entry[1], image, entry[2]
 
-        return temporal_background(frames(), samples, start, sample_end,
-                                   cancel=cancel)
+        background = temporal_background(frames(), samples, start, sample_end,
+                                         cancel=cancel)
+        if source_identity:
+            _require_same_source(media, path, source_identity, "背景构建期间")
+        return background
     finally:
         pool.close_all()
+
+
+def _require_same_source(media_module: Any, path: Any, identity: tuple,
+                         when: str) -> None:
+    """源身份变了就明确失败：不把旧时间/索引与新像素混成一份背景。"""
+
+    try:
+        current = media_module.identity_key(media_module.file_identity(path))
+    except (OSError, TypeError) as error:
+        raise media_module.MediaError(
+            f"源文件在{when}不可再访问：{path}") from error
+    if current != identity:
+        raise DetectionError(
+            f"源文件在{when}发生变化（身份不同），已放弃本次背景构建")
 
 
 # -- 背景复用：同语义键有界缓存 + 同键并发受控 ------------------------
