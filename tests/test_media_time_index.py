@@ -70,6 +70,23 @@ class Harness:
         return read_frame_at_time(self.path, target, orientation, override,
                                   pool=self.pool)
 
+    def info(self, index, orientation=0, override=None):
+        from behaviourlab.media import read_frame_info
+
+        return read_frame_info(self.path, index, orientation, override,
+                               pool=self.pool)
+
+    def snapshot(self):
+        """(open 次数, seek 次数, 解码帧数) 的实际计数。"""
+
+        return (self.counter.opens,
+                sum(item.seek_calls for item in self.factory.decoders),
+                self.counter.decoded)
+
+    def delta(self, before):
+        now = self.snapshot()
+        return tuple(now[index] - before[index] for index in range(3))
+
     def close(self):
         self.pool.close_all()
 
@@ -150,12 +167,9 @@ def test_fps_override_maps_time_to_real_index(tmp_path):
 
 @pytest.mark.parametrize("bad", [0, -1, True, "12.5", float("nan"), float("inf")])
 def test_invalid_override_still_rejected(tmp_path, bad):
-    path = tmp_path / "bad-override.mp4"
-    path.write_bytes(b"x")
-    with pytest.raises(ValidationError):
-        read_frame_at_time(path, 1.0, 0, bad,
-                           pool=ReaderPool(decoder_factory=CountedFactory(
-                               fps_spec(10), Counter())))
+    with harness(fps_spec(10), tmp_path, "bad-override.mp4") as h:
+        with pytest.raises(ValidationError):
+            h.read(1.0, override=bad)
 
 
 def test_fps_lookup_reuses_index_and_cache(tmp_path):
@@ -180,28 +194,37 @@ def test_fps_lookup_reuses_index_and_cache(tmp_path):
         assert int(backward.image[0, 0, 0]) == 186
 
 
-def test_fps_backward_after_eviction_is_bounded(tmp_path):
+def test_fps_backward_after_eviction_uses_anchor(tmp_path):
     with harness(fps_spec(400), tmp_path, "evict.mp4") as h:
         h.read(1.0, override=12.5)
-        cold = h.counter.decoded
+        before = h.snapshot()
         far = h.read(30.0, override=12.5)
         assert far.index == 375
+        mark = h.snapshot()
         back = h.read(1.0, override=12.5)
         assert back.index == 12
         assert back.time_s == pytest.approx(0.96, abs=TOL)
-        assert h.counter.opens == 2, "只重开一次，不循环重试"
-        assert h.counter.decoded <= cold + 376 + 13
+        opens, seeks, decoded = h.delta(mark)
+        assert opens == 0, "命中可信锚点时不重开解码器"
+        assert seeks == 1, "真正用了一次有界 seek 恢复"
+        assert decoded <= 13, "只补解锚点到目标的一段"
+        assert h.counter.decoded > before[2]
 
 
-def test_seek_failure_falls_back_to_sequential(tmp_path):
-    with harness(fps_spec(120), tmp_path, "no-seek.mp4") as h:
-        h.factory.fail_seek = True
+def test_seek_overshoot_falls_back_to_sequential(tmp_path):
+    """seek 落在锚点之后（归属无法证明）：拒绝猜测，退回顺序读取。"""
+
+    with harness(fps_spec(120), tmp_path, "overshoot.mp4") as h:
+        h.factory.corrupt_seek = True
         first = h.read(8.0, override=12.5)
         assert first.index == 100
+        mark = h.snapshot()
         back = h.read(0.16, override=12.5)
         assert back.index == 2
         assert back.time_s == pytest.approx(0.16, abs=TOL)
-        assert h.counter.opens == 2
+        opens, _seeks, decoded = h.delta(mark)
+        assert opens == 1, "锚点不可用时只重开一次"
+        assert decoded <= 5, "失败探测 + 从第 0 帧顺序到目标"
 
 
 # -- 二、可靠 PTS / VFR：按真实时间顺序定位 -----------------------------
@@ -223,32 +246,104 @@ def test_pts_lookup_uses_real_times(tmp_path):
         assert h.counter.decoded == 4, "重复目标由已解码证据回答"
 
 
-def test_pts_backward_reuses_evidence_then_rewinds_once(tmp_path):
+def test_pts_backward_reuses_anchor_instead_of_rescanning(tmp_path):
     with harness(make_spec([40 * index for index in range(200)]),
                  tmp_path, "pts-evict.mp4") as h:
         h.read(0.4)
         forward = h.read(7.0)
         assert forward.index == 175
-        opens = h.counter.opens
+        mark = h.snapshot()
         back = h.read(0.4)
         assert back.index == 10
         assert back.time_s == pytest.approx(0.4, abs=TOL)
-        assert h.counter.opens == opens + 1, "目标在已解码窗口之前只重开一次"
+        opens, seeks, decoded = h.delta(mark)
+        assert opens == 0, "可信锚点直接恢复，不再重开"
+        assert seeks == 1
+        assert decoded <= 12, "只补解锚点（关键帧 0）到目标的一段"
+
+
+def test_time_sequence_after_eviction(tmp_path):
+    """固定复例 187→187→188→200→100→200→100 的逐步计数。"""
+
+    for override, cold in ((None, 189), (12.5, 188)):
+        with harness(fps_spec(300), tmp_path, f"seq-{override}.mp4") as h:
+            steps = []
+            for index in (187, 187, 188, 200, 100, 200, 100):
+                target = index / 12.5 if override else index * 0.08
+                mark = h.snapshot()
+                info = h.read(target, override=override)
+                assert info.index == index, (override, index, info.index)
+                steps.append(h.delta(mark))
+
+            assert steps[0] == (1, 0, cold), "冷读只开一次、顺序到目标"
+            assert steps[1] == (0, 0, 0), "重复目标不再解码"
+            assert steps[2] == (0, 0, 1), "向前相邻只补一帧"
+            # 淘汰后回到 100：不重开，用一次有界 seek 补解关键帧到目标。
+            assert steps[4][0] == 0 and steps[4][1] == 1, steps
+            assert steps[4][2] <= 12, steps
+            assert steps[6][0] == 0 and steps[6][1] == 1, "再次回退仍走锚点"
+            assert steps[6][2] <= 12, steps
+
+
+def test_info_after_eviction_uses_anchor(tmp_path):
+    """read_frame_info 同样接入锚点恢复，不再从 0 重扫。"""
+
+    for override in (None, 12.5):
+        with harness(fps_spec(300), tmp_path, f"info-{override}.mp4") as h:
+            h.info(187, override=override)
+            mark = h.snapshot()
+            info = h.info(100, override=override)
+            assert info.index == 100
+            opens, seeks, decoded = h.delta(mark)
+            assert opens == 0, "不重开解码器"
+            assert seeks == 1, "用可信锚点 seek 恢复"
+            assert decoded <= 100 - 96 + 1, "只补解锚点到目标的一段"
+
+
+def test_info_values_match_cold_read(tmp_path):
+    """锚点恢复与从头冷读给出同一帧的同一组值（index/time/pts/像素）。"""
+
+    for override in (None, 12.5):
+        spec = fps_spec(300)
+        with harness(spec, tmp_path, f"cold-{override}.mp4") as cold:
+            expected = cold.info(100, orientation=90, override=override)
+        with harness(spec, tmp_path, f"warm-{override}.mp4") as warm:
+            warm.info(250, override=override)      # 先把位置推到远处
+            produced = warm.info(100, orientation=90, override=override)
+        assert produced.index == expected.index
+        assert produced.time_s == expected.time_s
+        assert produced.pts == expected.pts
+        assert produced.time_base == expected.time_base
+        assert produced.clock_source == expected.clock_source
+        assert np.array_equal(produced.image, expected.image)
+
+
+def test_stale_anchor_evidence_is_not_trusted(tmp_path):
+    """锚点记录的时间与当前基准不符时不得当成已验证：退回顺序读取。"""
+
+    with harness(fps_spec(300), tmp_path, "stale.mp4") as h:
+        h.read(16.0)                     # 建立顺序解码与锚点
+        reader = h.pool.get(h.path, fps_override=None, decode_images=True)
+        # 篡改一个锚点的记录时间，让它仍落在目标之前但换算对不上。
+        index, pts, time_s = reader._anchors[8]
+        reader._anchors[8] = (index, pts, float(time_s) - 1.0)
+        mark = h.snapshot()
+        info = h.read(index * 0.08)
+        assert info.index == index
+        assert info.time_s == pytest.approx(index * 0.08, abs=TOL), "时间来自真实 PTS"
+        opens, _seeks, _decoded = h.delta(mark)
+        assert opens == 1, "证据不可信时回到顺序读取，且只重开一次"
 
 
 def test_bad_pts_still_rejected(tmp_path):
-    missing = tmp_path / "missing-pts.mp4"
-    missing.write_bytes(b"x")
     with pytest.raises(ClockError):
-        read_frame_at_time(missing, 0.2, 0, None,
-                           pool=ReaderPool(decoder_factory=FakeFactory(
-                               make_spec([0, 40, None, 120]))))
-    backwards = tmp_path / "backwards-pts.mp4"
-    backwards.write_bytes(b"x")
+        with harness(make_spec([0, 40, None, 120]), tmp_path,
+                     "missing-pts.mp4") as h:
+            h.read(0.2)
     with pytest.raises(ClockError):
-        read_frame_at_time(backwards, 0.2, 0, None,
-                           pool=ReaderPool(decoder_factory=FakeFactory(
-                               make_spec([0, 100, 50, 200]))))
+        with harness(make_spec([0, 100, 50, 200]), tmp_path,
+                     "backwards-pts.mp4") as h:
+            h.read(0.2)
 
 
 def test_time_beyond_eof_returns_last_frame(tmp_path):

@@ -801,6 +801,9 @@
     const span = fixed(scope.start_s) + "–" + fixed(scope.end_s) + " s";
     if (scope.mode === "frame") return "单帧检测预览（不产生行为统计）";
     if (scope.mode === "configured") return "完整配置范围 " + span;
+    if (scope.mode === "partial") {
+      return "部分范围 " + span + "（只到当前源帧；完整终点未知）";
+    }
     return "当前片段 " + span + "（片段估计，非完整行为结果）";
   }
 
@@ -830,9 +833,17 @@
       lines.push("检测：候选 " + detection.candidates + " 个");
     }
     const behavior = summary.behavior;
+    let scopeNoted = false;
     if (behavior && typeof behavior === "object") {
       const value = (number) => (typeof number === "number" && isFinite(number)
         ? number.toFixed(2) : "—");
+      // 行为统计范围只写一次：完整配置、部分范围或片段估计都由同一处说明。
+      const pushScope = () => {
+        const text = previewScopeNote(scope);
+        if (!text) return;
+        lines.push(previewFramePrefix(frameTime) + text);
+        scopeNoted = true;
+      };
       if (behavior.mode === "oft") {
         const count = (number) => (typeof number === "number" && isFinite(number)
           ? String(number) : "—");
@@ -905,7 +916,7 @@
           + value(behavior.first_open_observation_latency_s) + " s · 首次确认进入开放 "
           + entryLatency);
         // 行为统计范围按实际请求范围标注：configured 为完整配置窗。
-        lines.push(previewFramePrefix(frameTime) + previewScopeNote(scope));
+        pushScope();
       } else if (behavior.mode === "barnes") {
         const count = (number) => (typeof number === "number" && isFinite(number)
           ? String(number) : "—");
@@ -923,7 +934,7 @@
           + " 次 · 首次目标 " + primary
           + " · 错误 " + count(behavior.primary_errors)
           + " · 鼻尖覆盖 " + percent(behavior.nose_coverage_percent));
-        lines.push(previewFramePrefix(frameTime) + previewScopeNote(scope));
+        pushScope();
         if (behavior.visit_source === "manual") {
           lines.push("访问序列来自人工记录，未使用自动鼻尖证据");
         }
@@ -949,6 +960,7 @@
       if (typeof behavior.threshold_note === "string" && behavior.threshold_note) {
         lines.push(behavior.threshold_note);
       }
+      if (!scopeNoted) pushScope();
     }
     if (summary.kind === "detection") {
       // 检测预览只核对单帧；范围说明与行为统计无关。

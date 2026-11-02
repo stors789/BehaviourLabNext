@@ -817,8 +817,7 @@
     if (el.rangeSlide) el.rangeSlide.value = String(target);
     if (el.rangeIndex) el.rangeIndex.value = String(target);
     if (el.rangeTime) {
-      el.rangeTime.textContent = "第 — 帧 · --:--.--- / " +
-        timeText(videoDuration(), 1);
+      el.rangeTime.textContent = "第 — 帧 · --:--.--- / " + durationText(1);
     }
     el.rangeImage.removeAttribute("src");
     if (el.rangeEmpty) el.rangeEmpty.hidden = false;
@@ -839,7 +838,7 @@
         }
         if (el.rangeTime) {
           el.rangeTime.textContent = "第 " + (Number.isFinite(frame) ? frame : target) +
-            " 帧 · " + timeText(time, 3) + " / " + timeText(videoDuration(), 1);
+            " 帧 · " + timeText(time, 3) + " / " + durationText(1);
         }
         // 只有这次请求仍有效且图已显示成功，才提交“已显示”的源帧与位置。
         state.rangeFrame = Number.isFinite(frame) ? Math.round(frame) : target;
@@ -1041,17 +1040,18 @@
   }
 
   function videoDuration() {
-    const known = knownVideoDuration();
-    if (known != null) return known;
-    const video = currentVideo();
-    const asset = video ? assetById(video.asset_id) : null;
-    const meta = (asset && asset.metadata) || {};
-    const fps = (video && video.fps_override) || Number(meta.fps) || 25;
-    return (state.lastFrame + 1) / fps;
+    // 事实不足（无覆盖、无原时长、无可信帧数）时不给总时长：不把当前帧
+    // 或名义帧率推算成“已知片尾”。
+    return knownVideoDuration();
+  }
+
+  function durationText(digits) {
+    const total = videoDuration();
+    return total == null ? "总时长未知" : timeText(total, digits);
   }
 
   function frameLabel(info) {
-    const total = timeText(videoDuration(), 1);
+    const total = durationText(1);
     if (!info || !Number.isFinite(info.time)) {
       return "第 — 帧 · --:--.--- / " + total;
     }
@@ -3662,7 +3662,9 @@
         setPreviewNote(window.BLCore.previewNoteFor(data));
         const scopeMode = data.preview_scope && data.preview_scope.mode;
         const scopeLabel = scopeMode === "frame" ? "本帧预览"
-          : scopeMode === "configured" ? "配置范围预览" : "片段预览";
+          : scopeMode === "configured" ? "配置范围预览"
+            : scopeMode === "partial" ? "部分范围预览（完整终点未知）"
+              : "片段预览";
         status(scopeLabel + " · 帧 " + data.frame_index, "ok");
         renderInspector();
       };

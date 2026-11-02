@@ -422,7 +422,11 @@ class FrameReader:
             return
         if self._anchors and self._anchors[-1][0] >= raw.index:
             return
-        self._anchors.append((raw.index, int(raw.pts)))
+        # 锚点连同这一遍已验证的索引时间一起保存：缓存淘汰后可直接用它
+        # 恢复，不必从第 0 帧重扫；时间无法证实（坏时钟）时存 None。
+        meta = self._info_cache.get(raw.index)
+        self._anchors.append(
+            (raw.index, int(raw.pts), meta.time_s if meta is not None else None))
         if len(self._anchors) > ANCHOR_LIMIT:
             old = self._anchors
             thinned = old[::2]
@@ -493,7 +497,7 @@ class FrameReader:
             raise FrameReadError("源帧不可读")
         return self._last_raw
 
-    def _select_anchor(self, index: int) -> tuple[int, int] | None:
+    def _select_anchor(self, index: int) -> tuple[int, int, float | None] | None:
         if self._clock_error_index is not None:
             return None
         candidate = None
@@ -504,8 +508,36 @@ class FrameReader:
                 break
         return candidate
 
-    def _try_seek(self, anchor: tuple[int, int]) -> bool:
-        anchor_index, anchor_pts = anchor
+    def _seek_anchor_time(self, raw: RawFrame, stored: float | None) -> float | None:
+        """seek 落到锚点后，能不能证明这一帧的时间；不能就返回 None。"""
+
+        if self.clock_source == "fps_override":
+            # 解释帧率下时间就是 index/fps；索引已由 seek 的 PTS 核对证明。
+            return raw.index / float(self.fps_override)
+        if stored is None or raw.pts is None or raw.time_base is None \
+                or self._first_abs is None:
+            return None
+        current = float(raw.pts * raw.time_base) - float(self._first_abs)
+        # 锚点记录的时间必须与本次基准换算吻合，否则不当已验证。
+        if abs(current - stored) > 1e-6 * max(1.0, abs(stored)):
+            return None
+        return float(stored)
+
+    def _adopt_anchor_clock(self, raw: RawFrame, time_s: float) -> None:
+        """把已验证锚点作为新的时钟起点，后续顺序帧按同一规则续算。"""
+
+        meta = ClockMeta(float(time_s), raw.pts, raw.time_base, raw.duration_s,
+                         self.clock_source)
+        self._info_cache[raw.index] = meta
+        self._trim_info()
+        if self.clock_source == "pts" and raw.pts is not None \
+                and raw.time_base is not None:
+            self._previous_abs = float(raw.pts * raw.time_base)
+        self._clock_dirty = False
+        self._store_image(raw.index, raw.image)
+
+    def _try_seek(self, anchor: tuple[int, int, float | None]) -> bool:
+        anchor_index, anchor_pts = anchor[0], anchor[1]
         try:
             self._decoder.seek(anchor_pts, keyframe=True)
         except Exception:
@@ -530,7 +562,11 @@ class FrameReader:
                 self._iterator = iterator
                 self._decoded = anchor_index + 1
                 self._last_raw = raw
-                self._clock_dirty = True
+                time_s = self._seek_anchor_time(raw, anchor[2])
+                if time_s is None:
+                    self._clock_dirty = True
+                else:
+                    self._adopt_anchor_clock(raw, time_s)
                 return True
         return False
 
@@ -555,7 +591,11 @@ class FrameReader:
             and (index not in self._info_cache or index not in self._image_cache)
         )
         if needs_rewind:
-            self.rewind()
+            # 先试已验证锚点（索引/PTS 可核对）恢复；锚点证据不足或
+            # seek 不可证明时回到从头读取，保证这里能给出真实时间。
+            self._backward_to(index)
+            if self._clock_dirty:
+                self.rewind()
         while self._decoded <= index:
             try:
                 self._next_raw()
@@ -662,6 +702,30 @@ class FrameReader:
             return None
         return None
 
+    def _anchor_time_frame(self, limit: float) -> tuple[int, ClockMeta] | None:
+        """已验证锚点（索引+时间）里最后一个不越过目标的起点。
+
+        锚点时间来自顺序解码那一遍的 ClockMeta，seek 后再按 PTS 基准复核；
+        任一环节证明不了就返回 None，由调用方退回顺序读取。
+        """
+
+        best = None
+        for anchor in self._anchors:
+            if anchor[2] is None:
+                continue
+            if anchor[2] <= limit:
+                best = anchor
+            else:
+                break
+        if best is None:
+            return None
+        if not self._try_seek(best):
+            return None
+        meta = self._info_cache.get(best[0])
+        if meta is None or meta.time_s is None:
+            return None
+        return best[0], meta
+
     def _pts_time_frame(self, target: float) -> int:
         """可靠 PTS 下按已验证的源时间顺序定位；不用名义帧率猜帧号。"""
 
@@ -678,7 +742,15 @@ class FrameReader:
                 self._store_image(self._last_raw.index, self._last_raw.image)
                 return self._forward_time(
                     limit, (self._last_raw.index, meta))[0]
-        # 目标在已解码窗口之前（或缓存已淘汰）：只能从头顺序定位。
+        # 目标在已解码窗口之前：先用可信锚点做有界恢复（关键帧→目标）。
+        anchored = self._anchor_time_frame(limit)
+        if anchored is not None:
+            return self._forward_time(limit, anchored)[0]
+        # 没有可用锚点（无关键帧/seek 失败/时钟不可信）才从头顺序定位；
+        # 刚打开的读取器本来就在开头，不必再重开一次。
+        if self._decoded == 0 and self._last_raw is None \
+                and not self._clock_dirty:
+            return self._forward_time(limit, None)[0]
         self.rewind()
         return self._forward_time(limit, None)[0]
 

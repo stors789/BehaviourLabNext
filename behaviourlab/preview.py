@@ -288,8 +288,21 @@ def _scope(assay: str, video: Mapping[str, Any], unit: Mapping[str, Any],
     manual = is_manual_path(assay, unit)
     if manual or relative:
         # 人工路径与相对单位窗都需要完整配置范围，不能只取 t±1/3 秒。
-        scope_end = end_value if end_value is not None else max(start, time_s)
-        scope_end = max(start, scope_end)
+        if end_value is None:
+            # 终点既没有显式配置、也没有可证实的有效时长：只能扫描到当前帧。
+            # 这属于部分范围，必须如实标注，不能当成完整配置范围。
+            scan_end = max(start, time_s)
+            return {
+                "start_s": start,
+                "end_s": scan_end,
+                "duration_s": scan_end - start,
+                "mode": "partial",
+                "partial": True,
+                "unknown_end": True,
+                "manual": manual,
+                "relative": relative,
+            }
+        scope_end = max(start, end_value)
         return {
             "start_s": start,
             "end_s": scope_end,
@@ -512,6 +525,12 @@ def create_preview(
         if step.get("required") and in_scope(step) and not is_drawn(step)
     ]
     warnings: list[str] = []
+    if scope.get("mode") == "partial":
+        # 事实不足：本次只扫到当前帧，明确说明这是部分范围而不是完整配置。
+        warnings.append(
+            "视频有效时长未知：本次行为预览只扫描 "
+            f"{float(scope['start_s']):.2f}–{float(scope['end_s']):.2f} s"
+            "（截至当前源帧的部分范围，不是完整配置范围）。")
     # 行为预览按名义源帧率采样；这里只陈述来源，不把默认 20 说成实测值。
     if behavior is not None:
         note = _default_source_fps_note(asset, metadata, video)

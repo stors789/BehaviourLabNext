@@ -41,7 +41,7 @@ jobs.py（Owned 顺序调度、私有子进程分派） ─ worker.py（后台�
 ## 时间/坐标/空值约定
 
 - 源时钟：显式 PTS/曝光区间优先，`fps_override` 只建立解释时钟，不宣称修复源 PTS（media.py）。无覆盖且取不到有效源帧率时，名义源帧率取默认 20（`source_fps_source=default`、`source_fps_note` 说明），时钟仍是真实 PTS。
-- 按时间取帧：先定位真实源索引再按索引读（`fps_override` 下 `index=⌊(t+ε)·fps⌋`；可靠 PTS 下只用已验证的顺序时间/缓存证据找目标，不用名义帧率猜帧号），超过真实 EOF 仍返回最后可解码帧（media.py `FrameReader.frame_at_time`）。
+- 按时间取帧：先定位真实源索引再按索引读（`fps_override` 下 `index=⌊(t+ε)·fps⌋`；可靠 PTS 下只用已验证的顺序时间/缓存证据找目标，不用名义帧率猜帧号），缓存淘汰后按已验证的关键帧锚点（索引+PTS+时间）做一次有界 seek 恢复、失败才顺序重读；超过真实 EOF 仍返回最后可解码帧（media.py `FrameReader.frame_at_time`）。
 - 缺失语义：缺席帧保留行、`detected=False`、`x_px=None`；窗口外上下文帧 `in_window=False`；缺失/未知/零值分开，不用 0 冒充。
 - 坐标：几何保存为当前方向下的原分辨率像素（analyze 页画布）；物理坐标只出现在 `x_cm/y_cm` 等测量字段并带 `coordinate_unit`；EPM/Y-迷宫的物理尺度是估计值（`cm_estimated`）。
 - 冻结：`engine.py` 把草稿+默认快照冻结为 `frozen_job.json`，含源身份（路径/大小/mtime）；分析只消费冻结件，重跑产生新 `run_id`，发布以 `result_manifest.json` 声明文件清单为准（`runs.py`/`web/app.py` 下载边界）。
