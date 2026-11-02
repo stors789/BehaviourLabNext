@@ -183,6 +183,19 @@
     this.drag = null;
   };
 
+  // 当前实验有效步骤顺序里第一个尚未绘制的必需步骤；可选步骤不挡住推进，
+  // 全部必需步骤完成时返回 null（停在原地继续可编辑，不自动进入分析）。
+  function nextRequiredStep(steps, isDrawn) {
+    const list = Array.isArray(steps) ? steps : [];
+    const drawn = typeof isDrawn === "function" ? isDrawn : () => false;
+    for (const step of list) {
+      if (!step || step.required !== true) continue;
+      if (drawn(step.key)) continue;
+      return step;
+    }
+    return null;
+  }
+
   EditorCore.prototype.hitHandle = function (point, scale) {
     const radius = HANDLE_HIT_PX / Math.max(scale, 1e-9);
     const candidates = this.points.length ? this.points : [];
@@ -1375,6 +1388,7 @@
     previewContextAlive,
     removeUnit,
     resolveStep,
+    nextRequiredStep,
     rotateGeometry,
     mergeEcho,
     pickMedia,

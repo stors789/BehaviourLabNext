@@ -31,7 +31,7 @@ DETECTION_DEFAULTS: dict = {
     "erosion_kernel": 3,
     "erosion_iter": 1,
     "dilation_kernel": 5,
-    "dilation_iter": 2,
+    "dilation_iter": 1,
     "min_area": 120.0,
     "max_area": 50000.0,
     "temporal_bg_samples": 90,
@@ -212,7 +212,7 @@ def apply_morphology(mask: np.ndarray, settings: Mapping[str, Any]) -> np.ndarra
     erosion_kernel = int(settings.get("erosion_kernel", 3))
     erosion_iter = int(settings.get("erosion_iter", 1))
     dilation_kernel = int(settings.get("dilation_kernel", 5))
-    dilation_iter = int(settings.get("dilation_iter", 2))
+    dilation_iter = int(settings.get("dilation_iter", 1))
     if erosion_iter > 0 and erosion_kernel >= 1:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
                                            (erosion_kernel, erosion_kernel))

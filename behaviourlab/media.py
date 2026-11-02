@@ -43,6 +43,11 @@ ANCHOR_LIMIT = 2048
 SEEK_DECODE_LIMIT = 4096
 TIME_EPS = 1e-9
 
+# 取不到有效源帧率、也没有合法覆盖时的名义源帧率。它只参与采样与
+# analysis_fps 的名义换算，不接管源时钟：可靠 PTS 仍按真实 PTS 解释。
+DEFAULT_SOURCE_FPS = 20.0
+DEFAULT_SOURCE_FPS_NOTE = "源FPS不可用，使用默认 20"
+
 
 class MediaError(RuntimeError):
     """无法读取指定媒体。"""
@@ -106,6 +111,29 @@ def validate_time(value: Any) -> float:
     if not math.isfinite(number) or number < 0:
         raise ValidationError("时间必须是有限非负数", "time_s")
     return number
+
+
+def nominal_source_fps(value: Any, *, fps_override: float | None = None
+                       ) -> tuple[float, str]:
+    """名义源帧率与来源：合法覆盖 > 有效原生帧率 > 默认 20。
+
+    返回 (帧率, 来源)，来源为 ``override`` / ``media`` / ``default``。
+    默认值只补名义帧率，不改变源时钟来源（仍为真实 PTS）。
+    """
+
+    if fps_override is not None:
+        return float(fps_override), "override"
+    if is_number(value):
+        number = float(value)
+        if math.isfinite(number) and number > 0:
+            return number, "media"
+    return DEFAULT_SOURCE_FPS, "default"
+
+
+def source_fps_note(source: str | None) -> str | None:
+    """默认源帧率的可读说明；真实帧率与显式覆盖不给说明。"""
+
+    return DEFAULT_SOURCE_FPS_NOTE if source == "default" else None
 
 
 def probe_video(path: str | Path) -> dict:
@@ -799,9 +827,10 @@ class VideoSource:
             else:
                 metadata = probe_video(self.path)
                 resolved_source = metadata.get("fps")
-        if not is_number(resolved_source) or float(resolved_source) <= 0:
-            raise VideoSourceError("源帧率不可用或不为正数")
-        self.source_fps = float(resolved_source)
+        # 无覆盖且取不到有效源帧率时补 20；显式覆盖仍压在原生值之上。
+        self.source_fps, self.source_fps_source = nominal_source_fps(
+            resolved_source, fps_override=self.fps_override)
+        self.source_fps_note = source_fps_note(self.source_fps_source)
         self.analysis_fps = (
             self.source_fps
             if self.sample_fps is None or self.sample_fps >= self.source_fps

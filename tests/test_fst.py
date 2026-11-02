@@ -288,7 +288,7 @@ def test_fst_registration_preview_and_result_page(client, store, tmp_path,
     assert {item["key"] for item in entry["parameters"]} == set(
         fst.DEFAULTS)
     assert entry["detection_defaults"]["erosion_iter"] == 1
-    assert entry["detection_defaults"]["dilation_iter"] == 2
+    assert entry["detection_defaults"]["dilation_iter"] == 1
     assert entry["detection_defaults"]["min_area"] == 80.0
 
     source = tmp_path / "fst.mp4"

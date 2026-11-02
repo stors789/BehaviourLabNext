@@ -39,7 +39,7 @@ NONNEGATIVE_KEYS = ("smoothing_window_s", "min_immobility_duration_s",
 POSITIVE_KEYS = ("cylinder_diameter_cm", "immobility_threshold",
                  "active_threshold", "bin_seconds")
 
-# 游泳：亮背景暗鼠；腐蚀 3×3 一次、膨胀 5×5 两次，面积 80–50000 px²。
+# 游泳：亮背景暗鼠；腐蚀 3×3 一次、膨胀 5×5 一次，面积 80–50000 px²。
 DETECTION_DEFAULTS = {
     "bg_method": "threshold",
     "bg_type": "light",
@@ -47,7 +47,7 @@ DETECTION_DEFAULTS = {
     "erosion_kernel": 3,
     "erosion_iter": 1,
     "dilation_kernel": 5,
-    "dilation_iter": 2,
+    "dilation_iter": 1,
     "min_area": 80.0,
     "max_area": 50000.0,
 }

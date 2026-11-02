@@ -82,6 +82,25 @@ def _interpreted_duration(metadata: Mapping[str, Any],
     return detection.interpreted_duration(metadata, video)
 
 
+def _default_source_fps_note(asset: Mapping[str, Any],
+                             metadata: Mapping[str, Any],
+                             video: Mapping[str, Any]) -> str | None:
+    """与 VideoSource 同一判据：只在真的取不到有效源帧率时才说明默认 20。"""
+
+    if video.get("fps_override") is not None:
+        return None
+    fps = metadata.get("fps")
+    if is_number(fps) and float(fps) > 0:
+        return None
+    try:
+        probed = media.probe_video(asset["path"]).get("fps")
+    except media.MediaError:
+        probed = None
+    if is_number(probed) and float(probed) > 0:
+        return None
+    return media.DEFAULT_SOURCE_FPS_NOTE
+
+
 def _background_for(settings: Mapping[str, Any], asset: Mapping[str, Any],
                     video: Mapping[str, Any], orientation: int,
                     width: int, height: int):
@@ -355,10 +374,11 @@ def create_preview(
     detection_settings = resolve_detection(
         draft["assay"], settings=settings, draft=draft, video=video, unit=unit)
     metadata = asset.get("metadata") or {}
-    duration_s = metadata.get("duration_s")
+    # 覆盖帧率下帧时间按 index/fps_override 解释，原始容器时长不能当终点；
+    # 窗口终点留空时按同一解释时钟的有效时长推导范围。
+    effective_duration = _interpreted_duration(metadata, video)
     scope = _scope(draft.get("assay", ""), video, unit, options,
-                   float(info.time_s), kind,
-                   float(duration_s) if is_number(duration_s) else None)
+                   float(info.time_s), kind, effective_duration)
 
     height, width = info.image.shape[:2]
     orientation = int(video.get("orientation", 0) or 0)
@@ -492,6 +512,11 @@ def create_preview(
         if step.get("required") and in_scope(step) and not is_drawn(step)
     ]
     warnings: list[str] = []
+    # 行为预览按名义源帧率采样；这里只陈述来源，不把默认 20 说成实测值。
+    if behavior is not None:
+        note = _default_source_fps_note(asset, metadata, video)
+        if note:
+            warnings.append(note + "。")
     if result is None:
         warnings.append("人工记录路径不运行自动检测。")
     elif result.missing_reason == "foreground_saturated":

@@ -20,7 +20,7 @@ def test_defaults_cover_full_table():
     assert defaults["erosion_kernel"] == 3
     assert defaults["erosion_iter"] == 1
     assert defaults["dilation_kernel"] == 5
-    assert defaults["dilation_iter"] == 2
+    assert defaults["dilation_iter"] == 1
     assert defaults["min_area"] == 120.0
     assert defaults["max_area"] == 50000.0
     assert defaults["quality_threshold"] == 0.4

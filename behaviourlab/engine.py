@@ -945,9 +945,17 @@ def run_job(resolved: Mapping[str, Any], *,
         "name": asset.get("name"),
         "fps": (float(source.source_fps)
                 if is_number(getattr(source, "source_fps", None)) else None),
+        # 来源说明：override/media 为真实解释时钟；default 表示源帧率不可用、
+        # 名义值取默认 20。旧记录没有这两个键，等价于 media 的实测帧率。
+        "fps_source": getattr(source, "source_fps_source", None),
         "analysis_fps": getattr(source, "analysis_fps", None),
         "orientation": getattr(source, "orientation", None),
     }
+    source_note = getattr(source, "source_fps_note", None)
+    if source_note:
+        merged["video"]["fps_note"] = source_note
+        if source_note not in result.warnings:
+            result.warnings.append(source_note)
     merged["algorithm_version"] = ALGORITHM_VERSION
     merged.setdefault("assay", resolved.get("assay"))
     result.metadata = merged

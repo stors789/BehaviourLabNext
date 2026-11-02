@@ -1710,12 +1710,28 @@
   }
 
   // -- 编辑器交互 -----------------------------------------------------
+  // 画完一个步骤后自动落到下一个未完成的必需步骤（按实验的有效步骤顺序）。
+  // 只有真正提交新几何才走这里：拖动已有顶点/点位、撤销、过小的椭圆都不改步骤。
+  function nextRequiredGeometryStep() {
+    const unit = currentUnit();
+    if (!unit) return null;
+    return window.BLCore.nextRequiredStep(
+      geometrySteps(), (key) => Boolean(stepShape(unit, key)));
+  }
+
   function commitGeometry(geometry) {
     const unit = currentUnit();
     if (!unit) return;
     setStepShape(unit, state.stepKey, geometry);
     markDirty();
     invalidatePreview();
+    const next = nextRequiredGeometryStep();
+    if (next && next.key !== state.stepKey) {
+      // 切步骤同时换标题、工具与编辑器草稿归属；不影响检测确认或分析启动。
+      selectStep(next.key);
+      return;
+    }
+    // 必需步骤已全部完成：保持当前步骤可编辑，不自动进入检测确认。
     syncTools();
     renderInspector();
     draw();
