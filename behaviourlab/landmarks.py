@@ -389,7 +389,8 @@ def evaluate(paths: DataPaths, session: Mapping[str, Any], *,
                 {"window": {"start_s": 0.0},
                  "fps_override": session.get("fps_override"),
                  "sample_fps": None},
-                orientation, width, height)
+                orientation, width, height,
+                cancel=(lambda: bool(cancel and cancel())))
             detector = detection.shared_detector(key, settings,
                                                  background=background)
         # 连续处理到最大选中帧：检测与关联不因跳选断链；选中帧只控制

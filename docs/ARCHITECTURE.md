@@ -86,3 +86,5 @@ jobs.py（Owned 顺序调度、私有子进程分派） ─ worker.py（后台�
 ## 时序背景取样（现状）
 
 `detection.py temporal_background`：已知有效终点时按源时钟在 [start,end] 均匀布目标，取**首个起点到达目标时刻的真实曝光帧**（目标后首帧），零曝光的窗口外帧不参与，样本不足时只对实际取得的有效帧求中位数，零样本拒绝；未知终点取前 N 帧。`ALGORITHM_VERSION="0.1.0"`（config.py）。提示词中"取目标时刻所在的真实源曝光帧（at or before）"表述**未接入**当前代码；参考实现报告的"未知终点只取一帧/越界仍生成背景"两类边界在本工程代码中不存在（只取有效真实帧、零样本即报错）。
+
+实际调用路径是两段式（`prepare_background` → `temporal_frame_plan` → `VideoSource.frames_at`）：先用同一采样流只读时刻/曝光定出目标源帧（`decode_images=False`），再只对这些源帧取方向像素，像素读取器用 `defer_images` 只对目标帧做 `to_ndarray`，中间帧不生成 BGR/不做方向复制/不转灰。背景按“源身份+方向+解释FPS+采样规则+窗口/推导终点+样本数+算法版本”做有界复用（条目与字节双上限，同键并发只建一份，取消/失败不发布），`TEMPORAL_BG_VERSION` 参与键。

@@ -458,7 +458,8 @@ def capture(context: Any, units: Sequence[Mapping[str, Any]]):
                 if signature not in backgrounds:
                     backgrounds[signature] = detection.prepare_background(
                         settings, asset, job,
-                        int(job.get("orientation", 0) or 0), width, height)
+                        int(job.get("orientation", 0) or 0), width, height,
+                        cancel=context.cancelled)
                 detectors[unit_id] = detection.shared_detector(
                     run_key, settings, background=backgrounds[signature])
                 regions[unit_id] = detection.geometry_region(

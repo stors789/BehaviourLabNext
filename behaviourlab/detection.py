@@ -9,9 +9,11 @@ from __future__ import annotations
 import math
 import os
 import tempfile
+import threading
+from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import cv2
 import numpy as np
@@ -47,6 +49,15 @@ SATURATION_RATIO = 0.85
 TILE = 64
 STRIP_ROWS = 64
 SHADOW_FRACTION = 0.98
+
+# 时序背景的算法版本：取样/中位数规则一旦变化就必须改，缓存键据此失效。
+TEMPORAL_BG_VERSION = 1
+# 背景缓存按条目与字节双上限，避免大图、多视频累积。
+BACKGROUND_CACHE_ENTRIES = 8
+BACKGROUND_CACHE_BYTES = 96 * 1024 * 1024
+# 同键并发构建时等待对方完成的上限；超时明确报错，不无限阻塞。
+BACKGROUND_WAIT_SECONDS = 900.0
+BACKGROUND_POLL_SECONDS = 0.05
 
 
 class DetectionError(RuntimeError):
@@ -578,8 +589,13 @@ def interpreted_duration(metadata: Mapping[str, Any],
 
 def prepare_background(settings: Mapping[str, Any], asset: Mapping[str, Any],
                        video: Mapping[str, Any], orientation: int,
-                       width: int, height: int):
-    """按方法准备背景；threshold/local_otsu 不需要。预览与分析共用。"""
+                       width: int, height: int, *,
+                       cancel: Callable[[], bool] | None = None):
+    """按方法准备背景；threshold/local_otsu 不需要。预览与分析共用。
+
+    temporal 走“先按采样规则定目标源帧、再只对这些帧取像素”的两段式，
+    并对同一背景事实做有界复用；其余方法与取消语义保持原样。
+    """
 
     from . import media
 
@@ -600,27 +616,259 @@ def prepare_background(settings: Mapping[str, Any], asset: Mapping[str, Any],
         known_end = interpreted_duration(metadata, video)
         if sample_end is None and known_end is not None and known_end > start:
             sample_end = known_end
+        samples = int(settings.get("temporal_bg_samples", 90))
+        key = _temporal_background_key(
+            asset, video, metadata, orientation, width, height,
+            start, end_value, sample_end, samples)
+        if key is None:
+            # 源身份不可归属：现建现用，不写缓存。
+            return _build_temporal_background(
+                asset, video, orientation, start, end_value, sample_end,
+                samples, cancel)
+
+        def build():
+            return _build_temporal_background(
+                asset, video, orientation, start, end_value, sample_end,
+                samples, cancel)
+
+        return _cached_background(key, build, cancel)
+    return None
+
+
+# -- 时序背景：取样规则（单一定义，规划与建栈共用） --------------------
+def temporal_sample_targets(samples: int, start: float,
+                            end: float | None) -> list[float] | None:
+    """按有效区间均分的目标时刻；终点未知返回 None（取前 N 个有效帧）。"""
+
+    if end is not None and end > start:
+        return [start + (end - start) * index / samples
+                for index in range(samples)]
+    return None
+
+
+def _sample_reached(sample_time: float, targets: list[float] | None,
+                    taken: int) -> bool:
+    """已取 taken 个样本时，这一帧是否到达下一个目标时刻。"""
+
+    return (targets is not None and taken < len(targets)
+            and sample_time + 1e-9 >= targets[taken])
+
+
+def temporal_frame_plan(
+    source: Any, *, start: float, sample_end: float | None, samples: int,
+    cancel: Callable[[], bool] | None = None,
+) -> tuple[list[tuple[int, float, float]], Any]:
+    """在已构造的采样源上确定要用的真实源帧：只读时刻与曝光，不取像素。
+
+    返回 ([(index, time_s, 有效曝光)], 索引证据)。证据可在同文件、同时钟
+    模式下交给取像素的读取器，避免二次整段扫描。
+    """
+
+    if samples < 1:
+        raise DetectionError("背景样本数必须 ≥ 1")
+    targets = temporal_sample_targets(samples, start, sample_end)
+    plan: list[tuple[int, float, float]] = []
+    for frame in source.iter_frames():
+        if cancel is not None and cancel():
+            raise DetectionError("已取消")
+        exposure = frame.interval_end_s - frame.interval_start_s
+        if exposure <= 0:
+            continue
+        if targets is None:
+            plan.append((frame.index, float(frame.time_s), exposure))
+            if len(plan) >= samples:
+                break
+            continue
+        sample_time = max(float(frame.time_s), float(start))
+        if _sample_reached(sample_time, targets, len(plan)):
+            plan.append((frame.index, float(frame.time_s), exposure))
+            if len(plan) >= len(targets):
+                break
+    evidence = source.index_evidence()
+    if not plan:
+        raise DetectionError("没有可用的背景样本")
+    return plan, evidence
+
+
+def _build_temporal_background(asset: Mapping[str, Any],
+                               video: Mapping[str, Any], orientation: int,
+                               start: float, end_value: float | None,
+                               sample_end: float | None, samples: int,
+                               cancel: Callable[[], bool] | None = None):
+    """规划目标帧 → 只对这些帧取方向像素与灰度 → 同一中位数规则。
+
+    三个量互相独立，不互相代替：源帧解码次数（规划扫描 + 定位补解）、
+    目标像素转换次数（应等于实际样本数）、背景样本数（median 的帧数）。
+    """
+
+    from . import media
+
+    path = asset.get("path")
+    metadata = asset.get("metadata") or {}
+    pool = media.ReaderPool(max_readers=2)
+    try:
+        # 规划阶段只读时刻/曝光：解码但不转 BGR、不复制方向像素。
         source = media.VideoSource(
-            asset["path"],
-            start_s=start,
-            end_s=end_value,
-            orientation=orientation,
+            path, start_s=start, end_s=end_value, orientation=orientation,
             fps_override=video.get("fps_override"),
             sample_fps=video.get("sample_fps"),
             source_fps=metadata.get("fps"),
-            decode_images=True,
+            decode_images=False, pool=pool,
         )
-        # 只把正有效曝光的帧交给背景；窗口外零曝光的上下文帧不参与中位数。
-        frames = (
-            (frame.time_s, frame.image,
-             frame.interval_end_s - frame.interval_start_s)
-            for frame in source.iter_frames()
-            if frame.image is not None
+        plan, evidence = temporal_frame_plan(
+            source, start=start, sample_end=sample_end, samples=samples,
+            cancel=cancel,
         )
-        return temporal_background(
-            frames, int(settings.get("temporal_bg_samples", 90)), start, sample_end
-        )
-    return None
+        if cancel is not None and cancel():
+            raise DetectionError("已取消")
+        # 只对确定下来的源帧取像素：中间帧不再转 BGR、复制或转灰。
+        pixels = source.frames_at([item[0] for item in plan], orientation,
+                                  evidence)
+
+        def frames():
+            for entry, image in zip(plan, pixels):
+                if cancel is not None and cancel():
+                    raise DetectionError("已取消")
+                yield entry[1], image, entry[2]
+
+        return temporal_background(frames(), samples, start, sample_end,
+                                   cancel=cancel)
+    finally:
+        pool.close_all()
+
+
+# -- 背景复用：同语义键有界缓存 + 同键并发受控 ------------------------
+class _PendingBackground:
+    __slots__ = ("event", "error")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.error: BaseException | None = None
+
+
+_BACKGROUND_CACHE: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
+_BACKGROUND_BYTES = 0
+_BACKGROUND_INFLIGHT: dict[tuple, _PendingBackground] = {}
+_BACKGROUND_LOCK = threading.Lock()
+
+
+def _temporal_background_key(asset: Mapping[str, Any], video: Mapping[str, Any],
+                             metadata: Mapping[str, Any], orientation: int,
+                             width: int, height: int, start: float,
+                             end_value: float | None,
+                             sample_end: float | None, samples: int) -> tuple | None:
+    """只含影响背景像素的事实：同一化后相同才可命中。
+
+    源文件身份取不到（文件缺失/不可 stat）时返回 None：这种路径无法安全
+    归属，一律现建不缓存，也不与别的输入共用条目。
+    """
+
+    from . import media
+
+    path = asset.get("path")
+    try:
+        identity = media.file_identity(path)
+    except (OSError, TypeError):
+        return None
+    identity_key = (identity["device"], identity["inode"], identity["size"],
+                    identity["mtime_ns"], identity["ctime_ns"])
+    override = video.get("fps_override")
+    if is_number(override) and float(override) > 0:
+        fps_mode = ("override", float(override))
+    else:
+        fps_mode = ("native", None)
+    number = lambda value: float(value) if is_number(value) else None
+    return (
+        "temporal-background", TEMPORAL_BG_VERSION, identity_key,
+        int(orientation), fps_mode,
+        ("sample_fps", number(video.get("sample_fps"))),
+        ("window", float(start), number(end_value)),
+        ("samples", int(samples)),
+        ("targets_end", number(sample_end)),
+        # 用于末端推导与采样判定的元数据事实
+        ("metadata", number(metadata.get("fps")),
+         number(metadata.get("frame_count")), number(metadata.get("duration_s"))),
+        ("frame", int(width), int(height)),
+    )
+
+
+def _cache_store(key: tuple, value: np.ndarray) -> None:
+    global _BACKGROUND_BYTES
+    _BACKGROUND_BYTES += int(value.nbytes)
+    _BACKGROUND_CACHE[key] = value
+    _BACKGROUND_CACHE.move_to_end(key)
+    while _BACKGROUND_CACHE and (
+        len(_BACKGROUND_CACHE) > BACKGROUND_CACHE_ENTRIES
+        or _BACKGROUND_BYTES > BACKGROUND_CACHE_BYTES
+    ):
+        _, removed = _BACKGROUND_CACHE.popitem(last=False)
+        _BACKGROUND_BYTES -= int(removed.nbytes)
+
+
+def _cached_background(key: tuple, build: Callable[[], np.ndarray],
+                       cancel: Callable[[], bool] | None = None) -> np.ndarray:
+    """同键复用；并发同键只建一次，失败/取消不发布半成品。"""
+
+    with _BACKGROUND_LOCK:
+        hit = _BACKGROUND_CACHE.get(key)
+        if hit is not None:
+            _BACKGROUND_CACHE.move_to_end(key)
+            return hit
+        pending = _BACKGROUND_INFLIGHT.get(key)
+        owner = pending is None
+        if owner:
+            pending = _PendingBackground()
+            _BACKGROUND_INFLIGHT[key] = pending
+    if not owner:
+        waited = 0.0
+        while not pending.event.wait(BACKGROUND_POLL_SECONDS):
+            waited += BACKGROUND_POLL_SECONDS
+            if cancel is not None and cancel():
+                raise DetectionError("已取消")
+            if waited >= BACKGROUND_WAIT_SECONDS:
+                raise DetectionError("等待背景构建超时")
+        with _BACKGROUND_LOCK:
+            hit = _BACKGROUND_CACHE.get(key)
+        if hit is not None:
+            return hit
+        if pending.error is not None:
+            raise pending.error
+        raise DetectionError("背景构建未完成")
+
+    value = None
+    error: BaseException | None = None
+    try:
+        value = np.asarray(build())
+        # 缓存数组只读：后续检测不会改到共享背景。
+        value.setflags(write=False)
+    except BaseException as build_error:  # noqa: BLE001 - 原样上抛
+        error = build_error
+        raise
+    finally:
+        with _BACKGROUND_LOCK:
+            _BACKGROUND_INFLIGHT.pop(key, None)
+            if error is None and value is not None:
+                _cache_store(key, value)
+            pending.error = error
+        pending.event.set()
+    return value
+
+
+def background_cache_state() -> tuple[int, int]:
+    """诊断用：(条目数, 字节数)。"""
+
+    with _BACKGROUND_LOCK:
+        return len(_BACKGROUND_CACHE), int(_BACKGROUND_BYTES)
+
+
+def clear_background_cache() -> None:
+    """清空背景缓存（测试与显式失效用）。"""
+
+    global _BACKGROUND_BYTES
+    with _BACKGROUND_LOCK:
+        _BACKGROUND_CACHE.clear()
+        _BACKGROUND_INFLIGHT.clear()
+        _BACKGROUND_BYTES = 0
 
 
 def _median_strips(stack: np.ndarray, cancel=None) -> np.ndarray | None:
@@ -655,10 +903,7 @@ def temporal_background(frames: Iterable[tuple[float, Any]],
 
     if samples < 1:
         raise DetectionError("背景样本数必须 ≥ 1")
-    targets = None
-    if end is not None and end > start:
-        targets = [start + (end - start) * index / samples
-                   for index in range(samples)]
+    targets = temporal_sample_targets(samples, start, end)
 
     handle, temp_path = tempfile.mkstemp(suffix=".bg", prefix="blnext-")
     os.close(handle)
@@ -684,8 +929,7 @@ def temporal_background(frames: Iterable[tuple[float, Any]],
                     break
                 continue
             sample_time = max(time_s, float(start))
-            if (target_index < len(targets)
-                    and sample_time + 1e-9 >= targets[target_index]):
+            if _sample_reached(sample_time, targets, target_index):
                 stack[used] = gray
                 used += 1
                 target_index += 1

@@ -413,7 +413,8 @@ def capture(context: Any, units: Sequence[Mapping[str, Any]]):
                 if settings.get("bg_method") in ("temporal", "static"):
                     background = detection.prepare_background(
                         settings, asset, job,
-                        int(job.get("orientation", 0) or 0), width, height)
+                        int(job.get("orientation", 0) or 0), width, height,
+                        cancel=context.cancelled)
                 entry = {
                     "detector": detection.shared_detector(
                         (run_key, unit_id), settings, background=background),

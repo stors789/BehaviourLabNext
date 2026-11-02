@@ -506,6 +506,15 @@ def _patch_video_sources(monkeypatch, sources: list):
                 yield _Frame(media._orient(_raw_frame(), self.orientation),
                              index, index / self.fps)
 
+        def index_evidence(self):
+            # 受控源没有真实索引证据：不播种，按索引像素直接给。
+            return None
+
+        def frames_at(self, indices, orientation=None, evidence=None):
+            angle = self.orientation if orientation is None else orientation
+            for _index in indices:
+                yield media._orient(_raw_frame(), angle)
+
     monkeypatch.setattr(landmarks.media, "VideoSource", FakeSource)
 
 
@@ -632,9 +641,11 @@ def test_background_branch_zero_orientation_reproduces_mismatch(
                               {"bg_method": "temporal"})
     original_prepare = landmarks.detection.prepare_background
 
-    def forced_zero(settings, asset, video, orientation, width, height):
+    def forced_zero(settings, asset, video, orientation, width, height,
+                    **kwargs):
         # 只复现历史接线：背景支路被强制回 0°，其余计算不动。
-        return original_prepare(settings, asset, video, 0, width, height)
+        return original_prepare(settings, asset, video, 0, width, height,
+                                **kwargs)
 
     monkeypatch.setattr(landmarks.detection, "prepare_background",
                         forced_zero)

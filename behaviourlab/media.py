@@ -188,6 +188,8 @@ class RawFrame:
     time_base: Any | None
     keyframe: bool = False
     duration_s: float | None = None
+    # 延迟物化：只有真正要像素时才 to_ndarray（见 defer_images）。
+    pending: Any | None = None
 
 
 @dataclass(slots=True)
@@ -222,6 +224,21 @@ class FrameInfo:
         }
 
 
+@dataclass(slots=True)
+class IndexEvidence:
+    """一遍扫描留下的有界索引证据：可信锚点 + 首帧绝对 PTS。
+
+    只记录已验证的（索引, PTS, 时间）；换文件或换时钟模式不得复用。
+    """
+
+    clock_source: str
+    first_abs: float | None
+    anchors: tuple[tuple[int, int, float | None], ...]
+
+    def __bool__(self) -> bool:
+        return bool(self.anchors)
+
+
 def file_identity(path: str | Path) -> dict:
     stat = os.stat(path)
     ctime_ns = getattr(stat, "st_ctime_ns", None)
@@ -234,6 +251,12 @@ def file_identity(path: str | Path) -> dict:
         "mtime_ns": int(stat.st_mtime_ns),
         "ctime_ns": int(ctime_ns),
     }
+
+
+def _materialize(pending: Any) -> Any:
+    """把延迟物化的解码帧转成 BGR；只在真正需要像素时调用。"""
+
+    return pending.to_ndarray(format="bgr24")
 
 
 def _orient(image: Any, orientation: int) -> Any:
@@ -251,11 +274,13 @@ def _orient(image: Any, orientation: int) -> Any:
 class AVDecoder:
     """PyAV 顺序解码器；seek 只在关键帧锚点恢复时使用。"""
 
-    def __init__(self, path: str, decode_images: bool = True) -> None:
+    def __init__(self, path: str, decode_images: bool = True,
+                 defer_images: bool = False) -> None:
         import av
 
         self.path = str(path)
         self.decode_images = decode_images
+        self.defer_images = bool(defer_images)
         self.container = av.open(self.path)
         self.stream = next(
             (item for item in self.container.streams if item.type == "video"), None
@@ -275,8 +300,13 @@ class AVDecoder:
             if frame.duration is not None and time_base is not None:
                 duration_s = float(frame.duration * time_base)
             image = None
+            pending = None
             if self.decode_images:
-                image = frame.to_ndarray(format="bgr24")
+                if self.defer_images:
+                    # 先保留解码帧，等确定要这一帧的像素时再转 BGR。
+                    pending = frame
+                else:
+                    image = frame.to_ndarray(format="bgr24")
             yield RawFrame(
                 index=-1,
                 image=image,
@@ -284,6 +314,7 @@ class AVDecoder:
                 time_base=time_base,
                 keyframe=bool(frame.key_frame),
                 duration_s=duration_s,
+                pending=pending,
             )
 
     def seek(self, pts: int, keyframe: bool = True) -> None:
@@ -307,6 +338,7 @@ class FrameReader:
         decoder_factory: Callable[..., Any] | None = None,
         fps_override: float | None = None,
         decode_images: bool = True,
+        defer_images: bool = False,
     ) -> None:
         self.path = str(Path(path).resolve())
         try:
@@ -316,6 +348,7 @@ class FrameReader:
         self.fps_override = validate_fps_override(fps_override)
         self.clock_source = "fps_override" if self.fps_override is not None else "pts"
         self.decode_images = decode_images
+        self.defer_images = bool(defer_images) and decode_images
         self._factory = decoder_factory or AVDecoder
         self._lock = threading.RLock()
         self._decoder: Any = None
@@ -336,10 +369,15 @@ class FrameReader:
         try:
             try:
                 self._decoder = self._factory(
-                    self.path, decode_images=self.decode_images
+                    self.path, decode_images=self.decode_images,
+                    defer_images=self.defer_images,
                 )
             except TypeError:
-                self._decoder = self._factory(self.path)
+                try:
+                    self._decoder = self._factory(
+                        self.path, decode_images=self.decode_images)
+                except TypeError:
+                    self._decoder = self._factory(self.path)
             self._iterator = iter(self._decoder.frames())
         except MediaError:
             raise
@@ -470,6 +508,10 @@ class FrameReader:
         cached = self._image_cache.get(raw.index)
         if cached is not None:
             return cached
+        if raw.image is None and raw.pending is not None:
+            # 延迟物化：到这里才把这一帧转成 BGR。
+            raw.image = _materialize(raw.pending)
+            raw.pending = None
         if raw.image is None:
             raise FrameReadError("该帧没有可用像素")
         self._store_image(raw.index, raw.image)
@@ -784,6 +826,51 @@ class FrameReader:
     def image_cache_size(self) -> int:
         return len(self._image_cache)
 
+    # -- 索引证据与按索引取像素 -----------------------------------------
+    def index_evidence(self) -> IndexEvidence:
+        """导出这一遍已验证的有界索引证据；不导出像素。"""
+
+        return IndexEvidence(self.clock_source, self._first_abs,
+                             tuple(self._anchors))
+
+    def seed_index_evidence(self, evidence: IndexEvidence | None) -> bool:
+        """复用同一文件、同一时钟模式的索引证据；模式不符或已有证据则拒绝。"""
+
+        if evidence is None or not evidence:
+            return False
+        if self._anchors or self._first_abs is not None:
+            return False
+        if evidence.clock_source != self.clock_source:
+            return False
+        self._anchors = list(evidence.anchors)
+        self._first_abs = evidence.first_abs
+        return True
+
+    def frame_at_index(self, index: int, orientation: int = 0) -> Any:
+        """按真实索引取方向像素；向前跳跃时先用可信锚点缩短解码。
+
+        只服务像素物化：不读时钟，也不因此接受未验证的时间。
+        """
+
+        validate_index(index)
+        validate_orientation(orientation)
+        with self._lock:
+            cached = self._image_cache.get(index)
+            if cached is not None and index < self._decoded:
+                return _orient(cached, orientation)
+            at_target = (self._last_raw is not None
+                         and self._last_raw.index == index
+                         and self._decoded == index + 1)
+            if not at_target:
+                anchor = self._select_anchor(index)
+                # 只在能省解码时 seek：目标在当前位之前，或锚点在当前位之后。
+                if anchor is not None and (
+                        index < self._decoded - 1
+                        or anchor[0] > self._decoded - 1):
+                    self._try_seek(anchor)
+            raw = self._raw_at(index)
+            return _orient(self._image_at(raw), orientation)
+
 
 class ReaderPool:
     """最多四个读取器的 LRU；路径身份变化时强制重建。"""
@@ -805,6 +892,7 @@ class ReaderPool:
         *,
         fps_override: float | None = None,
         decode_images: bool = True,
+        defer_images: bool = False,
     ) -> FrameReader:
         resolved = str(Path(path).resolve())
         try:
@@ -812,8 +900,9 @@ class ReaderPool:
         except OSError as error:
             raise MediaError(f"视频文件不存在：{resolved}") from error
         mode = "fps" if fps_override is not None else "pts"
+        deferred = bool(defer_images) and bool(decode_images)
         key = (resolved, mode, float(fps_override) if fps_override else None,
-               bool(decode_images))
+               bool(decode_images), deferred)
         with self._lock:
             existing = self._readers.get(key)
             if existing is not None and existing.identity == identity:
@@ -827,6 +916,7 @@ class ReaderPool:
                 decoder_factory=self._factory,
                 fps_override=fps_override,
                 decode_images=decode_images,
+                defer_images=deferred,
             )
             self._readers[key] = reader
             while len(self._readers) > self._max_readers:
@@ -854,13 +944,16 @@ def _reader_for(
     decoder_factory: Callable[..., Any] | None,
     fps_override: float | None = None,
     decode_images: bool = True,
+    defer_images: bool = False,
 ) -> FrameReader:
     if pool is not None:
         return pool.get(path, fps_override=fps_override,
-                        decode_images=decode_images)
+                        decode_images=decode_images,
+                        defer_images=defer_images)
     if decoder_factory is None:
         return _DEFAULT_POOL.get(path, fps_override=fps_override,
-                                 decode_images=decode_images)
+                                 decode_images=decode_images,
+                                 defer_images=defer_images)
     with _FACTORY_POOLS_LOCK:
         factory_pool = _FACTORY_POOLS.get(decoder_factory)
         if factory_pool is None:
@@ -868,7 +961,8 @@ def _reader_for(
                                       max_readers=1)
             _FACTORY_POOLS[decoder_factory] = factory_pool
     return factory_pool.get(path, fps_override=fps_override,
-                            decode_images=decode_images)
+                            decode_images=decode_images,
+                            defer_images=defer_images)
 
 
 def read_frame(
@@ -1073,6 +1167,35 @@ class VideoSource:
             expected = self.end_s - self.start_s
             if self.coverage["duration_s"] < expected - 1e-6:
                 raise VideoSourceError("窗口有效覆盖不足")
+
+    def index_evidence(self) -> IndexEvidence:
+        """本次窗口扫描留下的索引证据（可信锚点与首帧绝对 PTS）。"""
+
+        reader = self._pool.get(
+            self.path,
+            fps_override=self.fps_override,
+            decode_images=self.decode_images,
+        )
+        return reader.index_evidence()
+
+    def frames_at(self, indices: Iterable[int], orientation: int | None = None,
+                  evidence: IndexEvidence | None = None) -> Iterator[Any]:
+        """按真实索引产出方向像素；复用同一池内的像素读取器与索引证据。
+
+        只有确定要用的帧才会解码成像素，供两段式背景取样使用。
+        """
+
+        angle = self.orientation if orientation is None else orientation
+        reader = self._pool.get(
+            self.path,
+            fps_override=self.fps_override,
+            decode_images=True,
+            defer_images=True,
+        )
+        reader.seed_index_evidence(
+            evidence if evidence is not None else self.index_evidence())
+        for index in indices:
+            yield reader.frame_at_index(index, angle)
 
     def iter_frames(self) -> Iterator[Frame]:
         self.coverage = {
