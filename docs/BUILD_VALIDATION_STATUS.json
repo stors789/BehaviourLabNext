@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "product": "BehaviourLabNext",
+  "source_revision": "311fe764df776ebf5f285dc485faf6fc4c13458b",
+  "recorded_at_utc": "2026-11-02T03:25:08Z",
+  "target": "Windows",
+  "build": {
+    "status": "not_run",
+    "python_version": null,
+    "architecture": null,
+    "tool_versions": null,
+    "command": "见 docs/RUN_AND_BUILD.md（py -3.11 -m venv .venv-build → pip install -r requirements-build.txt -r requirements-dev.txt → PyInstaller --distpath dist/windows --workpath build/windows packaging/behaviorlab_windows.spec）",
+    "exit_code": null,
+    "artifact_path": null,
+    "artifact_count": 0,
+    "log_reference": null
+  },
+  "checks": [
+    {
+      "id": "pytest-full-suite",
+      "scope": "unit_numeric",
+      "status": "passed",
+      "environment": {
+        "os": "Windows（开发机，源码级检查）",
+        "python": "3.11.13",
+        "dependency_versions": "requirements.txt / requirements-dev.txt 锁定版本"
+      },
+      "command_or_action": ".venv/Scripts/python.exe -m pytest -q",
+      "expected": "全部测试通过，无失败",
+      "observed": "全部通过，无失败；覆盖实验数值、调度生命周期、结果发布边界、前端 DOM 替身与 spec 声明检查",
+      "evidence_reference": "tests/（tests/test_block22_fixes.py、tests/test_block23.py、tests/test_block25.py 等）",
+      "source_revision": "311fe764df776ebf5f285dc485faf6fc4c13458b",
+      "limitations": [
+        "Linux/源码级证据不构成 Windows 原生通过",
+        "测试夹具使用合成帧与专用目录，非真实动物录像"
+      ]
+    },
+    {
+      "id": "js-dom-fakes",
+      "scope": "unit_numeric",
+      "status": "passed",
+      "environment": {
+        "os": "Windows（开发机，源码级检查）",
+        "python": "3.11.13",
+        "dependency_versions": "Node 22（仓库内置版本）"
+      },
+      "command_or_action": "node tests/js/*.cjs（13 个脚本）",
+      "expected": "真实前端脚本在假 DOM 上行为正确",
+      "observed": "全部通过（pickers/editor-core/landmarks/workspace 预览/project 触发守卫等）",
+      "evidence_reference": "tests/js/",
+      "source_revision": "311fe764df776ebf5f285dc485faf6fc4c13458b",
+      "limitations": ["假 DOM 不替代真实浏览器渲染与点击"]
+    },
+    {
+      "id": "entry-boot-health",
+      "scope": "service_process",
+      "status": "passed",
+      "environment": {
+        "os": "Windows（开发机，源码级检查）",
+        "python": "3.11.13",
+        "dependency_versions": "requirements.txt 锁定版本"
+      },
+      "command_or_action": "python -m behaviourlab --data-dir <专用临时目录> --browser，随后 GET /api/health",
+      "expected": "服务就绪、data_root 一致、job_owner 就绪；关闭后锁释放",
+      "observed": "health ok / data_root 一致 / job_owner 就绪；server.json 与 stdout 一致",
+      "evidence_reference": "tests/test_launcher_lifecycle.py、tests/test_service.py",
+      "source_revision": "311fe764df776ebf5f285dc485faf6fc4c13458b",
+      "limitations": ["--browser 模式；桌面窗口路径未在真实 WebView2 中验证"]
+    },
+    {
+      "id": "private-worker-routing",
+      "scope": "service_process",
+      "status": "passed",
+      "environment": {
+        "os": "Windows（开发机，源码级检查）",
+        "python": "3.11.13",
+        "dependency_versions": "requirements.txt 锁定版本"
+      },
+      "command_or_action": "python -m behaviourlab --behaviorlab-worker <缺任务/参数数量不符>",
+      "expected": "缺任务→退出1并写 progress.error；数量不符→退出2且 worker 0 次调用",
+      "observed": "退出码与 progress.error 均符合；错误进入 worker.log/progress 边界（含导入失败注入夹具）",
+      "evidence_reference": "tests/test_block25.py",
+      "source_revision": "311fe764df776ebf5f285dc485faf6fc4c13458b",
+      "limitations": ["冻结 EXE 真实路由未验证（依赖真实构建）"]
+    },
+    {
+      "id": "spec-declaration-static",
+      "scope": "unit_numeric",
+      "status": "passed",
+      "environment": {
+        "os": "Windows（开发机，源码级检查）",
+        "python": "3.11.13",
+        "dependency_versions": "PyInstaller 6.22.3 未安装，仅假收集 API 声明检查"
+      },
+      "command_or_action": "tests/test_block25.py spec 声明检查（按官方 6.22.3 签名/路径语义的替身执行）",
+      "expected": "win32/3.11/64 位接受；平台不符与缺 av.libs 拒绝；模板/static/十实验/worker/WebView/Python.NET/Agg/av.libs 齐全；入口按官方语义解析为根 launch.py",
+      "observed": "全部符合",
+      "evidence_reference": "tests/test_block25.py",
+      "source_revision": "311fe764df776ebf5f285dc485faf6fc4c13458b",
+      "limitations": ["声明齐全不代表真实 wheel/DLL 能装载或构建成功"]
+    },
+    {
+      "id": "annotated-pyav-roundtrip",
+      "scope": "real_engine_export",
+      "status": "passed",
+      "environment": {
+        "os": "Windows（开发机，源码级检查）",
+        "python": "3.11.13",
+        "dependency_versions": "av==18.1.0（进程内 FFmpeg）"
+      },
+      "command_or_action": "pytest（annotated.py 写出 MP4 后 verify_video 真实解码核对帧数/PTS/duration）",
+      "expected": "编码-解码往返帧数、PTS、时长一致（容差 0.002s）",
+      "observed": "一致",
+      "evidence_reference": "tests/test_block23.py（test_annotated_frame_facts_and_segments 等）",
+      "source_revision": "311fe764df776ebf5f285dc485faf6fc4c13458b",
+      "limitations": [
+        "测试帧为合成像素；真实动物录像的导出未验证",
+        "不证明动物位置/行为学正确"
+      ]
+    },
+    {
+      "id": "real-browser-ui",
+      "scope": "real_browser_ui",
+      "status": "not_run",
+      "environment": {
+        "os": null,
+        "python": null,
+        "dependency_versions": null
+      },
+      "command_or_action": "真实浏览器：合法真实素材导入→源帧/方向→场地或人工记录→预览→分析→本动物结果→ZIP/单文件保存",
+      "expected": "未执行",
+      "observed": "未执行：仓库内没有真实浏览器操作的验收记录；页面状态为 implemented（代码存在并连通），不据此填写页面通过",
+      "evidence_reference": null,
+      "source_revision": "311fe764df776ebf5f285dc485faf6fc4c13458b",
+      "limitations": ["按 docs/ACCEPTANCE_STATUS.md 的后续路线执行"]
+    },
+    {
+      "id": "windows-native",
+      "scope": "windows_native",
+      "status": "not_run",
+      "environment": {
+        "os": null,
+        "python": null,
+        "dependency_versions": null
+      },
+      "command_or_action": "真实构建目录从中文/空格路径与不同 cwd 启动；选择器/另存为/取消；窗口关闭回收；锁与端口释放",
+      "expected": "未执行",
+      "observed": "未执行：未构建 Windows EXE（build.status=not_run），无可运行产物",
+      "evidence_reference": null,
+      "source_revision": "311fe764df776ebf5f285dc485faf6fc4c13458b",
+      "limitations": ["阻塞于真实 Windows 64 位 CPython 3.11 构建环境"]
+    },
+    {
+      "id": "independent-animal-accuracy",
+      "scope": "independent_animal_accuracy",
+      "status": "not_run",
+      "environment": {
+        "os": null,
+        "python": null,
+        "dependency_versions": null
+      },
+      "command_or_action": "独立逐帧标注与算法输出对比",
+      "expected": "未执行",
+      "observed": "未执行：无合法本地素材入库，无独立人工标注；检测率/覆盖不作为准确率证据",
+      "evidence_reference": null,
+      "source_revision": "311fe764df776ebf5f285dc485faf6fc4c13458b",
+      "limitations": ["待真实素材与独立标注"]
+    }
+  ],
+  "feature_inventory": [
+    {"assay": "tst", "modes": ["classic", "lis"], "entry": "独立分析/项目分析 → 选择视频 → 场地/检测", "modules": ["behaviourlab/experiments/tst.py"], "interfaces": ["experiments.REGISTRY", "results CSV/JSON/PNG"], "implementation_status": "implemented", "verification_refs": ["tests/test_tst.py"]},
+    {"assay": "fst", "modes": ["auto"], "entry": "同上", "modules": ["behaviourlab/experiments/fst.py"], "interfaces": ["experiments.REGISTRY"], "implementation_status": "implemented", "verification_refs": ["tests/test_fst.py"]},
+    {"assay": "mwm", "modes": ["training", "reversal", "probe"], "entry": "同上", "modules": ["behaviourlab/experiments/mwm.py"], "interfaces": ["experiments.REGISTRY"], "implementation_status": "implemented", "verification_refs": ["tests/test_mwm.py"]},
+    {"assay": "oft", "modes": ["auto"], "entry": "同上", "modules": ["behaviourlab/experiments/oft.py"], "interfaces": ["experiments.REGISTRY"], "implementation_status": "implemented", "verification_refs": ["tests/test_oft.py", "tests/test_oft_api.py"]},
+    {"assay": "nor", "modes": ["auto（头向辅助+距离回退）"], "entry": "同上", "modules": ["behaviourlab/experiments/nor.py"], "interfaces": ["experiments.REGISTRY"], "implementation_status": "implemented", "verification_refs": ["tests/test_nor.py", "tests/test_block23.py"]},
+    {"assay": "epm", "modes": ["auto（物理尺度为估计值）"], "entry": "同上", "modules": ["behaviourlab/experiments/epm.py"], "interfaces": ["experiments.REGISTRY"], "implementation_status": "implemented", "verification_refs": ["tests/test_epm.py", "tests/test_epm_fixes.py"]},
+    {"assay": "ymaze", "modes": ["auto", "manual（纯人工Y：视频→记录→复核→结果）"], "entry": "同上", "modules": ["behaviourlab/experiments/ymaze.py"], "interfaces": ["experiments.REGISTRY"], "implementation_status": "implemented", "verification_refs": ["tests/test_block21.py", "tests/test_block23.py"]},
+    {"assay": "ldb", "modes": ["visible", "invisible"], "entry": "同上", "modules": ["behaviourlab/experiments/ldb.py"], "interfaces": ["experiments.REGISTRY"], "implementation_status": "implemented", "verification_refs": ["tests/test_ldb.py"]},
+    {"assay": "barnes", "modes": ["auto", "manual（null/[] 人工探洞）"], "entry": "同上（Barnes 人工输入独立于纯人工Y）", "modules": ["behaviourlab/experiments/barnes.py"], "interfaces": ["experiments.REGISTRY"], "implementation_status": "implemented", "verification_refs": ["tests/test_barnes.py", "tests/test_barnes_manual.py"]},
+    {"assay": "ezm", "modes": ["auto（四段顺时针区域）"], "entry": "同上", "modules": ["behaviourlab/experiments/ezm.py"], "interfaces": ["experiments.REGISTRY"], "implementation_status": "implemented", "verification_refs": ["tests/test_ezm.py"]},
+    {"assay": "(ui)", "modes": ["首页/项目列表", "项目三tab", "选择视频", "视频设置", "自动场地/检测", "人工Y记录/复核", "Barnes人工", "默认设置/模板/样式", "任务中心", "结果文件栏", "关键点会话"], "entry": "templates：home/projects/project/analyze/settings/tasks/result/landmarks.html", "modules": ["behaviourlab/web/static/*.js", "behaviourlab/web/app.py"], "interfaces": ["/api/* JSON、声明文件下载、桌面桥四方法"], "implementation_status": "implemented", "verification_refs": ["tests/test_ui_layout.py", "tests/test_block23.py", "tests/js/（假 DOM）"], "notes": "页面级 implemented=代码存在并连通；真实浏览器渲染/点击验证为 not_run"}
+  ],
+  "known_issues": [
+    {
+      "issue": "未构建 Windows EXE",
+      "impact": "无原生交付物；桌面路径只能以源码+WebView2 运行",
+      "minimal_next_step": "在满足 Windows x64 + CPython 3.11 的环境按 docs/RUN_AND_BUILD.md 顺序执行构建并记录 build 字段"
+    },
+    {
+      "issue": "真实浏览器 UI 验收未执行",
+      "impact": "页面 implemented 状态无真实渲染/点击证据",
+      "minimal_next_step": "按 docs/ACCEPTANCE_STATUS.md 后续路线用合法真实素材逐步执行并记录"
+    },
+    {
+      "issue": "独立动物精度证据缺失",
+      "impact": "检测率/覆盖不能解释为准确率",
+      "minimal_next_step": "准备合法有出处素材与独立逐帧标注后按精度层执行"
+    },
+    {
+      "issue": "真实媒体未入库",
+      "impact": "来源/许可/SHA 表待填",
+      "minimal_next_step": "从记录的公开来源线索（如 zenodo.org/records/3608658 的 OFT_11/EPM_15/FST_8、zenodo.org/records/5078719 的 Barnes Krill.mp4）核实文件后再填身份字段；未核实前不猜 hash/许可"
+    }
+  ],
+  "handoff": {
+    "local_head_sha": "PENDING_FINAL_COMMIT",
+    "remote_branch_sha": "PENDING_FINAL_COMMIT",
+    "remote": "https://github.com/stors789/BehaviourLabNext.git (main)",
+    "consistent": false,
+    "notes": "local_head_sha 在交接资料提交后回填为本批交付提交 SHA；其后仅有一个 SHA 回填提交，最终推送经 git ls-remote 核对远端 main 与本地 HEAD 一致（见交付摘要）。本状态描述的代码修订为 source_revision。"
+  }
+}
