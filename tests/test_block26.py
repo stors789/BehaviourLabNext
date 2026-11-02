@@ -9,6 +9,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from behaviourlab.experiments import ORDER, REGISTRY
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +77,23 @@ def test_status_json_not_run_scopes_stay_not_run():
     assert feature_keys == set(EXPECTED_KEYS), "功能清单恰好十实验"
 
 
+def _remote_main_sha() -> str:
+    """只读获取远端 main SHA；不可用时显式 skip（blocked），不静默通过。"""
+
+    remote = subprocess.run(
+        ["git", "ls-remote", "origin", "refs/heads/main"],
+        cwd=ROOT, capture_output=True, text=True, timeout=30)
+    if remote.returncode != 0:
+        pytest.skip(
+            "远端核对不可用（blocked）：git ls-remote 退出码 "
+            f"{remote.returncode}，{remote.stderr.strip()[:200]}；"
+            "不计为发布核对通过")
+    if not remote.stdout.strip():
+        pytest.skip("远端核对不可用（blocked）：git ls-remote 无输出；"
+                    "不计为发布核对通过")
+    return remote.stdout.split()[0]
+
+
 def test_docs_paths_and_sha_consistency():
     """文档可读、入口/资源真实存在、参数名与实现一致、SHA 核对一致。"""
 
@@ -131,9 +150,31 @@ def test_docs_paths_and_sha_consistency():
                    cwd=ROOT, check=True)
     assert payload["source_revision"] != recorded, \
         "source_revision 描述代码修订，交付 SHA 是其后的文档提交"
-    remote = subprocess.run(
-        ["git", "ls-remote", "origin", "refs/heads/main"],
-        cwd=ROOT, capture_output=True, text=True, timeout=30)
-    if remote.returncode == 0 and remote.stdout.strip():
-        remote_sha = remote.stdout.split()[0]
-        assert remote_sha == head, "远端 main 与本地 HEAD 一致"
+    remote_sha = _remote_main_sha()
+    assert remote_sha == head, "远端 main 与本地 HEAD 一致"
+
+
+def test_remote_check_blocked_paths(monkeypatch):
+    """受控注入两种不可用结果：显式 skip（blocked），不静默通过。"""
+
+    def fake_run(cmd, **kwargs):
+        if "ls-remote" in cmd:
+            return subprocess.CompletedProcess(cmd, 128, "", "fatal: 无法访问")
+        return real_run(cmd, **kwargs)
+
+    real_run = subprocess.run
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(pytest.skip.Exception) as failed:
+        test_docs_paths_and_sha_consistency()
+    assert "远端核对不可用" in str(failed.value)
+    assert "blocked" in str(failed.value)
+
+    def empty(cmd, **kwargs):
+        if "ls-remote" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", empty)
+    with pytest.raises(pytest.skip.Exception) as empty_case:
+        test_docs_paths_and_sha_consistency()
+    assert "无输出" in str(empty_case.value)

@@ -27,7 +27,16 @@ jobs.py（Owned 顺序调度、私有子进程分派） ─ worker.py（后台�
 - `Frame`：一个分析采样帧。`image` 为 BGR 数组（纯人工路径可为 `None`）；`index` 是源帧号；`time_s/dt_s/elapsed_s/analysis_fps` 与 `interval_start_s/interval_end_s`（该帧在本窗口内的有效曝光区间）共同构成显式时钟。
 - `Detection`：单帧检测结果。`center` 为空即 `detected=False`；`missing_reason` 说明缺席原因；`nose/tail_base/left_ear/right_ear` 可为 `None`；质量与头向角度是独立字段，不互相冒充。
 - 观测行 `OBSERVATION_FIELDS`：`x_px/y_px` 是**当前方向下旋转后源像素**；实验层再派生 `x_cm/y_cm`（`coordinate_unit` 标注 `cm/cm_estimated/px/mm`）；`motion_x0..y1` 是测量单位的完成运动段。
-- `AnalysisContext/AnalysisResult`（schema.py:365 起）：作业冻结输入与统一输出；`Draft/Video/Unit/ResolvedJob` 由 `store.py`/`engine.py` 管理：草稿→冻结 job（含 `run_id/job_id/assay/asset 身份`）→ 结果清单（`result_manifest.json`）。
+- `AnalysisContext/AnalysisResult`（schema.py:365 起）：作业冻结输入与统一输出；结果清单（`result_manifest.json`）与 `results.json` 见下"Result"。
+
+### 关键结构的最小字段（出处均为本仓库实现文件）
+
+- **Draft**（store.py `create_draft`，store.py:1070）：`draft_id`、`assay`、`project_id`（可空=独立分析）、`videos`（每视频：`asset_id`、`window{start_s,end_s}`、`orientation`、`fps_override`、`sample_fps`、`units`）、`options/detection/output/style` 快照（草稿创建时并入默认值，提交不再重读设置）、`created_at/updated_at`。
+- **Video**（Draft.videos 条目）：`asset_id` 关联素材（含 `ownership: linked|owned`，assets.py）；`window/orientation/fps_override/sample_fps` 为该视频的时间与采样语义；`units` 为逐鼠配置列表。
+- **Unit**（草稿内与冻结后同形，engine.py `build_resolved_job` units 段）：`id/name/animal_id`、`window`（每鼠分析窗）、`geometry`（当前方向源像素）、`manual`（纯人工记录；Y-迷宫与 Barnes 人工语义各自独立）、`options`（该实验参数，深拷贝）、`detection`（检测参数）。
+- **ResolvedJob**（engine.py `build_resolved_job`，engine.py:650）：`assay`、`job_id`、`run_id`、`project_id`、`asset{name,path,identity{path,size,mtime_ns}}`（源身份，分析前后核对）、`metadata`（probe：宽高/时长/fps/frame_count）、`window`、`orientation`、`units`（上述完整深拷贝）——冻结为 `frozen_job.json`，worker 只消费它。
+- **Batch**（store.py `create_batch`，store.py:1336）：`batch_id`、`assay`、`draft_id/project_id`、`videos`（每视频：`asset_id/name/run_id/status/progress` 及失败原因）、`status`（queued/running/completed/failed/cancelled/interrupted）、`owned_run_ids`（跨轮归属）、时间戳。
+- **Result**：`result_manifest.json`（`status/run_id/job_id/assay/files` 声明清单、`units[{unit_id,unit_name,summary,figures,annotated_video}]`、`warnings/metadata`）+ `results.json`（`AnalysisResult.as_dict`：summary/events/bins/observations/tables/warnings/metadata）。页面与下载只消费清单声明文件。
 
 ## 时间/坐标/空值约定
 
