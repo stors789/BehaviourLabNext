@@ -459,3 +459,185 @@ def test_session_orientation_and_fps_reach_engine(
     except Exception as error:  # noqa: BLE001 - 具体类型由实现决定
         raised = error
     assert raised is not None and "超出旋转后画面" in str(raised)
+
+
+# -- 断点 2：评价背景准备与主源同一冻结方向/解释FPS -----------------------
+
+RAW_FRAME = None  # 模块级受控源帧（40 高 × 60 宽，非对称图案）
+
+
+def _raw_frame():
+    import numpy as np
+
+    global RAW_FRAME
+    if RAW_FRAME is None:
+        rows = np.arange(40, dtype=np.uint8).reshape(40, 1)
+        RAW_FRAME = np.dstack([
+            np.broadcast_to(rows, (40, 60)).copy(),
+            np.zeros((40, 60), dtype=np.uint8),
+            np.zeros((40, 60), dtype=np.uint8),
+        ])
+    return RAW_FRAME
+
+
+class _Frame:
+    def __init__(self, image, index, time_s, exposure=0.125):
+        self.image = image
+        self.index = index
+        self.time_s = time_s
+        self.interval_start_s = time_s
+        self.interval_end_s = time_s + exposure
+
+
+def _patch_video_sources(monkeypatch, sources: list):
+    """受控源帧供应：按构造时 orientation 用生产旋转函数产帧，并记录
+    每次 VideoSource 构造参数（主源与背景源各一次）。"""
+
+    from behaviourlab import media
+
+    class FakeSource:
+        def __init__(self, path, **kwargs):
+            sources.append(kwargs)
+            self.orientation = int(kwargs.get("orientation") or 0)
+            self.fps = float(kwargs.get("fps_override") or 12.5)
+
+        def iter_frames(self):
+            for index in range(4):
+                yield _Frame(media._orient(_raw_frame(), self.orientation),
+                             index, index / self.fps)
+
+    monkeypatch.setattr(landmarks.media, "VideoSource", FakeSource)
+
+
+def _detector_stubs(monkeypatch):
+    """只替换源帧供应与 tracker 出口；背景/检测计算（prepare_background
+    →temporal_background→ForegroundModel.foreground→尺寸校验）全部
+    真实运行。geometry_region 桩掉是因为受控几何只用于枚举，不参与
+    本检查。"""
+
+    class FakeDetector:
+        def foreground(self, image):
+            return object()
+
+    fake_result = type("R", (), {"center": (20.0, 30.0),
+                                 "nose": (20.0, 30.0),
+                                 "tail_base": None})()
+    monkeypatch.setattr(landmarks.detection, "geometry_region",
+                        lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(landmarks.observation, "signature_of",
+                        lambda *args, **kwargs: object())
+    monkeypatch.setattr(landmarks.observation, "track",
+                        lambda *args, **kwargs: fake_result)
+
+
+def _ninety_session(client, store, tmp_path, detection_overrides) -> dict:
+    """走真实链路建一个 90°/12.5 会话并返回保存后的会话。"""
+
+    source = tmp_path / f"src_{detection_overrides['bg_method']}.mp4"
+    source.write_bytes(b"\x00")
+    asset = store.create_asset(name=source.name, path=str(source))
+    _make_draft(store, asset["id"], orientation=90, fps_override=12.5,
+                unit_detection=UNIT_DETECTION,
+                video_detection=VIDEO_DETECTION,
+                draft_detection=dict(DRAFT_DETECTION,
+                                     **detection_overrides))
+    rows, _ = _page_options(client)
+    payload = _payload_via_real_js(
+        next(item for item in rows if item["value"] == "u" * 32))
+    response = client.post("/api/landmarks", json=payload)
+    assert response.status_code in (200, 201)
+    return landmarks.get_session(
+        store.paths, response.get_json()["data"]["session"]["id"])
+
+
+def test_ninety_temporal_background_matches_rotated_source(
+        client, store, tmp_path, monkeypatch):
+    """固定反例（修正后）：90°+temporal 的背景支路与主源同一方向/FPS，
+    真实 prepare_background→temporal_background→foreground 链完成评价，
+    主/背景 VideoSource 参数一致；不再发生尺寸错配。"""
+
+    import numpy as np
+
+    from behaviourlab import media as media_module
+
+    sources: list = []
+    _patch_video_sources(monkeypatch, sources)
+    _detector_stubs(monkeypatch)
+    session = _ninety_session(client, store, tmp_path,
+                              {"bg_method": "temporal"})
+    assert session["orientation"] == 90
+    assert session["fps_override"] == 12.5
+
+    evaluation = landmarks.evaluate(store.paths, session)
+    assert evaluation is not None
+    assert len(sources) == 2, "主源与背景源各构造一次"
+    main_source, background_source = sources
+    # 主源与背景支路使用同一份冻结方向与解释FPS（均 90°/12.5）。
+    assert main_source["orientation"] == 90
+    assert main_source["fps_override"] == 12.5
+    assert background_source["orientation"] == 90, \
+        "背景支路不恢复 0°"
+    assert background_source["fps_override"] == 12.5, \
+        "背景支路不恢复 null"
+    # 背景堆与主帧同为旋转后尺寸：检测减除不再报尺寸错配。
+    background_shape = (60, 40)
+    assert media_module._orient(_raw_frame(), 90).shape[:2] == \
+        background_shape
+
+
+def test_zero_orientation_temporal_still_works(
+        client, store, tmp_path, monkeypatch):
+    """0°/null 对照：temporal 背景链照常完成，主/背景参数一致。"""
+
+    sources: list = []
+    _patch_video_sources(monkeypatch, sources)
+    _detector_stubs(monkeypatch)
+    session = _ninety_session(client, store, tmp_path,
+                              {"bg_method": "temporal"})
+    session = dict(session, orientation=0, fps_override=None)
+    evaluation = landmarks.evaluate(store.paths, session)
+    assert evaluation is not None
+    main_source, background_source = sources
+    assert main_source["orientation"] == 0
+    assert main_source["fps_override"] is None
+    assert background_source["orientation"] == 0
+    assert background_source["fps_override"] is None
+
+
+def test_threshold_contrast_completes_without_background_source(
+        client, store, tmp_path, monkeypatch):
+    """threshold 对照：不需要背景源，评价照常完成。"""
+
+    sources: list = []
+    _patch_video_sources(monkeypatch, sources)
+    _detector_stubs(monkeypatch)
+    session = _ninety_session(client, store, tmp_path,
+                              {"bg_method": "threshold"})
+    evaluation = landmarks.evaluate(store.paths, session)
+    assert evaluation is not None
+    assert len(sources) == 1, "threshold 不构造背景源"
+
+
+def test_background_branch_zero_orientation_reproduces_mismatch(
+        client, store, tmp_path, monkeypatch):
+    """反例复现：背景支路若仍传 0°（历史行为），90° 主源上真实链报
+    “背景尺寸与源帧不一致”——证明尺寸检查未被放宽、修正确实接线。"""
+
+    from behaviourlab.schema import ValidationError
+
+    sources: list = []
+    _patch_video_sources(monkeypatch, sources)
+    _detector_stubs(monkeypatch)
+    session = _ninety_session(client, store, tmp_path,
+                              {"bg_method": "temporal"})
+    original_prepare = landmarks.detection.prepare_background
+
+    def forced_zero(settings, asset, video, orientation, width, height):
+        # 只复现历史接线：背景支路被强制回 0°，其余计算不动。
+        return original_prepare(settings, asset, video, 0, width, height)
+
+    monkeypatch.setattr(landmarks.detection, "prepare_background",
+                        forced_zero)
+    with pytest.raises(ValidationError) as captured:
+        landmarks.evaluate(store.paths, session)
+    assert "背景尺寸与源帧不一致" in captured.value.message

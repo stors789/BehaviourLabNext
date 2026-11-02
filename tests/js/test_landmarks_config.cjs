@@ -51,10 +51,12 @@ const BLApi = {
   },
 };
 
+let frameRequests = 0;   // 帧图片请求计数（A/B 原帧各一次）
 class ImageShim {
   constructor() {
     this.naturalWidth = 100;
     this.naturalHeight = 100;
+    frameRequests += 1;
   }
 }
 
@@ -175,26 +177,61 @@ if (process.argv[2] === "extract") {
     requests.find((item) => item.options.method === "POST").options.body);
   assert.strictEqual(plain.orientation, 0);
   assert.strictEqual(plain.fps_override, null);
-
-  // ③ 创建期间切走（与真实编辑/切会话同一 revision 机制）：
-  // 迟到响应不得打开旧会话、不得覆盖当前选择。
+  // ③ 创建期间真实切换视频/动物：#landmark-unit change 使创建令牌
+  // 失效——迟到成功不打开旧会话、不请求旧帧、不产生任何写入。
   requests.length = 0;
-  const byId3 = boot(optionWith({
-    asset: "a3", assay: "oft", name: "小鼠 3",
+  frameRequests = 0;
+  const optionA = optionWith({
+    asset: "a3", assay: "oft", name: "小鼠 A",
     geometry: JSON.stringify({ zones: {} }),
     options: "{}", detection: "{}", unitDetection: "{}",
-    orientation: "90", fpsOverride: "12.5",
-  }));
+    orientation: "90", fpsOverride: "12.5", value: "unit-a",
+  });
+  const optionB = optionWith({
+    asset: "a4", assay: "oft", name: "小鼠 B",
+    geometry: JSON.stringify({ zones: {} }),
+    options: "{}", detection: "{}", unitDetection: "{}",
+    orientation: "0", fpsOverride: "null", value: "unit-b",
+  });
+  const byId3 = boot(optionA);
   byId3["landmark-form"].dispatch("submit");
   await flush();
   const pending = requests.find((item) => item.options.method === "POST");
   assert.ok(pending, "创建请求挂起中");
-  byId3["tool-tolerance"].dispatch("input");   // 模拟创建期间切走
-  pending.resolve({ session: { id: "late", frames: [0], records: [] } });
+  // 真实生产 DOM 事件：下拉切换到 B 并触发 change。
+  byId3["landmark-unit"].selectedOptions = [optionB];
+  byId3["landmark-unit"].dispatch("change");
+  pending.resolve({ session: { id: "session-a", frames: [0],
+    records: [], unit: { id: "unit-a" }, asset_id: "a3" } });
   await flush();
-  const opened = requests.some((item) =>
-    item.url === "/api/landmarks/late" && item.options.method === "GET");
-  assert.ok(!opened, "迟到创建响应不打开旧会话");
+  assert.strictEqual(byId3["landmark-unit"].selectedOptions[0].value,
+    "unit-b", "当前选择仍是 B");
+  assert.ok(!requests.some((item) => item.url === "/api/landmarks/session-a"),
+    "迟到响应不打开 A 工作台");
+  assert.strictEqual(frameRequests, 0, "没有请求 A 原帧");
+  assert.ok(byId3["landmark-workbench"].hidden, "工作台未打开");
+  assert.ok(!byId3["tool-status"].textContent.includes("已载入会话"),
+    `不显示已载入：${byId3["tool-status"].textContent}`);
+  assert.ok(!requests.some((item) => item.options.method === "PUT"),
+    "不产生任何会话写入，旧会话记录未改");
+  assert.ok(byId3["tool-status"].textContent.includes("未自动打开"),
+    `迟到响应有明确提示：${byId3["tool-status"].textContent}`);
+
+  // 对照：未切换时正常创建 → 打开成功并开始加载帧。
+  requests.length = 0;
+  byId3["landmark-form"].dispatch("submit");
+  await flush();
+  const normal = requests.find((item) => item.options.method === "POST");
+  assert.ok(normal, "对照创建请求已发出");
+  normal.resolve({ session: { id: "session-b", frames: [0],
+    records: [], unit: { id: "unit-b" }, asset_id: "a4",
+    orientation: 0, fps_override: null } });
+  await flush();
+  assert.strictEqual(byId3["landmark-workbench"].hidden, false,
+    "未切换时正常打开工作台");
+  assert.strictEqual(frameRequests, 1, "正常打开后请求 B 原帧");
+  assert.ok(byId3["tool-status"].textContent.includes("已载入会话"),
+    `状态为已载入会话：${byId3["tool-status"].textContent}`);
 
   console.log("landmarks config inheritance: all assertions passed");
 })().catch((error) => {

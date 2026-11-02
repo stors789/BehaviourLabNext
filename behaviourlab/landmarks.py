@@ -383,7 +383,13 @@ def evaluate(paths: DataPaths, session: Mapping[str, Any], *,
                 raise ValidationError(str(error), "unit.geometry") from error
             background = detection.prepare_background(
                 settings, {"path": identity["path"], "metadata": {}},
-                {}, 0, width, height)
+                # 背景支路与主源同一份冻结方向/解释FPS及既有无采样/
+                # 原窗规则（从 0 起、无采样、窗口终点未知）；不恢复
+                # 0°/null，避免旋转源上的背景尺寸错配。
+                {"window": {"start_s": 0.0},
+                 "fps_override": session.get("fps_override"),
+                 "sample_fps": None},
+                orientation, width, height)
             detector = detection.shared_detector(key, settings,
                                                  background=background)
         # 连续处理到最大选中帧：检测与关联不因跳选断链；选中帧只控制

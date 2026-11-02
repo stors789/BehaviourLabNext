@@ -37,6 +37,7 @@
     imageToken: 0,
     imageReady: false,     // 新帧载入完成前，禁止向旧图产生点击坐标
     revision: 0,           // 编辑修订：保存/验证响应用它丢弃过期结果
+    createToken: 0,        // 新建选择令牌：切换视频/动物使创建响应过期
     context: null,
   };
 
@@ -111,18 +112,21 @@
       fps_override: JSON.parse(option.dataset.fpsOverride || "null"),
       records: [],
     };
-    const revision = state.revision; // 创建期间切走即丢弃迟到响应
+    const revision = state.revision;   // 已打开会话的编辑令牌
+    const token = state.createToken;   // 本次创建对应的选择令牌
     try {
       const data = await api().request("/api/landmarks", {
         method: "POST", body: JSON.stringify(payload),
       });
-      if (state.revision !== revision) {
+      if (state.createToken !== token || state.revision !== revision) {
+        // 创建期间切换了所选视频/动物或编辑了会话：服务端会话保留，
+        // 但不自动打开旧选择、不覆盖当前图/评价。
         status("会话已创建；当前选择已变化，未自动打开", "muted");
         return;
       }
       await openSession(data.session);
     } catch (error) {
-      if (state.revision !== revision) return;
+      if (state.createToken !== token || state.revision !== revision) return;
       if (el.newError) el.newError.textContent = error.message;
     }
   }
@@ -443,6 +447,13 @@
 
   // -- 事件 -------------------------------------------------------------
   if (el.form) el.form.addEventListener("submit", createSession);
+  if (el.unit) {
+    el.unit.addEventListener("change", () => {
+      // 新建选择（视频/动物）变化：使挂起中的创建响应过期，不自动
+      // 打开旧选择；不影响已打开会话的标注或其保存/验证令牌。
+      state.createToken += 1;
+    });
+  }
   document.querySelectorAll("[data-open-session]").forEach((button) => {
     button.addEventListener("click", () => loadSession(button.dataset.openSession));
   });
