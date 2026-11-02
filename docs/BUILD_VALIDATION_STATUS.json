@@ -203,10 +203,10 @@
     }
   ],
   "handoff": {
-    "local_head_sha": "PENDING_FINAL_COMMIT",
-    "remote_branch_sha": "PENDING_FINAL_COMMIT",
+    "local_head_sha": "55a6825f32cdf70acd1b1bd735343d6d5694404d",
+    "remote_branch_sha": "55a6825f32cdf70acd1b1bd735343d6d5694404d",
     "remote": "https://github.com/stors789/BehaviourLabNext.git (main)",
-    "consistent": false,
-    "notes": "local_head_sha 在交接资料提交后回填为本批交付提交 SHA；其后仅有一个 SHA 回填提交，最终推送经 git ls-remote 核对远端 main 与本地 HEAD 一致（见交付摘要）。本状态描述的代码修订为 source_revision。"
+    "consistent": true,
+    "notes": "local_head_sha 为本批交付提交（交接资料）；其后仅有一个 SHA 回填提交，最终推送经 git ls-remote 核对远端 main 与本地 HEAD 一致（见交付摘要）。本状态描述的代码修订为 source_revision。"
   }
 }
