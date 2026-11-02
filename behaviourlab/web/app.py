@@ -600,6 +600,22 @@ def create_app(*, data_dir: Any = None, store: Store | None = None,
             raise ApiError("背景不存在", 404)
         return send_file(path, mimetype="image/png", conditional=True)
 
+    @app.post("/api/backgrounds/validate")
+    def validate_background():
+        """原生 linked 背景的可解码确认：失败不替换旧有效背景。"""
+
+        payload = request.get_json(silent=True) or {}
+        path = payload.get("path")
+        if not isinstance(path, str) or not path.strip():
+            raise ApiError("缺少背景路径", 400,
+                           [{"field": "path", "message": "请提供背景文件路径"}])
+        try:
+            asset_service.validate_background_path(path)
+        except BackgroundError as error:
+            raise ApiError(str(error), 400,
+                           [{"field": "path", "message": str(error)}])
+        return success({"ok": True})
+
     @app.get("/runs/<run_id>/<job_id>/<filename>")
     def get_run_file(run_id: str, job_id: str, filename: str):
         if not (is_valid_id(run_id) and is_valid_id(job_id)):

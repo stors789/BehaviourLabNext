@@ -83,8 +83,10 @@ def test_download_save_dialog_contract():
 
 
 class FakeServer:
-    def __init__(self, events: list):
+    def __init__(self, events: list, workers: set):
         self._events = events
+        self.task_dispatcher = SimpleNamespace(threads=workers)
+        self.active_channels = {}
 
     def run(self):
         self._events.append("serve")
@@ -103,7 +105,8 @@ def harness(tmp_path, monkeypatch):
     real_store_close = store.close
     jobs = JobScheduler(store, paths, inline=False)
     real_jobs_shutdown = jobs.shutdown
-    state: dict = {"events": [], "boxes": [], "ready": (True, "")}
+    state: dict = {"events": [], "boxes": [], "ready": (True, ""),
+                   "workers": set(), "service": None}
 
     def wrapped_store_close():
         state["events"].append("store")
@@ -123,9 +126,12 @@ def harness(tmp_path, monkeypatch):
 
     def wrapped_local_service(app, service_paths, **kwargs):
         kwargs["server_factory"] = (
-            lambda *a, **k: FakeServer(state["events"]))
+            lambda *a, **k: FakeServer(state["events"], state["workers"]))
         kwargs["ready_probe"] = lambda url, root: state["ready"]
-        return LocalService(app, service_paths, **kwargs)
+        created = LocalService(app, service_paths, **kwargs)
+        created._http_drain_timeout = 0.2
+        state["service"] = created
+        return created
 
     monkeypatch.setattr(launcher_module, "LocalService", wrapped_local_service)
     monkeypatch.setattr("behaviourlab.web.create_app", fake_create_app)
@@ -226,3 +232,101 @@ def test_lock_taken_reports_and_leaves_other_instance(harness, monkeypatch):
     assert harness["store"].closed is False
     assert harness["jobs"].shutdown() is True
     assert harness["jobs"].owner.held is False
+
+
+def test_blocked_http_keeps_lock_until_drained(harness, monkeypatch):
+    """HTTP 未排空：stop=False 返回 1、不放锁；第二所有者拿不到锁；
+    解除阻塞后可继续收尾，全部退出才关 Store/放锁。"""
+
+    import threading
+
+    from behaviourlab.processes import JobOwnerRegistry, OwnershipError
+
+    monkeypatch.setattr(desktop_module, "open_window",
+                        lambda url: harness["events"].append("window"))
+    workers = harness["workers"]
+    workers.add(threading.current_thread())  # 模拟未退出的 HTTP 工作线程
+
+    code = main(["--data-dir", str(harness["paths"].root)])
+    assert code == 1, "stop=False 不得以 0 冒称成功"
+    assert harness["jobs"].running is False, "Jobs 已先收尾"
+    assert harness["jobs"].owner.held is True, "同根锁仍由整体生命周期持有"
+    assert harness["store"].closed is False, "使用者未退出不关 Store"
+    assert harness["events"].count("jobs") == 1
+    assert harness["events"].count("http") == 1, "监听与连接已关闭"
+
+    # 真实阻塞未排空时，第二所有者不能取得同根锁。
+    with pytest.raises(OwnershipError):
+        JobOwnerRegistry(harness["paths"]).acquire()
+
+    # 解除阻塞后同一实例可继续收尾：排空 → Store → 放锁。
+    workers.clear()
+    assert harness["service"].stop() is True
+    assert harness["events"].index("http") < harness["events"].index("store")
+    assert harness["store"].closed is True
+    assert harness["jobs"].owner.held is False, "全部使用者退出后才放锁"
+
+
+def test_waitress_factory_recovers_dispatcher_on_bind_failure(monkeypatch):
+    """工厂部分构造/bind 失败：收掉自己创建的 dispatcher 线程。"""
+
+    import waitress as waitress_module
+
+    from behaviourlab.service import _default_server_factory
+
+    captured = {}
+
+    def failing_create_server(*args, **kwargs):
+        # 工厂把自己的 dispatcher 通过 _dispatcher 传入，这里捕获后失败。
+        captured["dispatcher"] = kwargs["_dispatcher"]
+        raise OSError("端口被占用")
+
+    monkeypatch.setattr(waitress_module, "create_server", failing_create_server)
+    with pytest.raises(OSError):
+        _default_server_factory(object(), "127.0.0.1", 39011, 2)
+    dispatcher = captured["dispatcher"]
+    assert dispatcher.threads == set(), "bind 失败后 dispatcher 线程已回收"
+
+
+def test_port_bind_failure_leaves_nothing_behind(harness, monkeypatch):
+    """占端口构造失败：无剩余线程/Store/持锁，原异常日志不被替换。"""
+
+    def failing_factory(*args, **kwargs):
+        raise OSError("端口被占用")
+
+    def wrapped_local_service(app, service_paths, **kwargs):
+        kwargs["server_factory"] = failing_factory
+        kwargs["ready_probe"] = lambda url, root: state["ready"]
+        created = LocalService(app, service_paths, **kwargs)
+        created._http_drain_timeout = 0.2
+        state["service"] = created
+        return created
+
+    state = harness
+    monkeypatch.setattr(launcher_module, "LocalService", wrapped_local_service)
+    code = main(["--data-dir", str(harness["paths"].root), "--browser"])
+    assert code == 1
+    assert harness["jobs"].owner.held is False, "本实例未持有任何锁"
+    assert harness["jobs"].running is False
+    assert harness["store"].closed is True
+    startup = (harness["paths"].logs / "startup.log").read_text(
+        encoding="utf-8")
+    assert "端口被占用" in startup, "原始异常保留在 startup.log"
+    assert "Traceback" in startup
+
+
+def test_service_construction_failure_recovers_store(harness, monkeypatch):
+    """app/Store 创建成功而 LocalService 构造失败：回收 Store，无锁残留。"""
+
+    def broken_service(*args, **kwargs):
+        raise OSError("无法申请空闲端口")
+
+    monkeypatch.setattr(launcher_module, "LocalService", broken_service)
+    code = main(["--data-dir", str(harness["paths"].root), "--browser"])
+    assert code == 1
+    assert harness["jobs"].running is False
+    assert harness["jobs"].owner.held is False, "构造失败时未取得锁"
+    assert harness["store"].closed is True, "已创建的 Store 被回收"
+    startup = (harness["paths"].logs / "startup.log").read_text(
+        encoding="utf-8")
+    assert "无法申请空闲端口" in startup

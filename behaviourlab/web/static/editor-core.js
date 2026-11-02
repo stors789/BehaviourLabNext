@@ -634,6 +634,65 @@
     return "browser";
   }
 
+  // -- 选择器触发守卫 ---------------------------------------------------
+  const pickBusy = new WeakSet();
+
+  async function guardedPick(trigger, run) {
+    /* 等待期间防重复点击；完成/取消/失败都恢复原控件。
+       失败不在这里显示：由调用方在原触发处给出可读错误。 */
+    if (typeof run !== "function") return { status: "none" };
+    if (trigger) {
+      if (pickBusy.has(trigger) || trigger.disabled) {
+        return { status: "busy" };
+      }
+      pickBusy.add(trigger);
+      const previous = trigger.disabled;
+      trigger.disabled = true;
+      try {
+        return { status: "done", result: await run() };
+      } catch (error) {
+        return { status: "error", error };
+      } finally {
+        pickBusy.delete(trigger);
+        trigger.disabled = previous;
+      }
+    }
+    try {
+      return { status: "done", result: await run() };
+    } catch (error) {
+      return { status: "error", error };
+    }
+  }
+
+  async function pickBackground(bridge, options) {
+    /* 背景图选择：原生路径先经服务端确认可解码，浏览器上传由服务端
+       解码后返回专用路径。取消返回 cancel，失败向上抛错——调用方
+       保持旧有效背景不变。 */
+    const opts = options || {};
+    if (bridge && typeof bridge.choose_image === "function") {
+      const path = await bridge.choose_image();
+      if (typeof path !== "string" || !path) return { status: "cancel" };
+      if (typeof opts.validate !== "function") {
+        throw new Error("背景校验不可用");
+      }
+      await opts.validate(path);
+      return { status: "ok", path };
+    }
+    const picker = opts.picker;
+    if (!picker || typeof picker.pickFiles !== "function") {
+      return { status: "none" };
+    }
+    const files = await picker.pickFiles({
+      accept: ".png,.jpg,.jpeg,.bmp",
+    });
+    if (!Array.isArray(files) || !files.length) return { status: "cancel" };
+    if (typeof opts.upload !== "function") {
+      throw new Error("背景上传不可用");
+    }
+    const data = await opts.upload(files[0]);
+    return { status: "ok", path: data.path };
+  }
+
   function viewportToSource(view, pageX, pageY) {
     const scale = Math.min(view.cssWidth / view.sourceWidth,
       view.cssHeight / view.sourceHeight);
@@ -1319,6 +1378,8 @@
     rotateGeometry,
     mergeEcho,
     pickMedia,
+    guardedPick,
+    pickBackground,
     viewportToSource,
     moveVertex,
     moveHole,

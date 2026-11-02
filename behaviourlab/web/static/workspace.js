@@ -2145,7 +2145,7 @@
       button.type = "button";
       button.className = "button small";
       button.textContent = "选择背景图";
-      button.addEventListener("click", () => { pickStaticBackground(); });
+      button.addEventListener("click", () => { pickStaticBackground(button); });
       const stateLabel = document.createElement("span");
       stateLabel.className = "meta";
       stateLabel.textContent = detectionValue(unit, "static_background")
@@ -2180,31 +2180,33 @@
     return wrap;
   }
 
-  async function pickStaticBackground() {
-    const bridge = desktopBridge();
-    let path = null;
-    if (bridge && typeof bridge.choose_image === "function") {
-      path = await bridge.choose_image();
-    } else if (window.BLPickers) {
-      const files = await window.BLPickers.pickFiles({
-        accept: ".png,.jpg,.jpeg,.bmp",
-      });
-      if (files && files.length) {
-        const form = new FormData();
-        form.append("file", files[0]);
-        try {
-          const data = await request("/api/backgrounds/upload",
+  async function pickStaticBackground(trigger) {
+    const outcome = await window.BLCore.guardedPick(trigger, () =>
+      window.BLCore.pickBackground(desktopBridge(), {
+        picker: window.BLPickers,
+        // 原生 linked 背景必须确认可解码后才替换；失败保留旧有效背景。
+        validate: (path) => request("/api/backgrounds/validate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path }),
+        }),
+        upload: (file) => {
+          const form = new FormData();
+          form.append("file", file);
+          return request("/api/backgrounds/upload",
             { method: "POST", body: form });
-          path = data.path;
-        } catch (error) {
-          status(error.message, "error");
-          return;
-        }
-      }
+        },
+      }));
+    if (outcome.status === "error") {
+      status(`无法设置背景图：${outcome.error.message}`, "error");
+      return;
     }
-    if (typeof path === "string" && path) {
-      writeDetection("static_background", path);
+    if (outcome.status === "done" && outcome.result
+        && outcome.result.status === "ok"
+        && typeof outcome.result.path === "string" && outcome.result.path) {
+      writeDetection("static_background", outcome.result.path);
     }
+    // cancel/none：不发请求、不清旧值。
   }
 
   function renderReviewInspector(body, unit) {
@@ -3833,21 +3835,29 @@
   }
 
   async function pickVideos() {
-    await window.BLCore.pickMedia("videos", {
-      bridge: desktopBridge(),
-      picker: window.BLPickers,
-      onPaths: importPaths,
-      onFiles: uploadFiles,
-    });
+    const outcome = await window.BLCore.guardedPick(el.pickVideos, () =>
+      window.BLCore.pickMedia("videos", {
+        bridge: desktopBridge(),
+        picker: window.BLPickers,
+        onPaths: importPaths,
+        onFiles: uploadFiles,
+      }));
+    if (outcome.status === "error") {
+      status(`无法选择视频：${outcome.error.message}`, "error");
+    }
   }
 
   async function pickFolder() {
-    await window.BLCore.pickMedia("folder", {
-      bridge: desktopBridge(),
-      picker: window.BLPickers,
-      onPaths: importPaths,
-      onFiles: uploadFiles,
-    });
+    const outcome = await window.BLCore.guardedPick(el.pickFolder, () =>
+      window.BLCore.pickMedia("folder", {
+        bridge: desktopBridge(),
+        picker: window.BLPickers,
+        onPaths: importPaths,
+        onFiles: uploadFiles,
+      }));
+    if (outcome.status === "error") {
+      status(`无法选择文件夹：${outcome.error.message}`, "error");
+    }
   }
 
   function bind() {

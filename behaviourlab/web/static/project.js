@@ -111,32 +111,45 @@
     return window.pywebview && window.pywebview.api ? window.pywebview.api : null;
   }
 
-  async function pick(kind) {
+  async function pick(kind, trigger) {
     const core = window.BLCore;
-    if (core && typeof core.pickMedia === "function") {
-      await core.pickMedia(kind, {
-        bridge: desktopBridge(),
-        picker: window.BLPickers,
-        onPaths: importPaths,
-        onFiles: uploadFiles,
+    const run = async () => {
+      if (core && typeof core.pickMedia === "function") {
+        await core.pickMedia(kind, {
+          bridge: desktopBridge(),
+          picker: window.BLPickers,
+          onPaths: importPaths,
+          onFiles: uploadFiles,
+        });
+        return;
+      }
+      if (!window.BLPickers) return;
+      const files = await window.BLPickers.pickFiles({
+        multiple: true,
+        directory: kind === "folder",
       });
-      return;
+      if (files && files.length) await uploadFiles(files);
+    };
+    // 等待期间防重复点击；原生调用失败在原触发处显示可读错误。
+    const outcome = core && typeof core.guardedPick === "function"
+      ? await core.guardedPick(trigger, run)
+      : await (async () => {
+        try { return { status: "done", result: await run() }; }
+        catch (error) { return { status: "error", error }; }
+      })();
+    if (outcome.status === "error") {
+      showErrors([{ name: "无法选择", message: outcome.error.message }]);
+      setStatus("");
     }
-    if (!window.BLPickers) return;
-    const files = await window.BLPickers.pickFiles({
-      multiple: true,
-      directory: kind === "folder",
-    });
-    if (files && files.length) await uploadFiles(files);
   }
 
   const pickFilesButton = document.querySelector("#project-pick-files");
   const pickFolderButton = document.querySelector("#project-pick-folder");
   if (pickFilesButton) {
-    pickFilesButton.addEventListener("click", () => { pick("videos"); });
+    pickFilesButton.addEventListener("click", () => { pick("videos", pickFilesButton); });
   }
   if (pickFolderButton) {
-    pickFolderButton.addEventListener("click", () => { pick("folder"); });
+    pickFolderButton.addEventListener("click", () => { pick("folder", pickFolderButton); });
   }
 
   if (dropzone) {

@@ -8,6 +8,7 @@ import types
 import pytest
 
 from behaviourlab.desktop import DesktopBridge, DesktopRuntimeError, open_window
+from webview.event import Event as PywebviewEvent
 
 
 class FakeWebview:
@@ -124,16 +125,33 @@ def test_open_directory_validates_and_reports(tmp_path):
     assert bridge.open_directory(str(folder)) is True
     assert opened == [str(folder.resolve())]
 
-    assert bridge.open_directory(str(tmp_path / "不存在")) is False
+    # 缺失/非目录/系统失败按合同抛可读业务错误，不吞成 False。
+    with pytest.raises(ValueError) as missing:
+        bridge.open_directory(str(tmp_path / "不存在"))
+    assert "路径不存在或不可访问" in str(missing.value)
 
     file_path = tmp_path / "note.txt"
     file_path.write_text("x", encoding="utf-8")
-    assert bridge.open_directory(str(file_path)) is False
+    with pytest.raises(ValueError) as not_dir:
+        bridge.open_directory(str(file_path))
+    assert "不是文件夹" in str(not_dir.value)
+
+    with pytest.raises(ValueError):
+        bridge.open_directory("   ")
 
     failing = DesktopBridge(
+        webview_module=FakeWebview(),
+        path_opener=lambda path: (_ for _ in ()).throw(OSError("拒绝访问")),
+    )
+    with pytest.raises(RuntimeError) as os_error:
+        failing.open_directory(str(folder))
+    assert "系统打开失败" in str(os_error.value)
+
+    refusing = DesktopBridge(
         webview_module=FakeWebview(), path_opener=lambda path: False
     )
-    assert failing.open_directory(str(folder)) is False
+    with pytest.raises(RuntimeError):
+        refusing.open_directory(str(folder))
 
 
 def test_window_binds_bridge_before_event_loop(monkeypatch):
@@ -153,20 +171,23 @@ def test_window_binds_bridge_before_event_loop(monkeypatch):
         assert bridge._window is window, "开始 GUI 前私有窗口引用已绑定"
         created["started"] = True
         created["start_kwargs"] = kwargs
-        window.events.initialized.fire("edgechromium")
+        # 真实初始化链（window.py）：Event.set 的返回值决定是否创建。
+        created["abort"] = window.events.initialized.set("edgechromium")
 
     fake_module = types.SimpleNamespace(
         create_window=create_window,
         start=start,
         settings={"ALLOW_DOWNLOADS": False, "IGNORE_SSL_ERRORS": True},
     )
-    window.events = types.SimpleNamespace(initialized=_FakeEvent())
+    window.events = types.SimpleNamespace(
+        initialized=PywebviewEvent(window, True))
 
     monkeypatch.setitem(sys.modules, "webview", fake_module)
 
     open_window("http://127.0.0.1:8765")
 
     assert created["started"] is True
+    assert created["abort"] is False, "edgechromium 不 abort 原生窗口创建"
     assert created["width"] == 1360
     assert created["height"] == 900
     assert created["min_size"] == (1000, 680)
@@ -175,21 +196,6 @@ def test_window_binds_bridge_before_event_loop(monkeypatch):
     # 安全设置：允许用户触发的下载，不忽略证书错误。
     assert fake_module.settings["ALLOW_DOWNLOADS"] is True
     assert fake_module.settings["IGNORE_SSL_ERRORS"] is False
-
-
-class _FakeEvent:
-    """initialized 事件替身：真实事件用 += 订阅，同步触发。"""
-
-    def __init__(self):
-        self._items = []
-
-    def __iadd__(self, item):
-        self._items.append(item)
-        return self
-
-    def fire(self, renderer):
-        for item in list(self._items):
-            item(renderer)
 
 
 class _Tracked:
@@ -205,12 +211,16 @@ class _Tracked:
 
 class _NativeWindow:
     def __init__(self):
-        self.events = types.SimpleNamespace(initialized=_FakeEvent())
+        # 与真实 Window.initialized 相同：同步 Event（should_lock=True）。
+        self.events = types.SimpleNamespace(
+            initialized=PywebviewEvent(self, True))
         self.payload = _Tracked()
 
 
 class _FakeBackend:
-    """假原生后端：只有正确引擎才真正创建原生窗口。"""
+    """假原生后端：初始化链与 pywebview window.py 一致——
+    ``Event.set(renderer)`` 的返回值决定是否创建原生窗口，
+    不在替身里按 renderer 自行跳过创建。"""
 
     OPEN_DIALOG = "open"
     FOLDER_DIALOG = "folder"
@@ -233,8 +243,8 @@ class _FakeBackend:
         entry = self.created[-1]
         js_api = entry["kwargs"]["js_api"]
         assert js_api._window is entry["window"], "开始 GUI 前私有窗口引用已绑定"
-        entry["window"].events.initialized.fire(self.renderer)
-        if self.renderer == "edgechromium":
+        abort = entry["window"].events.initialized.set(self.renderer)
+        if not abort:
             self.native_created += 1
 
 
@@ -265,16 +275,36 @@ def test_runtime_gate_accepts_only_edgechromium(monkeypatch):
     assert backend.created[0]["window"].payload.reads == []
 
 
-@pytest.mark.parametrize("renderer", ["mshtml", None])
+@pytest.mark.parametrize("renderer", ["mshtml", None, "cef"])
 def test_runtime_gate_rejects_other_engines(monkeypatch, renderer):
     backend, error = _run_open_window(monkeypatch, renderer)
     assert error is not None, "非 edgechromium 必须产生可行动错误"
-    assert backend.native_created == 0, "错误引擎不创建原生窗口"
+    assert backend.native_created == 0, "回调返回 False：原生窗口创建被 abort"
     message = str(error)
     assert "WebView2" in message
     assert "https://developer.microsoft.com/microsoft-edge/webview2/" in message
     assert "重新启动" in message
     assert ".NET" in message
+
+
+def test_initialized_callback_returns_strict_bool(monkeypatch):
+    """回调必须记录 renderer 并返回严格 bool，不靠 raise。"""
+
+    backend = _FakeBackend("edgechromium")
+    monkeypatch.setitem(sys.modules, "webview", backend)
+    open_window("http://127.0.0.1:8765")
+    handlers = backend.created[0]["window"].events.initialized._items
+    assert len(handlers) == 1
+    assert handlers[0](None) is False, "未报告 renderer 返回 False"
+
+    class Unknown:
+        pass
+
+    assert handlers[0]("mshtml") is False
+    assert handlers[0](Unknown()) is False
+    assert handlers[0]("edgechromium") is True
+    # 回调不 raise：异常输入也只返回 False。
+    assert handlers[0](object()) is False
 
 
 def test_runtime_import_failure_is_actionable(monkeypatch):

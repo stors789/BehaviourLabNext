@@ -253,3 +253,25 @@ def save_background(paths: DataPaths, data: bytes) -> dict:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(encoded.tobytes())
     return {"path": str(target), "url": f"/api/backgrounds/{filename}"}
+
+
+def validate_background_path(path: str) -> None:
+    """确认 linked 原生背景当前可按背景语义解码；失败抛 BackgroundError。
+
+    与 load_static_background 使用同一解码语义（IMREAD_COLOR），只读
+    不拷贝；前端必须在本校验通过后才替换旧有效背景。
+    """
+
+    import cv2
+    import numpy as np
+
+    file_path = Path(path)
+    if not file_path.is_file():
+        raise BackgroundError("背景文件不存在")
+    try:
+        data = file_path.read_bytes()
+    except OSError as error:
+        raise BackgroundError(f"背景文件不可读取：{error}") from error
+    image = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None or getattr(image, "ndim", 0) != 3:
+        raise BackgroundError("背景无法解码为彩色图像")

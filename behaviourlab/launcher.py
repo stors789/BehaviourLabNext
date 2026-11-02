@@ -1,9 +1,11 @@
 """启动器：数据根所有权、单一窗口、本地服务与统一清理。
 
-顺序固定：create_app（不启动第二调度器）→ 显式 jobs.start 取得数据根
-所有权 → 本地服务监听与就绪检查 → server.json → 桌面窗口/浏览器等待。
-窗口正常返回或启动任一步失败，都在 finally 里先停调度、再排空 HTTP、
-最后关闭 Store 并释放本实例取得的所有权，同时撤销 atexit 清理。
+顺序固定：create_app（不启动第二调度器）→ 构造 LocalService → 显式
+jobs.start 取得数据根所有权 → 锁的最终释放责任移交整体生命周期 →
+本地服务监听与就绪检查 → server.json → 桌面窗口/浏览器等待。
+窗口正常返回或启动任一步失败，都走同一异常安全清理链：先停调度、
+再排空 HTTP、最后关闭 Store，全部使用者退出后才释放同根锁；清理未
+完成时保留可收尾状态（atexit 不注销），不以退出码 0 冒称成功。
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
+from typing import Any
 
 from .config import DataPaths
 from .service import AlreadyRunningError, LocalService
@@ -122,6 +125,39 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     paths = DataPaths.from_dir(args.data_dir)
     service: LocalService | None = None
+    jobs: Any = None
+    store: Any = None
+
+    def cleanup() -> bool:
+        """入口统一的异常安全清理链；返回是否完整收尾。
+
+        服务已构造：停调度 → 排空 HTTP → Store.close → 最后释放同根
+        锁（最终释放责任在 LocalService）。服务构造失败：只回收已
+        创建的 Store/Jobs，绝不触碰其他实例。清理异常只记日志，不
+        替换最初的 cause。
+        """
+
+        nonlocal service
+        if service is not None:
+            stopped = service.stop()
+            if stopped:
+                atexit.unregister(service.stop)
+            return stopped
+        stopped = True
+        if jobs is not None:
+            try:
+                if not jobs.shutdown():
+                    stopped = False
+            except Exception:
+                LOGGER.exception("回收调度器失败")
+                stopped = False
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                LOGGER.exception("关闭 Store 失败")
+                stopped = False
+        return stopped
 
     try:
         paths.ensure()
@@ -144,9 +180,12 @@ def main(argv: list[str] | None = None) -> int:
         # 显式取得数据根所有权：取不到锁就不是第二个分析者，直接报错。
         if not jobs.start():
             raise AlreadyRunningError(LOCK_TAKEN_MESSAGE)
+        # 同根锁由整体生命周期持有到最后：shutdown 只收尾，不提前放锁。
+        jobs.defer_lock_release()
         service.start()
         LOGGER.info("本地服务：%s", service.url)
         _record_server(paths, service.url)
+        stopped = True
         try:
             if args.browser:
                 # 只保持服务等待用户中断，不创建桌面窗口/错误框。
@@ -156,26 +195,27 @@ def main(argv: list[str] | None = None) -> int:
 
                 open_window(service.url)
         finally:
-            service.stop()
-            atexit.unregister(service.stop)
+            # stop=False：不注销 atexit 清理，保留可收尾状态。
+            stopped = cleanup()
+        if not stopped:
+            LOGGER.error("关闭未完成：清理已保留，不以 0 冒称成功")
+            return 1
         return 0
     except AlreadyRunningError as error:
         LOGGER.error("%s", error)
         _write_stream(sys.stderr, str(error))
         if not args.browser:
             show_native_error(str(error))
-        if service is not None:
-            # 未取得所有权的实例只清自己已创建的对象，不触碰原实例。
-            service.stop()
-            atexit.unregister(service.stop)
+        cleanup()
         return 2
     except KeyboardInterrupt:
-        if service is not None:
-            service.stop()
-            atexit.unregister(service.stop)
-        return 0
+        if cleanup():
+            return 0
+        LOGGER.error("中断后清理未完成：清理已保留，不以 0 冒称成功")
+        return 1
     except Exception as error:
         detail = traceback.format_exc()
+        # 先落盘并展示最初异常；清理异常只补日志，不替换根因。
         LOGGER.error("启动失败：\n%s", detail)
         log_path = record_startup_failure(paths, detail)
         message = f"无法启动：{error}"
@@ -186,9 +226,8 @@ def main(argv: list[str] | None = None) -> int:
         _write_stream(sys.stderr, message)
         if not args.browser:
             show_native_error(message)
-        if service is not None:
-            service.stop()
-            atexit.unregister(service.stop)
+        if not cleanup():
+            LOGGER.error("退出时清理未完成，已保留可收尾状态")
         return 1
 
 

@@ -250,6 +250,18 @@ class JobScheduler:
             self.owner.release()
             self._owns_lock = False
 
+    def defer_lock_release(self) -> None:
+        """整体生命周期接管最终释放：shutdown 只收尾，不放同根锁。
+
+        启动器在 jobs.start 成功且 LocalService 已构造后调用；此后
+        同一注册表上的锁由 LocalService 在 HTTP 排空、Store 关闭之后
+        统一释放。调度器单独使用（测试/独立进程）不受影响。
+        """
+
+        with self._lock:
+            if self._owns_lock:
+                self._owns_lock = False
+
     # -- 查询 -----------------------------------------------------------
     def get(self, batch_id: str) -> dict:
         batch = self.store.get_batch(batch_id)

@@ -129,20 +129,37 @@ class DesktopBridge:
         return self._first(result)
 
     def open_directory(self, path: str) -> bool:
+        """打开文件夹；缺失/非目录/系统失败抛可读业务错误，不吞成 False。
+
+        成功返回 True；失败通过桥的调用失败把可读错误返回前端。
+        """
+
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("无法打开目录：路径为空")
         try:
             target = Path(path).expanduser().resolve(strict=True)
-        except (OSError, RuntimeError, TypeError):
-            return False
+        except (OSError, RuntimeError, TypeError) as error:
+            raise ValueError(
+                f"无法打开目录：路径不存在或不可访问：{path}") from error
         if not target.is_dir():
-            return False
+            raise ValueError(f"无法打开目录：不是文件夹：{path}")
         try:
-            return bool(self._path_opener(str(target)))
-        except Exception:
-            return False
+            opened = self._path_opener(str(target))
+        except Exception as error:
+            raise RuntimeError(
+                f"无法打开目录：系统打开失败：{target}") from error
+        if not opened:
+            raise RuntimeError(f"无法打开目录：系统打开失败：{target}")
+        return True
 
 
 def _subscribe_initialized(window: Any, observed: dict) -> None:
-    """记录 initialized(renderer) 的真实渲染器；回调内不 raise。"""
+    """订阅 initialized(renderer)：记录实际引擎并返回严格 bool 门槛。
+
+    返回值参与 pywebview 的原生窗口创建决策（``Event.set`` 收集到
+    False 即 abort）：只有严格等于 edgechromium 才 True；None/未知/
+    其他引擎都 False。回调内不 raise——依赖会吞掉回调异常。
+    """
 
     events = getattr(window, "events", None)
     event = getattr(events, "initialized", None)
@@ -151,8 +168,9 @@ def _subscribe_initialized(window: Any, observed: dict) -> None:
         LOGGER.warning("窗口没有 initialized 事件，无法记录实际渲染引擎")
         return
 
-    def on_initialized(renderer: Any = None) -> None:
+    def on_initialized(renderer: Any = None) -> bool:
         observed["renderer"] = renderer
+        return runtime_accepted(renderer)
 
     try:
         event += on_initialized

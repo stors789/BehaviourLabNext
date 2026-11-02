@@ -260,6 +260,38 @@ def test_background_upload_reencodes_png(client, store):
     assert invalid.get_json()["error"]["fields"][0]["field"] == "file"
 
 
+def test_background_validate_decodable_before_replace(client, store, tmp_path):
+    """原生背景确认合同：可解码 200，缺失/坏图 400 且字段可读。"""
+    import cv2
+    import numpy as np
+
+    image = np.zeros((6, 8, 3), dtype=np.uint8)
+    ok, encoded = cv2.imencode(".png", image)
+    assert ok
+    good = tmp_path / "good.png"
+    good.write_bytes(encoded.tobytes())
+
+    response = client.post("/api/backgrounds/validate",
+                           json={"path": str(good)})
+    assert response.status_code == 200
+    assert response.get_json()["data"]["ok"] is True
+
+    missing = client.post("/api/backgrounds/validate",
+                          json={"path": str(tmp_path / "不存在.png")})
+    assert missing.status_code == 400
+    assert "背景文件不存在" in missing.get_json()["error"]["message"]
+
+    bad = tmp_path / "bad.png"
+    bad.write_bytes(b"not-an-image")
+    broken = client.post("/api/backgrounds/validate", json={"path": str(bad)})
+    assert broken.status_code == 400
+    assert "背景无法解码" in broken.get_json()["error"]["message"]
+
+    empty = client.post("/api/backgrounds/validate", json={"path": "   "})
+    assert empty.status_code == 400
+    assert empty.get_json()["error"]["fields"][0]["field"] == "path"
+
+
 def test_media_routes_only_accept_registered_names(client):
     assert client.get("/api/backgrounds/not-a-name.png").status_code == 404
     assert client.get("/api/backgrounds/../behaviourlab.sqlite3").status_code == 404

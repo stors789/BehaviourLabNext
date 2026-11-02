@@ -66,15 +66,33 @@ def check_health(url: str, data_root: str | Path) -> tuple[bool, str]:
 
 
 def _default_server_factory(app: Any, host: str, port: int, threads: int) -> Any:
-    from waitress import create_server
+    """创建 Waitress 服务；部分构造/bind 失败时收掉自己创建的 dispatcher。
 
-    return create_server(
-        app,
-        host=host,
-        port=port,
-        threads=threads,
-        clear_untrusted_proxy_headers=True,
-    )
+    Waitress 在 bind 之前就创建 ``ThreadedTaskDispatcher`` 并启动工作
+    线程：端口被占等 bind 失败会把这些线程留在半构造对象里。这里由
+    工厂自己持有 dispatcher 并在失败时 shutdown 回收。
+    """
+
+    from waitress import create_server
+    from waitress.task import ThreadedTaskDispatcher
+
+    dispatcher = ThreadedTaskDispatcher()
+    dispatcher.set_thread_count(threads)
+    try:
+        return create_server(
+            app,
+            host=host,
+            port=port,
+            threads=threads,
+            _dispatcher=dispatcher,
+            clear_untrusted_proxy_headers=True,
+        )
+    except BaseException:
+        try:
+            dispatcher.shutdown(cancel_pending=True, timeout=1.0)
+        except Exception:
+            LOGGER.exception("回收 Waitress dispatcher 失败")
+        raise
 
 
 class LocalService:
@@ -258,10 +276,13 @@ class LocalService:
                     complete = False
             if not complete:
                 return False
-            # 4. 释放数据根所有权；5. 最后才标记停止，保证幂等与可重试。
-            if self._owner_acquired:
+            # 4. 全部使用者退出后才释放数据根所有权。锁由整体生命周期
+            # 持有：无论锁是本服务还是同注册表的调度器取得的，最终
+            # 释放责任都在这里（Store 关闭之后）；注册表未被本实例
+            # 持有时 held 为 False，不会碰其他实例的锁。
+            if self._owner.held:
                 self._owner.release()
-                self._owner_acquired = False
+            self._owner_acquired = False
             self._server = None
             self._thread = None
             self._stopped = True
