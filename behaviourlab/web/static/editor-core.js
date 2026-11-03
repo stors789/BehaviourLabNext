@@ -1454,6 +1454,30 @@
                                 unitDetection);
   }
 
+  // -- Y 迷宫入臂规则说明 ------------------------------------------------
+  // 仅深度规则消费的参数：中心点规则下界面必须标“不生效”。
+  const YMAZE_DEPTH_ONLY_RULE_KEYS = ["entry_depth_ratio", "entry_confirm_s",
+    "entry_reset_center_s", "require_center"];
+
+  function ymazeParamNotApplicable(rule, key) {
+    return rule === "center" && YMAZE_DEPTH_ONLY_RULE_KEYS.includes(key);
+  }
+
+  // 规则说明：IMPC 来源 + 本软件约定（不宣称完整遵循或认证）+ 当前规则
+  // 的实际行为。两种规则切换时文案随之更新。
+  function ymazeEntryRuleNote(rule) {
+    const sourcing = "入臂规则参考 IMPC“自动追踪时以小鼠中心点进入新区域”"
+      + "的判定；首次入臂、缺失处理、直接换臂与无防抖是本软件约定，"
+      + "不宣称完整遵循或获得 IMPC 认证。";
+    if (rule === "center") {
+      return sourcing + "中心点规则：中心点处于新区域的首个有效观测即记"
+        + "一次；臂/中心边界反复切换会按观测计数（无防抖）。入臂深度比例、"
+        + "入臂确认时间、中心区重置时间、再次入臂须经过中心区均不生效。";
+    }
+    return sourcing + "深度规则：进入指定深度并持续确认（原规则）；"
+      + "再次入臂须经过中心区时，还需在中心区停留达到重置时间。";
+  }
+
   return {
     TOOLBAR_HEIGHT,
     HANDLE_HIT_PX,
@@ -1476,6 +1500,8 @@
     cloneConfig,
     mergeDetectionLayers,
     effectiveDetection,
+    ymazeParamNotApplicable,
+    ymazeEntryRuleNote,
     reconcileVideos,
     selectionNeedsSave,
     persistSelection,

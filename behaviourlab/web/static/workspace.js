@@ -2907,9 +2907,8 @@
     return wrap;
   }
 
-  // Y 迷宫中心点入臂规则下不生效的深度规则参数：明确标注，不悄悄隐藏。
-  const YMAZE_DEPTH_ONLY_KEYS = new Set(["entry_depth_ratio",
-    "entry_confirm_s", "entry_reset_center_s", "require_center"]);
+  // Y 迷宫入臂规则的说明与“不生效”标注由 BLCore.ymazeEntryRuleNote /
+  // ymazeParamNotApplicable 提供（可执行前端测试覆盖），这里只接线。
 
   function ymazeCenterRule(unit) {
     if (state.assay !== "ymaze") return false;
@@ -2923,7 +2922,8 @@
     const centerRule = ymazeCenterRule(unit);
     const caption = document.createElement("span");
     caption.textContent = param.label + (param.unit ? "（" + param.unit + "）" : "")
-      + (centerRule && YMAZE_DEPTH_ONLY_KEYS.has(param.key)
+      + (centerRule && window.BLCore.ymazeParamNotApplicable(
+           effectiveOption(unit, "arm_entry_rule", "depth"), param.key)
         ? "（中心点规则下不生效）" : "");
     let input;
     if (param.type === "select") {
@@ -3002,12 +3002,11 @@
     });
     label.append(caption, input);
     if (state.assay === "ymaze" && param.key === "arm_entry_rule") {
-      // 规则说明随当前选择变化：两种规则的区别 + 中心点模式的失效参数与无防抖边界。
+      // 规则说明随当前选择变化（来源/软件约定/当前行为/失效参数）。
       const hint = document.createElement("span");
       hint.className = "meta";
-      hint.textContent = centerRule
-        ? "中心点处于新区域的首个有效观测即记一次；臂/中心边界反复切换会按观测计数（无防抖）。入臂深度比例、入臂确认时间、中心区重置时间、再次入臂须经过中心区均不生效。"
-        : "进入指定深度并持续确认（原规则）：再次入臂须经过中心区时，还需在中心区停留达到重置时间。";
+      hint.textContent = window.BLCore.ymazeEntryRuleNote(
+        effectiveOption(unit, "arm_entry_rule", "depth"));
       label.append(hint);
     }
     return label;

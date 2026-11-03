@@ -318,3 +318,45 @@ def test_depth_params_still_validated_for_depth_rule():
         options(arm_entry_rule="depth", entry_depth_ratio=1.5),
         geometry(), complete=True)
     assert any(issue["field"] == "options.entry_depth_ratio" for issue in issues)
+
+
+# -- 六、原有必需字段的校验语义保持 -------------------------------------
+
+def test_missing_legacy_required_fields_fail_validation():
+    """不完整的原有配置：校验阶段给字段级错误，不在分析中 KeyError。"""
+
+    incomplete = {"arm_length_cm": 30.0, "arm_width_cm": 10.0,
+                  "max_jump_cm": 12.0, "arm_entry_rule": "center"}
+    issues = ymaze.validate_unit(incomplete, geometry(), complete=True)
+    fields = {issue["field"] for issue in issues}
+    for field in ("options.entry_depth_ratio", "options.tracking_hold_s",
+                  "options.entry_confirm_s", "options.entry_reset_center_s",
+                  "options.movement_threshold_cm_s", "options.bin_seconds"):
+        assert field in fields, field
+    messages = {issue["field"]: issue["message"] for issue in issues}
+    assert "必须是有限数值" in messages["options.entry_confirm_s"]
+
+
+def test_analyze_rejects_incomplete_options_at_validation(monkeypatch):
+    """缺 entry_confirm_s 的冻结配置：校验阶段 ValidationError，非 KeyError。"""
+
+    from behaviourlab.schema import ValidationError
+
+    incomplete = {"arm_length_cm": 30.0, "arm_width_cm": 10.0,
+                  "max_jump_cm": 12.0, "arm_entry_rule": "depth"}
+    with pytest.raises(ValidationError) as exc_info:
+        run_y([ARM_A], values=incomplete, monkeypatch=monkeypatch)
+    assert "必须是有限数值" in str(exc_info.value)
+    assert not isinstance(exc_info.value, KeyError)
+
+
+def test_new_rule_field_compat_unchanged():
+    """同一次改动内的两种语义并存：原必需字段严格、新字段按实际存在。"""
+
+    legacy = without_rule(options())
+    assert ymaze.validate_unit(legacy, geometry(), complete=True) == [], \
+        "旧配置仅缺 arm_entry_rule：原深度规则，不报错"
+    values = dict(legacy)
+    values["arm_entry_rule"] = None
+    issues = ymaze.validate_unit(values, geometry(), complete=True)
+    assert [issue["field"] for issue in issues] == ["options.arm_entry_rule"]

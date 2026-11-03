@@ -279,7 +279,14 @@ def validate_unit(options: Mapping[str, Any] | None,
                   geometry: Mapping[str, Any] | None,
                   provided: Iterable[str] | None = None, *,
                   complete: bool = False) -> list[dict]:
-    """只校验显式参数与已绘区域；未完成草稿仍可保存。"""
+    """只校验显式参数与已绘区域；未完成草稿仍可保存。
+
+    ``provided`` 为 None 时沿用原合同：原有必需字段一律校验（缺字段给
+    字段级错误，不在分析中崩溃）。``arm_entry_rule`` 是新增字段，按
+    options 里**实际存在**判定：缺字段（旧草稿/旧冻结任务）按原规则
+    运行；显式提供的 null、空串、未知值或错误类型必须报错，不能静默
+    回退默认值。
+    """
 
     values = options if isinstance(options, Mapping) else {}
     provided = set(OPTION_KEYS if provided is None else provided)
@@ -329,11 +336,13 @@ def validate_unit(options: Mapping[str, Any] | None,
             issues.append({"field": "options.mode",
                            "message": "路径必须是自动或人工"})
 
-    # 缺字段（旧草稿/旧冻结任务）按原规则运行；只有显式非法值才报错。
-    rule = values.get("arm_entry_rule")
-    if rule is not None and rule not in ARM_ENTRY_RULES:
-        issues.append({"field": "options.arm_entry_rule",
-                       "message": "入臂规则必须是 depth 或 center"})
+    # 新字段按 options 里实际存在判定（合并后的冻结配置里显式 null 会
+    # 覆盖工厂默认值，同样命中）：缺字段按原规则；显式非法值必须报错。
+    if "arm_entry_rule" in values:
+        rule = values["arm_entry_rule"]
+        if not isinstance(rule, str) or rule not in ARM_ENTRY_RULES:
+            issues.append({"field": "options.arm_entry_rule",
+                           "message": "入臂规则必须是 depth 或 center"})
 
     # 人工 Y 由 engine 按 unit.manual.mode 走 validate_manual，不会进入这里；
     # options.mode 只是设置项，不能用来豁免自动几何。
@@ -1031,9 +1040,6 @@ def process_unit(unit: Mapping[str, Any],
                           "first 9 (fixed once full); both within [1/4, 4]",
         "tracking_hold": "short gaps keep association evidence only; after "
                          "tracking_hold_s the link re-acquires by area",
-        "entry_confirm": "same arm for entry_confirm_s of real source time",
-        "center_reset": "armed again after entry_reset_center_s of center "
-                        "observations; missing aborts the center timer",
         "alternation": "entry index >= 3 with three distinct arms in the "
                        "recent sequence",
         "missing_rule": "missing exposure is counted as missing only and no "
@@ -1041,14 +1047,23 @@ def process_unit(unit: Mapping[str, Any],
                         "reports no_candidate_within_gate, the raw detector "
                         "reason stays in the row field detection_reason",
     }
-    # 规则事实进报告“计量 metadata”段：不同入臂规则的结果可区分。
-    # 旧冻结任务缺字段时记录实际生效的规则（depth），不凭空改含义。
+    # 规则事实进报告“计量 metadata”段：不同入臂规则的结果可区分，且
+    # 方法说明与实际生效规则一致——中心点规则不再输出深度/确认/重置的
+    # 旧描述，深度规则保留原有条件说明。旧冻结任务缺字段记 depth。
     metadata["arm_entry_rule"] = entry_rule
     if entry_rule == "center":
-        metadata["arm_entry_rule_note"] = ("center-point rule: no entry depth, "
-                                           "confirm time, center reset or "
-                                           "require-center; no debounce on "
-                                           "arm/center boundary flips")
+        metadata["arm_entry_rule_note"] = (
+            "center-point rule: an entry is counted at the first valid "
+            "observation whose body center is in a new region; entry depth, "
+            "confirm time, center reset and require-center do not apply; "
+            "missing/unknown observations are neutral; arm/center boundary "
+            "flips count as observed (no debounce)")
+    else:
+        metadata["entry_confirm"] = ("same arm for entry_confirm_s of real "
+                                     "source time")
+        metadata["center_reset"] = ("armed again after entry_reset_center_s "
+                                    "of center observations; missing aborts "
+                                    "the center timer")
     warning = rule_warning
     if not window.known:
         unknown_window = ("未检测到动物，无法确定相对时间窗："

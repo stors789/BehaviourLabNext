@@ -580,6 +580,8 @@
               总计 {{ s.total_arm_entries }} 次 ·
               {% if manual %}
               来源 人工记录（事件时间为源帧绝对秒）
+              {% elif s.arm_entry_rule == "center" %}
+              来源 自动追踪（中心点规则：首个有效观测即计，无防抖；入臂确认时间不适用）
               {% else %}
               来源 自动追踪（入臂确认 {{ num(s.entry_confirm_s, 2) }} s）
               {% endif %}
@@ -616,8 +618,17 @@
             <tr><th>参数</th><td>
               {% if manual %}
               箱宽 {{ num(s.bin_seconds, 2) }} s
+              {% elif s.arm_entry_rule == "center" %}
+              臂长 {{ num(s.arm_length_cm, 2) }} cm · 臂宽 {{ num(s.arm_width_cm, 2) }} cm ·
+              入臂规则 中心点（首个有效观测即计，无防抖） ·
+              预测最大偏差 {{ num(s.max_jump_cm, 2) }} cm ·
+              短时丢失 {{ num(s.tracking_hold_s, 2) }} s ·
+              入臂深度比例 / 入臂确认 / 中心重置 / 须经中心：本规则不适用 ·
+              移动阈值 {{ num(s.movement_threshold_cm_s, 2) }} cm/s ·
+              箱宽 {{ num(s.bin_seconds, 2) }} s
               {% else %}
               臂长 {{ num(s.arm_length_cm, 2) }} cm · 臂宽 {{ num(s.arm_width_cm, 2) }} cm ·
+              入臂规则 深度+持续确认 ·
               入臂深度比例 {{ num(s.entry_depth_ratio, 2) }} ·
               预测最大偏差 {{ num(s.max_jump_cm, 2) }} cm ·
               短时丢失 {{ num(s.tracking_hold_s, 2) }} s ·
