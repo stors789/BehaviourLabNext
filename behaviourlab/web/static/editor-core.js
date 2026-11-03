@@ -1406,6 +1406,54 @@
     return result;
   }
 
+  // -- 检测配置合并 -----------------------------------------------------
+  // 与后端 engine.merge_layers 同一语义：两侧都是普通对象时逐键递归合并，
+  // 其他类型（含 null、数组）由后层整体替换。仅用于把“当前鼠的完整有效
+  // 检测配置”合并出来，不改变任何解析优先级。
+  function isPlainConfig(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function cloneConfig(value) {
+    if (!isPlainConfig(value)) return value;
+    if (Array.isArray(value)) return value.map(cloneConfig);
+    const out = {};
+    for (const key of Object.keys(value)) out[key] = cloneConfig(value[key]);
+    return out;
+  }
+
+  function mergeTwoConfigs(base, override) {
+    if (isPlainConfig(base) && isPlainConfig(override)) {
+      const merged = {};
+      for (const key of Object.keys(base)) merged[key] = cloneConfig(base[key]);
+      for (const key of Object.keys(override)) {
+        merged[key] = Object.prototype.hasOwnProperty.call(base, key)
+          ? mergeTwoConfigs(base[key], override[key])
+          : cloneConfig(override[key]);
+      }
+      return merged;
+    }
+    return cloneConfig(override);
+  }
+
+  function mergeDetectionLayers() {
+    let result = {};
+    for (let index = 0; index < arguments.length; index += 1) {
+      const layer = arguments[index];
+      if (layer == null) continue;
+      result = mergeTwoConfigs(result, layer);
+    }
+    return result;
+  }
+
+  // 与正式任务一致的有效检测配置：工厂默认 → 草稿（已含设置快照）→
+  // 视频 → 当前鼠。与 detectionValue 的逐键取值同层序，这里是深合并。
+  function effectiveDetection(defaults, draftDetection, videoDetection,
+                              unitDetection) {
+    return mergeDetectionLayers(defaults, draftDetection, videoDetection,
+                                unitDetection);
+  }
+
   return {
     TOOLBAR_HEIGHT,
     HANDLE_HIT_PX,
@@ -1425,6 +1473,9 @@
     assignWindow,
     effectiveVideoDuration,
     windowFieldValue,
+    cloneConfig,
+    mergeDetectionLayers,
+    effectiveDetection,
     reconcileVideos,
     selectionNeedsSave,
     persistSelection,

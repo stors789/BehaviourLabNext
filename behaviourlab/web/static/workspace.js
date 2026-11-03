@@ -1991,8 +1991,10 @@
     const methods = document.createElement("div");
     methods.className = "inspect-section";
     methods.append(detectionFields(unit));
+    methods.append(applyDetectionRow(unit));
     body.append(methods);
 
+    body.append(detectionSummarySection());
     appendPreviewModes(body);
 
     const output = document.createElement("details");
@@ -2243,6 +2245,116 @@
     // cancel/none：不发请求、不清旧值。
   }
 
+  // -- 检测配置同步与各鼠方法摘要 ---------------------------------------
+  // 与 engine.is_manual_path 一致：人工 Y（manual.mode=manual）与给出人工
+  // 记录（含空数组）的 Barnes 不执行自动检测。
+  function unitSkipsDetection(unit) {
+    const manual = unit && unit.manual;
+    if (state.assay === "ymaze") {
+      return Boolean(manual && manual.mode === "manual");
+    }
+    if (state.assay === "barnes") {
+      return Boolean(manual && (manual.hole_visits != null
+        || manual.escape_time_s != null));
+    }
+    return false;
+  }
+
+  function detectionMethodLabel(method) {
+    const found = BG_METHOD_LABELS.find(([value]) => value === method);
+    return found ? found[1] : String(method);
+  }
+
+  // 当前鼠的完整有效检测配置：工厂默认 → 草稿（含设置快照）→ 视频 → 鼠。
+  // 与预览、正式任务冻结（engine.resolve_detection，提交时 settings 为空层）
+  // 同一层序；deepMerge 语义与后端 merge_layers 一致。
+  function effectiveUnitDetection(unit) {
+    return window.BLCore.effectiveDetection(
+      state.detectionDefaults, state.draft && state.draft.detection,
+      currentVideo() && currentVideo().detection, unit && unit.detection);
+  }
+
+  // 把当前鼠的完整有效检测配置覆盖到本视频其余各鼠：只动 detection，
+  // 每鼠一份独立副本，之后仍可单独调整；不自动触发，必须显式确认。
+  function applyDetectionToVideoUnits(source) {
+    const video = currentVideo();
+    if (!video || !source) return;
+    const units = (video.units || []).filter(Boolean);
+    const others = units.filter((candidate) => candidate !== source);
+    if (!others.length) {
+      status("本视频没有其他小鼠，无需应用", "warn");
+      return;
+    }
+    const name = source.name || "当前小鼠";
+    const message = "将把「" + name + "」的完整有效检测配置（含未显示字段）"
+      + "覆盖应用到本视频其余 " + others.length + " 只小鼠的检测配置；"
+      + "其他视频不受影响。继续？";
+    if (!window.confirm(message)) return;
+    const effective = effectiveUnitDetection(source);
+    for (const target of others) {
+      target.detection = clone(effective);
+    }
+    invalidatePreview();
+    markDirty();
+    renderInspector();
+    status("已把「" + name + "」的检测配置应用到本视频其余 "
+      + others.length + " 只小鼠；将随草稿一起保存", "ok");
+  }
+
+  function applyDetectionRow(source) {
+    const row = document.createElement("div");
+    row.className = "field-row-inline";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "button small";
+    button.textContent = "应用到本视频所有小鼠";
+    button.addEventListener("click", () => applyDetectionToVideoUnits(source));
+    const hint = document.createElement("span");
+    hint.className = "meta";
+    hint.textContent = "覆盖其余小鼠的检测配置";
+    row.append(button, hint);
+    return row;
+  }
+
+  // 各鼠实际检测方法摘要：来自与正式任务一致的有效配置，常驻检查器，
+  // 同步或单独修改后随 renderInspector 刷新；纯人工单位如实标注。
+  function detectionSummarySection() {
+    const wrap = document.createElement("details");
+    wrap.className = "fold";
+    // 默认展开：提交前必须直接可见，不是藏在折叠里或状态栏一闪而过。
+    wrap.open = true;
+    const summary = document.createElement("summary");
+    summary.textContent = "各小鼠检测方法";
+    const body = document.createElement("div");
+    body.className = "fold-body";
+    const video = currentVideo();
+    const units = video ? (video.units || []).filter(Boolean) : [];
+    if (!units.length) {
+      const empty = document.createElement("p");
+      empty.className = "muted";
+      empty.textContent = "当前视频还没有小鼠。";
+      body.append(empty);
+    }
+    for (const unit of units) {
+      const row = document.createElement("div");
+      row.className = "field-row-inline";
+      const name = document.createElement("span");
+      name.textContent = unit.name || "未命名小鼠";
+      const method = document.createElement("span");
+      method.className = "meta";
+      if (unitSkipsDetection(unit)) {
+        method.textContent = "人工记录，不执行检测";
+      } else {
+        method.textContent = detectionMethodLabel(
+          effectiveUnitDetection(unit).bg_method || "threshold");
+      }
+      row.append(name, method);
+      body.append(row);
+    }
+    wrap.append(summary, body);
+    return wrap;
+  }
+
   function renderReviewInspector(body, unit) {
     const title = document.createElement("h3");
     title.textContent = "复核";
@@ -2252,6 +2364,8 @@
     body.append(title, note);
     appendPathMode(body);
     appendExperimentSettings(body, unit);
+    // 提交前常驻展示各鼠实际检测方法；人工单位如实标注。
+    body.append(detectionSummarySection());
 
     const events = (unit.manual && unit.manual.events) || [];
     const summary = document.createElement("p");
@@ -3502,6 +3616,8 @@
     body.append(title);
     body.append(playbackRow({ rates: false }));
     body.append(manualList(unit, true));
+    // 提交前常驻展示各鼠实际检测方法；人工单位如实标注。
+    body.append(detectionSummarySection());
     appendAnnotationToggle(body);
 
     const confirmed = state.previewGate.confirmed(previewConfig("behavior"));
