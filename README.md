@@ -1,9 +1,46 @@
+<div align="center">
+
+<img src="docs/assets/logo.svg" width="150" alt="BehaviourLabNext logo"/>
+
 # BehaviourLabNext
 
-Windows 本地经典视觉动物行为分析应用（不含深度学习依赖）。本地服务与桌面窗口共用同一套服务与前端；正式桌面交付目标为 Windows 64 位 + CPython 3.11 + Microsoft Edge WebView2（系统级前提）。
+**Windows 本地经典视觉动物行为分析应用** · 无深度学习依赖 · 数据不出本机
 
-- 当前构建状态：**未构建 Windows EXE，可交付 EXE 数量为 0**。构建方法与边界见 [`docs/RUN_AND_BUILD.md`](docs/RUN_AND_BUILD.md)；结构与逐项证据见 [`docs/BUILD_VALIDATION_STATUS.json`](docs/BUILD_VALIDATION_STATUS.json) 与 [`docs/ACCEPTANCE_STATUS.md`](docs/ACCEPTANCE_STATUS.md)。
-- 当前已知阻塞：真实 Windows 64 位 CPython 3.11 构建环境未就绪；真实浏览器 UI 验收与独立动物精度证据未执行（详见状态文档，均不阻塞源码使用）。
+![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)
+![python](https://img.shields.io/badge/python-3.11-3776AB)
+![ui](https://img.shields.io/badge/UI-WebView2-0E7490)
+![data](https://img.shields.io/badge/data-local%20SQLite-2EA043)
+
+</div>
+
+本地服务与桌面窗口共用同一套服务与前端；正式桌面交付目标为 Windows 64 位 + CPython 3.11 + Microsoft Edge WebView2（系统级前提）。
+
+## 界面预览
+
+<p align="center">
+  <img src="docs/screenshots/ui-a004-home.png" width="720" alt="首页"/>
+  <br><sub>首页：项目管理 / 独立分析双入口</sub>
+</p>
+
+| 工作台 · 场地绘制 | Y 迷宫 · 人工记录 | Y 迷宫 · 记录复核 |
+| --- | --- | --- |
+| <img src="docs/screenshots/ui-a004-workspace.png" width="300"/> | <img src="docs/screenshots/block-16-y-manual-record.png" width="300"/> | <img src="docs/screenshots/block-16-y-manual-review.png" width="300"/> |
+
+## 功能一览
+
+- **10 种经典范式**：旷场（OFT）、Y 迷宫（自发交替，支持 IMPC 式中心点入臂规则）、强迫游泳（FST）、尾悬（TST）、明暗箱（LDB）、高架十字迷宫（EPM）、高架零迷宫（EZM）、Morris 水迷宫（MWM）、Barnes 迷宫、新物体识别（NOR）。
+- **自动检测 + 人工记录双路径**：Y 迷宫支持逐帧人工臂记录与复核；自动追踪按 IMPC 约定以小鼠中心点判定入臂。
+- **可追溯计量**：每次 run 冻结配置，结果携带完整计量 metadata（分母定义、标定方式、规则口径），不把检测率混充准确率。
+- **输出齐全**：观测/事件/分箱/汇总 CSV、轨迹图、热图、标注视频、ZIP 打包。
+- **本地优先**：原始视频只读；数据根集中管理，同一数据根单实例排他锁。
+
+## 真实素材演示
+
+| 旷场 · 轨迹 | 旷场 · 热图 | Y 迷宫 · 入臂序列 |
+| --- | --- | --- |
+| <img src="docs/demo/openfield-run-26cce8d9/unit_01_trajectory.png" width="300"/> | <img src="docs/demo/openfield-run-26cce8d9/unit_01_heatmap.png" width="300"/> | <img src="docs/demo/ymaze-run-9d4c4c02/unit_01_sequence.png" width="300"/> |
+
+真实用户录像实跑：Y 迷宫中心点规则自动入臂与人工对照相似率 92.68% / 95.24%（差异为人工漏记型）；旷场 10 分钟完整窗口检测率 95.7%–99.8%。逐 run 材料与统计见 [`docs/demo/`](docs/demo/README.md)。
 
 ## 环境与安装
 
@@ -34,13 +71,16 @@ python -m venv .venv
 
 原始视频文件只读；分析使用冻结配置写入数据根的 `runs/`、`tasks/`、`database/` 等专用目录。用户媒体、数据库、密钥与任务输出不进入版本库，也不进入构建包。
 
+## 状态与验收
+
+- **构建**：已实际完成一次 Windows EXE 构建（PyInstaller 6.22.3 / CPython 3.11.13，产物 `dist/windows/BehaviourLabNext/`，`--browser` 冒烟通过）；WebView2 桌面窗口等完整原生验收仍在进行。方法与边界见 [`docs/RUN_AND_BUILD.md`](docs/RUN_AND_BUILD.md)，逐项证据见 [`docs/BUILD_VALIDATION_STATUS.json`](docs/BUILD_VALIDATION_STATUS.json) 与 [`docs/ACCEPTANCE_STATUS.md`](docs/ACCEPTANCE_STATUS.md)。
+- **独立动物精度**：无独立标注金标准；人工记录不代表更准确（标准可能漂移，有时漏和多），详见验收文档。
+
 ## 故障定位
 
 - `logs/application.log`：服务运行日志。
 - `logs/startup.log`：启动失败 cause/traceback（配 Windows 错误框）。
 - `tasks/<job>/<run>/worker.log`：单个后台分析进程日志。
-
-构建失败与 Windows 原生验收待办见 [`docs/ACCEPTANCE_STATUS.md`](docs/ACCEPTANCE_STATUS.md)。
 
 ## 未来开发计划
 
