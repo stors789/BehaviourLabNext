@@ -11,7 +11,8 @@
 | 真实引擎导出（real_engine_export） | verified（限合成帧） | PyAV 编码-解码往返（帧数/PTS/时长）通过；**真实动物素材导出未验证** |
 | 真实浏览器 UI（real_browser_ui） | **not_run** | 仓库内无真实浏览器操作记录；页面均为 implemented，不填页面通过 |
 | Windows 原生（windows_native） | **部分（构建+冒烟）** | 2026-11-03 实际构建成功：PyInstaller 6.22.3 / CPython 3.11.13，产物 `dist/windows/BehaviourLabNext/`（≈288 MB，exit 0）；`--browser` 冒烟通过（health ok、首页渲染）。**WebView2 桌面窗口、原生选择器、冻结 worker 路由等完整验收仍未执行** |
-| 独立动物精度（independent_animal_accuracy） | **not_run** | 无合法素材入库、无独立标注；检测率/覆盖不作为准确率 |
+| 独立动物精度（independent_animal_accuracy） | **not_run** | 无独立标注金标准；人工记录不代表更准确（标准可能漂移，有时漏和多），不改变本项状态 |
+| 真实素材人工对照（user_manual_comparison） | **记录级（用户实跑）** | Y 迷宫中心点规则 2 run（80da94b，用户自有录像）：小鼠 1 人工 vs 自动入臂序列相似率 92.68% / 95.24%，差异全部为自动多出单次入臂（人工漏记型）；详见 [`screenshots/ymaze-manual-verified-README.md`](screenshots/ymaze-manual-verified-README.md) 与 [`demo/`](demo/README.md) |
 
 ## 功能清单（逐页：入口 / 主要操作 / 空·加载·失败·成功状态）
 
