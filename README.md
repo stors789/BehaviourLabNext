@@ -88,3 +88,8 @@ python -m venv .venv
   查询项目/视频/run 的元数据与结果（summary.csv、events.csv、report.md），
   发起或查询分析任务、取回标注视频与图形输出；本地数据根仍然只读原则不变，
   Agent 经同一本地服务（127.0.0.1）访问，不引入云端依赖。
+- **DeepLabCut 集成**：作为可选的深度学习检测后端（保留现有经典视觉管线为默认零依赖路径），
+  并支持 DLC 标注数据格式的导入/导出，便于复用已有训练集与在本地继续训练。
+- **多系统适配**：在 Windows 之外支持 macOS（含 Apple Silicon）与 Linux 桌面运行——
+  服务端与 Web 前端本就平台无关，需要替换的是窗口层（WebView2 → WKWebView / WebKitGTK）
+  与打包链（PyInstaller onefile/目录按平台出包）；数据根结构与实验算法不变。
