@@ -617,21 +617,25 @@ def prepare_background(settings: Mapping[str, Any], asset: Mapping[str, Any],
         if sample_end is None and known_end is not None and known_end > start:
             sample_end = known_end
         samples = int(settings.get("temporal_bg_samples", 90))
-        key = _temporal_background_key(
+        prepared = _temporal_background_key(
             asset, video, metadata, orientation, width, height,
             start, end_value, sample_end, samples)
-        if key is None:
-            # 源身份不可归属：现建现用，不写缓存。
+        if prepared is None:
+            # 源身份不可归属：现建现用，不写缓存，也不采纳任何索引证据。
             return _build_temporal_background(
                 asset, video, orientation, start, end_value, sample_end,
-                samples, cancel)
+                samples, cancel, expected_identity=None)
+
+        key, expected_identity = prepared
 
         def build():
             return _build_temporal_background(
                 asset, video, orientation, start, end_value, sample_end,
-                samples, cancel)
+                samples, cancel, expected_identity=expected_identity)
 
-        return _cached_background(key, build, cancel)
+        return _cached_background(key, build, cancel,
+                                  path=asset.get("path"),
+                                  expected_identity=expected_identity)
     return None
 
 
@@ -694,7 +698,8 @@ def _build_temporal_background(asset: Mapping[str, Any],
                                video: Mapping[str, Any], orientation: int,
                                start: float, end_value: float | None,
                                sample_end: float | None, samples: int,
-                               cancel: Callable[[], bool] | None = None):
+                               cancel: Callable[[], bool] | None = None,
+                               expected_identity: tuple | None = None):
     """规划目标帧 → 只对这些帧取方向像素与灰度 → 同一中位数规则。
 
     三个量互相独立，不互相代替：源帧解码次数（规划扫描 + 定位补解）、
@@ -707,13 +712,19 @@ def _build_temporal_background(asset: Mapping[str, Any],
     metadata = asset.get("metadata") or {}
     pool = media.ReaderPool(max_readers=2)
     try:
-        # 规划、取像素与发布必须属于同一份源：先记下身份，两次阶段结束都核对。
-        try:
-            source_identity = media.identity_key(media.file_identity(path))
-        except (OSError, TypeError):
-            # 身份不可归属（路径不存在或测试替身）：不做绑定核对，也不采纳
-            # 任何旧索引证据；真实读取仍由 ReaderPool 拒绝不可读的源。
-            source_identity = ()
+        # 规划、取像素与发布必须属于同一份源。``expected_identity`` 来自缓存
+        # key 的计算时刻：入口先按它核对一次，避免把另一份文件的背景写回旧 key。
+        if expected_identity is None:
+            try:
+                source_identity = media.identity_key(media.file_identity(path))
+            except (OSError, TypeError):
+                # 身份不可归属（路径不存在或测试替身）：不做绑定核对，也不采纳
+                # 任何旧索引证据；真实读取仍由 ReaderPool 拒绝不可读的源。
+                source_identity = ()
+        else:
+            source_identity = tuple(expected_identity)
+            if source_identity:
+                _require_same_source(media, path, source_identity, "背景构建入口")
         # 规划阶段只读时刻/曝光：解码但不转 BGR、不复制方向像素。
         source = media.VideoSource(
             path, start_s=start, end_s=end_value, orientation=orientation,
@@ -783,8 +794,13 @@ def _temporal_background_key(asset: Mapping[str, Any], video: Mapping[str, Any],
                              metadata: Mapping[str, Any], orientation: int,
                              width: int, height: int, start: float,
                              end_value: float | None,
-                             sample_end: float | None, samples: int) -> tuple | None:
+                             sample_end: float | None,
+                             samples: int) -> tuple[tuple, tuple] | None:
     """只含影响背景像素的事实：同一化后相同才可命中。
+
+    返回 ``(key, expected_identity)``：身份在**取 key 的这一刻**唯一确定，
+    之后从缓存命中、构建入口、规划取像素到发布都要拿它核对，不能换一份
+    文件继续用同一个 key。
 
     源文件身份取不到（文件缺失/不可 stat）时返回 None：这种路径无法安全
     归属，一律现建不缓存，也不与别的输入共用条目。
@@ -794,18 +810,18 @@ def _temporal_background_key(asset: Mapping[str, Any], video: Mapping[str, Any],
 
     path = asset.get("path")
     try:
-        identity = media.file_identity(path)
+        identity_key = media.identity_key(media.file_identity(path))
     except (OSError, TypeError):
         return None
-    identity_key = (identity["device"], identity["inode"], identity["size"],
-                    identity["mtime_ns"], identity["ctime_ns"])
+    if not identity_key:
+        return None
     override = video.get("fps_override")
     if is_number(override) and float(override) > 0:
         fps_mode = ("override", float(override))
     else:
         fps_mode = ("native", None)
     number = lambda value: float(value) if is_number(value) else None
-    return (
+    key = (
         "temporal-background", TEMPORAL_BG_VERSION, identity_key,
         int(orientation), fps_mode,
         ("sample_fps", number(video.get("sample_fps"))),
@@ -817,6 +833,7 @@ def _temporal_background_key(asset: Mapping[str, Any], video: Mapping[str, Any],
          number(metadata.get("frame_count")), number(metadata.get("duration_s"))),
         ("frame", int(width), int(height)),
     )
+    return key, identity_key
 
 
 def _cache_store(key: tuple, value: np.ndarray) -> None:
@@ -832,14 +849,37 @@ def _cache_store(key: tuple, value: np.ndarray) -> None:
         _BACKGROUND_BYTES -= int(removed.nbytes)
 
 
+def _verify_expected_identity(path: Any, expected_identity: tuple,
+                              when: str) -> None:
+    """key 里记下的身份必须仍是当前文件的身份；否则拒绝本次结果。
+
+    身份为空（不可 stat 的路径或测试替身）时不做绑定核对：这类请求本来
+    就不进缓存。承诺范围只覆盖 `file_identity` 里可观测的字段。
+    """
+
+    if not expected_identity or not isinstance(path, (str, Path)):
+        return
+    from . import media
+
+    _require_same_source(media, path, expected_identity, when)
+
+
 def _cached_background(key: tuple, build: Callable[[], np.ndarray],
-                       cancel: Callable[[], bool] | None = None) -> np.ndarray:
-    """同键复用；并发同键只建一次，失败/取消不发布半成品。"""
+                       cancel: Callable[[], bool] | None = None, *,
+                       path: Any = None,
+                       expected_identity: tuple = ()) -> np.ndarray:
+    """同键复用；并发同键只建一次，失败/取消不发布半成品。
+
+    身份从取 key 那一刻起贯穿：命中返回前、构建入口、发布前、等待者取回
+    结果前都按同一个 expected_identity 核对；任何一处不符即拒绝本次请求，
+    既不返回、也不写入、也不覆盖旧条目。
+    """
 
     with _BACKGROUND_LOCK:
         hit = _BACKGROUND_CACHE.get(key)
         if hit is not None:
             _BACKGROUND_CACHE.move_to_end(key)
+            _verify_expected_identity(path, expected_identity, "缓存命中返回前")
             return hit
         pending = _BACKGROUND_INFLIGHT.get(key)
         owner = pending is None
@@ -857,6 +897,7 @@ def _cached_background(key: tuple, build: Callable[[], np.ndarray],
         with _BACKGROUND_LOCK:
             hit = _BACKGROUND_CACHE.get(key)
         if hit is not None:
+            _verify_expected_identity(path, expected_identity, "等待背景结果时")
             return hit
         if pending.error is not None:
             raise pending.error
@@ -865,6 +906,7 @@ def _cached_background(key: tuple, build: Callable[[], np.ndarray],
     value = None
     error: BaseException | None = None
     try:
+        _verify_expected_identity(path, expected_identity, "背景构建开始前")
         value = np.asarray(build())
         # 缓存数组只读：后续检测不会改到共享背景。
         value.setflags(write=False)
@@ -875,9 +917,19 @@ def _cached_background(key: tuple, build: Callable[[], np.ndarray],
         with _BACKGROUND_LOCK:
             _BACKGROUND_INFLIGHT.pop(key, None)
             if error is None and value is not None:
-                _cache_store(key, value)
+                try:
+                    _verify_expected_identity(path, expected_identity,
+                                              "背景发布前")
+                except BaseException as publish_error:  # noqa: BLE001
+                    # 发布前换源：丢掉这次的 B 结果，不写 A 的 key。
+                    error = publish_error
+                else:
+                    _cache_store(key, value)
             pending.error = error
         pending.event.set()
+    if error is not None and value is not None and isinstance(error, BaseException):
+        # build 已成功但发布被拒：把拒绝原因抛给调用者，不返回混合结果。
+        raise error
     return value
 
 

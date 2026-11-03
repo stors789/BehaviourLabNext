@@ -92,10 +92,10 @@ def track_builds(monkeypatch):
     real = detection._build_temporal_background
 
     def wrapper(asset, video, orientation, start, end_value, sample_end,
-                samples, cancel=None):
+                samples, cancel=None, expected_identity=None):
         calls.append((str(asset.get("path")), float(start), end_value, samples))
         return real(asset, video, orientation, start, end_value, sample_end,
-                    samples, cancel)
+                    samples, cancel, expected_identity=expected_identity)
 
     monkeypatch.setattr(detection, "_build_temporal_background", wrapper)
     return calls
