@@ -42,7 +42,7 @@ def test_registry_keys_exactly_ten():
 
 
 def test_status_json_not_run_scopes_stay_not_run():
-    """交接状态样例：只有源码级检查通过时，不得推导其他范围通过。"""
+    """交接状态样例：构建+冒烟通过不得推导完整 Windows 验收通过。"""
 
     payload = json.loads(STATUS_PATH.read_text(encoding="utf-8"))
     assert payload["schema_version"] == 1
@@ -50,18 +50,22 @@ def test_status_json_not_run_scopes_stay_not_run():
     assert payload["target"] == "Windows"
 
     build = payload["build"]
-    assert build["status"] == "not_run"
-    assert build["artifact_count"] == 0, "EXE 数量为 0"
-    assert build["artifact_path"] is None
-    assert build["exit_code"] is None
+    assert build["status"] == "built", "2026-11-03 起有实际构建记录"
+    assert build["exit_code"] == 0
+    assert build["artifact_count"] >= 1 and build["artifact_path"]
 
     checks = payload["checks"]
-    scopes = {check["scope"]: check["status"] for check in checks}
-    assert scopes.get("unit_numeric") == "passed", "源码级检查已通过"
-    for scope in ("real_browser_ui", "windows_native",
-                  "independent_animal_accuracy"):
-        assert scopes.get(scope) == "not_run", \
-            f"{scope} 不能从 unit 通过推导"
+    by_id = {check["id"]: check for check in checks}
+    assert by_id["exe-build-smoke"]["status"] == "passed", \
+        "构建冒烟是独立检查项，不与完整桌面验收合并"
+    # 未执行的验收范围按 id 逐一核对，不从其他范围推导。
+    for check_id in ("real-browser-ui", "windows-native",
+                     "independent-animal-accuracy"):
+        assert by_id[check_id]["status"] == "not_run", \
+            f"{check_id} 不能从构建/冒烟或 unit 通过推导"
+    assert by_id["pytest-full-suite"]["scope"] == "unit_numeric" \
+        and by_id["pytest-full-suite"]["status"] == "passed", \
+        "源码级检查已通过"
 
     # 每个检查项都有完整结构；not_run 的 observed 明确写未执行。
     for check in checks:

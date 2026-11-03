@@ -23,6 +23,7 @@ DEFAULTS = {
     "mode": "auto",
     "arm_length_cm": 30.0,
     "arm_width_cm": 10.0,
+    "arm_entry_rule": "depth",
     "entry_depth_ratio": 0.2,
     "max_jump_cm": 12.0,
     "tracking_hold_s": 0.4,
@@ -32,6 +33,13 @@ DEFAULTS = {
     "movement_threshold_cm_s": 1.0,
     "bin_seconds": 60.0,
 }
+
+# 入臂规则：depth=进入指定深度并持续确认（原规则，默认）；
+# center=中心点处于新区域的首个有效观测即计一次（无防抖）。
+ARM_ENTRY_RULES = ("depth", "center")
+# 仅深度规则消费的参数；中心点规则下不生效（界面需明确提示）。
+DEPTH_RULE_ONLY_KEYS = ("entry_depth_ratio", "entry_confirm_s",
+                        "entry_reset_center_s", "require_center")
 
 OPTION_KEYS = tuple(DEFAULTS)
 PATH_MODES = ("auto", "manual")
@@ -55,6 +63,20 @@ SPEC = {
                   minimum=0, step="any"),
         parameter("arm_width_cm", "臂宽", "number", 10.0, unit="cm",
                   minimum=0, step="any"),
+        parameter("arm_entry_rule", "入臂规则", "select", "depth",
+                  choices=[
+                      {"value": "depth",
+                       "label": "进入深度+持续确认（原规则，默认）"},
+                      {"value": "center",
+                       "label": "中心点入臂（新区域首个有效观测即计）"},
+                  ],
+                  section="实验参数",
+                  help="参考 IMPC“自动追踪以小鼠中心进入新区域判定”的约定；"
+                       "本软件具体化为中心点处于新区域的首个有效观测即记一次，"
+                       "不要求额外深度或确认时间。臂/中心边界反复切换会按观测"
+                       "转换计数（本规则无时间防抖）。中心点规则下入臂深度比例、"
+                       "入臂确认时间、中心区重置时间、再次入臂须经过中心区均"
+                       "不生效。"),
         parameter("entry_depth_ratio", "入臂深度比例", "number", 0.2,
                   minimum=0, maximum=1, step="any", section="实验参数"),
         parameter("max_jump_cm", "预测位置最大偏差", "number", 12.0,
@@ -306,6 +328,12 @@ def validate_unit(options: Mapping[str, Any] | None,
         if mode not in PATH_MODES:
             issues.append({"field": "options.mode",
                            "message": "路径必须是自动或人工"})
+
+    # 缺字段（旧草稿/旧冻结任务）按原规则运行；只有显式非法值才报错。
+    rule = values.get("arm_entry_rule")
+    if rule is not None and rule not in ARM_ENTRY_RULES:
+        issues.append({"field": "options.arm_entry_rule",
+                       "message": "入臂规则必须是 depth 或 center"})
 
     # 人工 Y 由 engine 按 unit.manual.mode 走 validate_manual，不会进入这里；
     # options.mode 只是设置项，不能用来豁免自动几何。
@@ -663,6 +691,72 @@ def _track(rows: Sequence[Mapping[str, Any]], window: timeline.Window,
     return {"events": events}
 
 
+def _track_center(rows: Sequence[Mapping[str, Any]], window: timeline.Window,
+                  frames: Mapping[str, Mapping[str, Any]],
+                  options: Mapping[str, Any], unit: Mapping[str, Any]) -> dict:
+    """中心点入臂规则：中心点处于新区域的首个有效观测即记一次。
+
+    与深度规则共用窗口/行序约定：窗外与裁切前行只贡献占用、不推进状态；
+    不读入臂深度比例、入臂确认时间、中心区重置时间与再次入臂须经过
+    中心区——这些参数在本规则下不生效。缺失、无效或未知区域不构成
+    入臂，也不单独制造离臂/重入：它们不更新“上一有效区域”，恢复后
+    仍在原臂不重复计数，恢复后观察到其他有效区域按转换计数。臂↔中心
+    边界反复切换按观测转换计数（本规则无时间防抖）。事件时间与确认
+    时间均取该次有效观测的源时间。
+    """
+
+    events: list[dict] = []
+    if not window.known:
+        return {"events": events}
+    origin = float(window.start_s)
+    last_zone: str | None = None   # 上一有效观测的区域；缺失/未知不更新。
+    last_arm: str | None = None    # 最近一次计入的臂（供观测行展示）。
+    sequence: list[str] = []
+
+    for row in sorted(rows, key=lambda item: (item["time_s"], item["frame"])):
+        if not row.get("in_window"):
+            continue
+        moment = float(row["time_s"])
+        if moment < origin - TIME_EPS:
+            # 裁切前上下文只贡献占用，不初始化/推进状态，不产生窗外事件。
+            continue
+        zone = row.get("zone")
+        if not row.get("detected") or zone is None:
+            row["current_arm"] = last_arm
+            continue
+        if zone in ARM_KEYS and zone != last_zone:
+            sequence.append(zone)
+            index = len(sequence)
+            recent = sequence[-3:]
+            opportunity = index >= 3
+            alternation = opportunity and len(set(recent)) == 3
+            events.append({
+                "event_id": f"{unit.get('id')}:arm_entry:{index}",
+                "unit_id": unit.get("id"),
+                "unit_name": unit.get("name"),
+                "kind": "arm_entry",
+                "time_s": moment,
+                "confirmed_s": moment,
+                "target": zone,
+                "source": "automatic",
+                "frame": row["frame"],
+                "entry_index": index,
+                "recent_sequence": "-".join(recent),
+                "alternation_opportunity": opportunity,
+                "alternation": alternation,
+            })
+            row["arm_entry_event"] = True
+            row["arm_entry_name"] = zone
+            row["alternation_event"] = alternation
+            row["recent_entry_sequence"] = "-".join(recent)
+            last_arm = zone
+        # 只有有效区域（中心/三臂）推进“上一有效区域”；unknown 保持中性。
+        if zone in ZONE_KEYS:
+            last_zone = zone
+        row["current_arm"] = last_arm
+    return {"events": events}
+
+
 def _percent(numerator: float, denominator: float) -> float | None:
     return timeline.ratio(numerator * 100.0, denominator)
 
@@ -887,7 +981,18 @@ def process_unit(unit: Mapping[str, Any],
     for row in rows:
         row.setdefault("detection_method", method)
         _annotate(row, zones, scale)
-    tracking = _track(rows, window, frames, options, unit)
+    # 缺字段按原规则运行；只有显式 "center" 走中心点规则，其余非法值
+    # 已在冻结校验拒绝，这里防御性地按原规则处理。
+    entry_rule = options.get("arm_entry_rule") or "depth"
+    tracking = (_track_center(rows, window, frames, options, unit)
+                if entry_rule == "center"
+                else _track(rows, window, frames, options, unit))
+    rule_warning = None
+    if entry_rule == "center":
+        rule_warning = (f"「{unit.get('name') or unit_id}」使用中心点入臂规则："
+                        "臂/中心边界反复切换会按观测转换计数（无时间防抖）；"
+                        "入臂深度比例、入臂确认时间、中心区重置时间、"
+                        "再次入臂须经过中心区在本规则下不生效。")
     segments = timeline.motion_segments(rows, window,
                                         x_key="x_cm", y_key="y_cm",
                                         require_continuity=True)
@@ -908,6 +1013,8 @@ def process_unit(unit: Mapping[str, Any],
 
     summary = _summary(unit, rows, segments, window, options, scale,
                        tracking["events"])
+    # 旧冻结任务缺字段时 summary 里是 None：覆盖为实际生效的规则。
+    summary["arm_entry_rule"] = entry_rule
     bins = _bin_rows(rows, segments, tracking["events"], window, options, unit)
     candidates = _window_candidates(captured.get("candidates") or [], rows)
     metadata = {
@@ -934,10 +1041,20 @@ def process_unit(unit: Mapping[str, Any],
                         "reports no_candidate_within_gate, the raw detector "
                         "reason stays in the row field detection_reason",
     }
-    warning = None
+    # 规则事实进报告“计量 metadata”段：不同入臂规则的结果可区分。
+    # 旧冻结任务缺字段时记录实际生效的规则（depth），不凭空改含义。
+    metadata["arm_entry_rule"] = entry_rule
+    if entry_rule == "center":
+        metadata["arm_entry_rule_note"] = ("center-point rule: no entry depth, "
+                                           "confirm time, center reset or "
+                                           "require-center; no debounce on "
+                                           "arm/center boundary flips")
+    warning = rule_warning
     if not window.known:
-        warning = ("未检测到动物，无法确定相对时间窗："
-                   + str(unit.get("name") or unit_id))
+        unknown_window = ("未检测到动物，无法确定相对时间窗："
+                          + str(unit.get("name") or unit_id))
+        warning = (f"{unknown_window}；{rule_warning}" if rule_warning
+                   else unknown_window)
     return {"rows": rows, "segments": segments, "events": tracking["events"],
             "bins": bins, "summary": summary, "metadata": metadata,
             "candidates": candidates, "warning": warning}
@@ -1516,6 +1633,7 @@ def preview_analysis(*, asset: Mapping[str, Any], video: Mapping[str, Any],
         "arm_A_entries": summary["arm_A_entries"],
         "arm_B_entries": summary["arm_B_entries"],
         "arm_C_entries": summary["arm_C_entries"],
+        "arm_entry_rule": summary["arm_entry_rule"],
         "alternation_count": summary["alternation_count"],
         "alternation_opportunities": summary["alternation_opportunities"],
         "alternation_percent": summary["alternation_percent"],
