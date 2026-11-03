@@ -610,7 +610,8 @@ def test_oft_behavior_preview_runs_core_and_returns_summary(
             "geometry": {"arena": {"type": "quad",
                                    "points": [[0, 0], [639, 0],
                                               [639, 479], [0, 479]]}},
-            "options": {}, "detection": {}, "manual": None,
+            "options": {}, "detection": {"bg_method": "threshold"},
+            "manual": None,
         }],
     }])
 

@@ -96,7 +96,9 @@ def seed(store, tmp_path, geometry=None, duration=10.0, *, assay="oft",
                 "window": None,
                 "geometry": geometry or {},
                 "options": unit_options or {},
-                "detection": {},
+                # 候选/证据等检测行为测试与背景方法无关；旷场默认已是
+                # temporal（假视频经 ReaderPool 无法建背景），钉回 threshold。
+                "detection": {"bg_method": "threshold"},
                 "manual": manual,
             }],
         }],
@@ -695,6 +697,7 @@ def test_preview_keeps_unit_evidence_between_requests(client, store, tmp_path,
     })
     videos = draft["videos"]
     videos[0]["units"][0]["detection"] = {
+        "bg_method": "threshold",
         "min_area": 20.0, "max_area": 20000.0, "quality_threshold": 0.0,
         "erosion_iter": 0, "dilation_iter": 0,
     }

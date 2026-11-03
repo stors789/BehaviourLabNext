@@ -51,12 +51,24 @@ def controlled(monkeypatch, factory, record=None, probe=None, sources=None):
     def build(path, **kwargs):
         if record is not None:
             record.append(dict(kwargs))
+            import os
+            print("BUILD:", os.environ.get("PYTEST_CURRENT_TEST"), kwargs.get("end_s"), kwargs.get("start_s"))
         source = real(path, decoder_factory=factory, **kwargs)
         if sources is not None:
             sources.append(source)
         return source
 
     monkeypatch.setattr(media, "VideoSource", build)
+    # temporal 两段式背景经 ReaderPool 取帧；pool 的解码工厂同样替换，
+    # 否则它会绕过上面的合成解码器直接 av.open 真实文件。
+    real_pool = media.ReaderPool
+
+    def build_pool(*args, **kwargs):
+        pool = real_pool(*args, **kwargs)
+        pool._factory = factory
+        return pool
+
+    monkeypatch.setattr(media, "ReaderPool", build_pool)
     if probe is not None:
         monkeypatch.setattr(media, "probe_video", lambda path: dict(probe))
     return build
@@ -305,7 +317,10 @@ def seed_draft(store, tmp_path, *, fps_override=12.5, window=None,
                                    "points": [[0, 0], [199, 0],
                                               [199, 199], [0, 199]]}},
             "options": dict(oft.DEFAULTS),
-            "detection": {},
+            # 本文件测的是窗口/终点语义，不是背景方法；旷场默认已是
+            # temporal（合成静止小鼠会被背景吸收，且假视频身份不可归属
+            # 会让背景缓存跨测试串用），这里显式钉回 threshold。
+            "detection": {"bg_method": "threshold"},
             "manual": None,
         }],
     }])

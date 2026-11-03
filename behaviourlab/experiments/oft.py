@@ -28,7 +28,7 @@ DEFAULTS = {
     "bin_seconds": 60.0,
 }
 
-DETECTION_DEFAULTS: dict = {}
+DETECTION_DEFAULTS: dict = {"bg_method": "temporal"}
 
 OPTION_KEYS = tuple(DEFAULTS)
 

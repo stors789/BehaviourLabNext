@@ -322,7 +322,8 @@ def test_default_zero_null_still_works(client, store, tmp_path):
     assert session["orientation"] == 0
     assert session["fps_override"] is None
     settings = landmarks._settings_of(session)
-    assert settings["bg_method"] == "threshold"
+    # 工厂默认 bg_method 已改为 temporal（旷场与 Y 迷宫一致）。
+    assert settings["bg_method"] == "temporal"
     assert settings["gray_threshold"] == 127.0
     assert settings["temporal_diff_threshold"] == 25.0
     assert settings["min_area"] == 120.0

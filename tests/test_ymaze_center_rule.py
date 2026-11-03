@@ -376,10 +376,14 @@ def test_factory_defaults_center_rule_and_temporal_background():
     rule = [p for p in spec["parameters"] if p["key"] == "arm_entry_rule"][0]
     assert rule["default"] == "center"
     assert rule["choices"][0]["value"] == "center"
-    # 其他实验的检测默认不受影响。
+    # 其他实验的检测默认不受影响：时序默认只落在 Y 迷宫与旷场。
     others = {item["key"]: item["detection_defaults"]["bg_method"]
-              for item in catalog() if item["key"] != "ymaze"}
-    assert "temporal" not in others.values(), "时序默认只落在 Y 迷宫"
+              for item in catalog()
+              if item["key"] not in ("ymaze", "oft")}
+    assert "temporal" not in others.values(), "时序默认只落在 Y 迷宫与旷场"
+    assert (catalog() and [item for item in catalog()
+                           if item["key"] == "oft"][0]
+            ["detection_defaults"]["bg_method"] == "temporal")
     # 兼容语义不变：缺字段仍按原深度规则。
     legacy = {key: value for key, value in ymaze.DEFAULTS.items()
               if key != "arm_entry_rule"}

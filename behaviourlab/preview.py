@@ -402,40 +402,52 @@ def create_preview(
                        and draft.get("assay") == "ymaze")
     region_source = None
     result = None
+    background_warning = None
     if detect_here:
         try:
             region, region_source = detection.geometry_region(
                 geometry, draft["assay"], options, width, height
             )
-            background = _background_for(detection_settings, asset, video,
-                                         orientation, width, height)
-            window_key = repr(video.get("window"))
-            video_key = (asset.get("id"), orientation, window_key)
-            detector = detection.shared_detector(
-                video_key, detection_settings, background=background,
-            )
-            session_key = (draft.get("id"),) + video_key
-            # 证据随会话保留：视频被移出草稿、单位被删时才释放。
-            observation.retain_videos(
-                draft.get("id"),
-                [(draft.get("id"), item.get("asset_id"),
-                  int(item.get("orientation", 0) or 0),
-                  repr(item.get("window")))
-                 for item in draft.get("videos") or []
-                 if isinstance(item, Mapping)],
-            )
-            result = observation.track(
-                session_key, unit.get("id") or id(unit),
-                image=info.image, region=region, settings=detection_settings,
-                signature=observation.signature_of(
-                    geometry, detection_settings,
-                    bool(options.get("dark_box_visible"))),
-                assay=draft["assay"], frame_index=info.index,
-                time_s=float(info.time_s),
-                foreground=detector.foreground(info.image),
-                retain_units=[item.get("id") for item in video.get("units") or []
-                              if isinstance(item, Mapping) and item.get("id")],
-            )
+            try:
+                background = _background_for(detection_settings, asset, video,
+                                             orientation, width, height)
+            except media.MediaError as error:
+                # 时序/静态背景要真实解码建背景；个别视频解不出来时预览
+                # 降级为不叠加自动检测，而不是挡住整个预览（正式分析
+                # 对同一错误仍硬失败，不会带着坏背景写结果）。
+                background = None
+                background_warning = (
+                    f"背景构建失败（{error}），本次预览未叠加自动检测。")
+            if (background is not None
+                    or detection_settings.get("bg_method") not in
+                    ("temporal", "static")):
+                window_key = repr(video.get("window"))
+                video_key = (asset.get("id"), orientation, window_key)
+                detector = detection.shared_detector(
+                    video_key, detection_settings, background=background,
+                )
+                session_key = (draft.get("id"),) + video_key
+                # 证据随会话保留：视频被移出草稿、单位被删时才释放。
+                observation.retain_videos(
+                    draft.get("id"),
+                    [(draft.get("id"), item.get("asset_id"),
+                      int(item.get("orientation", 0) or 0),
+                      repr(item.get("window")))
+                     for item in draft.get("videos") or []
+                     if isinstance(item, Mapping)],
+                )
+                result = observation.track(
+                    session_key, unit.get("id") or id(unit),
+                    image=info.image, region=region, settings=detection_settings,
+                    signature=observation.signature_of(
+                        geometry, detection_settings,
+                        bool(options.get("dark_box_visible"))),
+                    assay=draft["assay"], frame_index=info.index,
+                    time_s=float(info.time_s),
+                    foreground=detector.foreground(info.image),
+                    retain_units=[item.get("id") for item in video.get("units") or []
+                                  if isinstance(item, Mapping) and item.get("id")],
+                )
         except detection.DetectionError as error:
             raise ValidationError(str(error), "detection") from error
 
@@ -525,6 +537,8 @@ def create_preview(
         if step.get("required") and in_scope(step) and not is_drawn(step)
     ]
     warnings: list[str] = []
+    if background_warning:
+        warnings.append(background_warning)
     if scope.get("mode") == "partial":
         # 事实不足：本次只扫到当前帧，明确说明这是部分范围而不是完整配置。
         warnings.append(
