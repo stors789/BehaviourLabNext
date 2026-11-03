@@ -1,19 +1,23 @@
 {
   "schema_version": 1,
   "product": "BehaviourLabNext",
-  "source_revision": "311fe764df776ebf5f285dc485faf6fc4c13458b",
-  "recorded_at_utc": "2026-11-02T03:25:08Z",
+  "source_revision": "74fc94ca692521fc72e940e2fb9ab5910c2df135",
+  "recorded_at_utc": "2026-11-03T08:35:39Z",
   "target": "Windows",
   "build": {
-    "status": "not_run",
-    "python_version": null,
-    "architecture": null,
-    "tool_versions": null,
-    "command": "见 docs/RUN_AND_BUILD.md（py -3.11 -m venv .venv-build → pip install -r requirements-build.txt -r requirements-dev.txt → PyInstaller --distpath dist/windows --workpath build/windows packaging/behaviorlab_windows.spec）",
-    "exit_code": null,
-    "artifact_path": null,
-    "artifact_count": 0,
-    "log_reference": null
+    "status": "built",
+    "python_version": "3.11.13（64 位 CPython，.venv 派生 .venv-build）",
+    "architecture": "x64 / Windows",
+    "tool_versions": "PyInstaller 6.22.3（requirements-build.txt 锁定）",
+    "command": ".venv-build/Scripts/python.exe -m PyInstaller --distpath dist/windows --workpath build/windows packaging/behaviorlab_windows.spec",
+    "exit_code": 0,
+    "artifact_path": "dist/windows/BehaviourLabNext/（整个目录为交付物，BehaviourLabNext.exe + _internal，≈288 MB）",
+    "artifact_count": 1,
+    "log_reference": "构建日志在临时目录（已清理）；产物于 2026-11-03 16:34 本地时间生成",
+    "smoke_test": {
+      "command": "BehaviourLabNext.exe --browser --data-dir <临时QA目录>",
+      "observed": "server.json 就绪；/api/health ok=true（version 0.1.0、schema 1、job_owner true）；首页 HTML 含「行为视频分析」"
+    }
   },
   "checks": [
     {
@@ -139,16 +143,32 @@
       "scope": "windows_native",
       "status": "not_run",
       "environment": {
-        "os": null,
-        "python": null,
-        "dependency_versions": null
+        "os": "Windows x64",
+        "python": "3.11.13（.venv-build）",
+        "dependency_versions": "PyInstaller 6.22.3"
       },
-      "command_or_action": "真实构建目录从中文/空格路径与不同 cwd 启动；选择器/另存为/取消；窗口关闭回收；锁与端口释放",
-      "expected": "未执行",
-      "observed": "未执行：未构建 Windows EXE（build.status=not_run），无可运行产物",
-      "evidence_reference": null,
-      "source_revision": "311fe764df776ebf5f285dc485faf6fc4c13458b",
-      "limitations": ["阻塞于真实 Windows 64 位 CPython 3.11 构建环境"]
+      "command_or_action": "真实构建目录从中文/空格路径与不同 cwd 启动；WebView2 桌面窗口；选择器/另存为/取消；窗口关闭回收；冻结 worker 路由；锁与端口释放",
+      "expected": "完整桌面验收逐项通过",
+      "observed": "完整桌面验收未执行。已完成的仅是构建与 --browser 冒烟（见 exe-build-smoke check）：产物就绪、HTTP 面健康，不代表窗口/选择器/worker 路由已验证",
+      "evidence_reference": "docs/BUILD_VALIDATION_STATUS.json build.smoke_test",
+      "source_revision": "74fc94ca692521fc72e940e2fb9ab5910c2df135",
+      "limitations": ["构建环境已具备（2026-11-03 实际构建成功），剩余为窗口与交互层验收"]
+    },
+    {
+      "id": "exe-build-smoke",
+      "scope": "windows_native",
+      "status": "passed",
+      "environment": {
+        "os": "Windows x64（构建与冒烟同机）",
+        "python": "3.11.13（.venv-build）",
+        "dependency_versions": "PyInstaller 6.22.3 / requirements-build.txt / requirements-dev.txt 锁定"
+      },
+      "command_or_action": "PyInstaller 构建（exit 0，约 44 s）→ BehaviourLabNext.exe --browser --data-dir <临时QA目录> → 轮询 server.json → GET /api/health 与 /",
+      "expected": "构建成功且产物目录完整（exe + _internal）；服务就绪、health ok、首页正常渲染",
+      "observed": "产物 dist/windows/BehaviourLabNext/ ≈288 MB；server.json 就绪；/api/health ok=true（version 0.1.0、schema 1、job_owner true）；首页 HTML 含「行为视频分析」",
+      "evidence_reference": "docs/RUN_AND_BUILD.md 当前构建状态",
+      "source_revision": "74fc94ca692521fc72e940e2fb9ab5910c2df135",
+      "limitations": ["仅覆盖 --browser 无窗口路径与 HTTP 面；WebView2 桌面窗口、原生选择器、冻结 worker 路由等完整 Windows 验收仍未执行"]
     },
     {
       "id": "independent-animal-accuracy",

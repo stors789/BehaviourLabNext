@@ -10,7 +10,7 @@
 | 进程/服务（service_process） | verified（源码级） | `--browser` 启动 + `/api/health` 一致；私有 worker 真实路由（缺任务→1、数量不符→2）；生命周期/关闭链测试 |
 | 真实引擎导出（real_engine_export） | verified（限合成帧） | PyAV 编码-解码往返（帧数/PTS/时长）通过；**真实动物素材导出未验证** |
 | 真实浏览器 UI（real_browser_ui） | **not_run** | 仓库内无真实浏览器操作记录；页面均为 implemented，不填页面通过 |
-| Windows 原生（windows_native） | **not_run** | **未构建 Windows EXE（数量 0）**；无构建日志/产物目录 |
+| Windows 原生（windows_native） | **部分（构建+冒烟）** | 2026-11-03 实际构建成功：PyInstaller 6.22.3 / CPython 3.11.13，产物 `dist/windows/BehaviourLabNext/`（≈288 MB，exit 0）；`--browser` 冒烟通过（health ok、首页渲染）。**WebView2 桌面窗口、原生选择器、冻结 worker 路由等完整验收仍未执行** |
 | 独立动物精度（independent_animal_accuracy） | **not_run** | 无合法素材入库、无独立标注；检测率/覆盖不作为准确率 |
 
 ## 功能清单（逐页：入口 / 主要操作 / 空·加载·失败·成功状态）

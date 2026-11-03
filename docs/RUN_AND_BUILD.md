@@ -42,4 +42,11 @@ py -3.11 -m venv .venv-build
 
 ## 当前构建状态
 
-**未构建 Windows EXE：可交付 EXE 数量为 0。** 上述命令与配方已就绪并通过静态声明检查（`tests/test_block25.py`），但没有真实 PyInstaller 构建、DLL 装载与 EXE 原生启动记录。构建后应记录：版本、命令、退出码、产物路径与存在性（见 `docs/BUILD_VALIDATION_STATUS.json` 的 build 字段）。构建状态与逐项证据见 `docs/ACCEPTANCE_STATUS.md`。
+**最近构建（2026-11-03，74fc94c）：成功。** 上述配方在本机实际执行
+（`.venv-build` 基于 CPython 3.11.13，PyInstaller 6.22.3，exit 0，约 44 s），
+产物 `dist/windows/BehaviourLabNext/`（≈288 MB，`BehaviourLabNext.exe` +
+`_internal`）。冒烟：`--browser --data-dir <临时目录>` 启动后
+`/api/health` ok、首页正常渲染；`build/`、`dist/`、`.venv-build/` 不入
+Git。完整 Windows 桌面验收（WebView2 窗口、原生选择器、冻结 worker
+路由）仍未执行，构建与冒烟记录见
+`docs/BUILD_VALIDATION_STATUS.json`（check `exe-build-smoke`）。
