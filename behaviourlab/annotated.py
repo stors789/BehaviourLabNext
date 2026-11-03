@@ -15,6 +15,9 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from collections import deque
+from dataclasses import dataclass
+
 import av
 import numpy as np
 
@@ -346,25 +349,42 @@ def _unit_cm_mapper(unit: Mapping[str, Any]) -> Any:
     return mapper
 
 
+@dataclass(frozen=True, slots=True)
+class _TrailStep:
+    """一条保存完成段的尾迹计划：完成时刻、像素端点、与上一段是否共享起点。"""
+
+    time_s: float
+    points: list
+    array: Any
+    chained: bool
+
+
 def _trajectory_segments(unit: Mapping[str, Any],
                          upto: float) -> list[list[tuple[int, int]]]:
-    """只画保存的完成运动段（motion_x0..y1），逐段时间延长。
+    """保存完成段（motion_x0..y1）中到 ``upto`` 为止的像素端点。
 
     完成段由分析管线按真实连续性保存：缺失帧没有跨缺口的段，这里
     不从位置行重新推导连线，因此缺口自然断开，也不连到 held 点。
     坐标是测量单位（cm/估计 cm）时先按本 run 冻结的成对坐标映射回
     旋转后源像素；映射建立不起来就不画轨迹层。位置被抑制或纯人工
-    的单位不画。
+    的单位不画。这是“完整历史”语义，静态轨迹图沿用；叠画视频只取
+    有界尾迹（``_UnitTrack``）。
     """
 
-    return _segments_upto(_segment_plan(unit), upto)
+    return [step.points for step in _segments_upto(_segment_plan(unit), upto)]
 
 
-def _segment_plan(unit: Mapping[str, Any]) -> list[tuple[float, Any]]:
-    """一次性预处理：把每个完成段换算成像素端点，并记下它的完成时刻。
+def _segment_plan(unit: Mapping[str, Any]) -> list["_TrailStep"]:
+    """一次性预处理：把每个完成段换算成像素端点与尾迹节点身份。
 
-    逐帧只按时间游标追加新段，不再每帧重算整段历史。换算是线性的，
-    因此一次换算与逐帧换算结果相同；行顺序即观测顺序。
+    换算是线性的，一次换算与逐帧换算结果相同；行顺序即观测保存顺序。
+
+    节点共享的**保存事实证明**：``timeline.attach_motion`` 按
+    ``(unit_id, frame)`` 把“上一有效观测 → 本行观测”的段写进行内，因此
+    源行相邻（行号差 1）且都存有完成段的两段，由同一观测行（或其在单位
+    窗口上的裁剪端点）连接，该共享节点只计一次。源行不相邻（缺失、跳点、
+    断链）即保守视为独立节点——绝不按坐标去重：不同观测即使坐标相同也是
+    不同节点，断点两侧同坐标也分别计数。
     """
 
     if unit.get("suppress_positions") or unit.get("manual"):
@@ -372,8 +392,9 @@ def _segment_plan(unit: Mapping[str, Any]) -> list[tuple[float, Any]]:
     mapper = _unit_cm_mapper(unit)
     if mapper is None:
         return []
-    plan: list[tuple[float, Any]] = []
-    for row in unit.get("observations") or []:
+    plan: list[_TrailStep] = []
+    prev_row: int | None = None
+    for row_index, row in enumerate(unit.get("observations") or []):
         moment = _finite(row.get("time_s"))
         if moment is None:
             break
@@ -387,23 +408,30 @@ def _segment_plan(unit: Mapping[str, Any]) -> list[tuple[float, Any]]:
             continue
         start = mapper((x0, y0))
         end = mapper((x1, y1))
-        plan.append((float(moment),
-                     [(int(round(start[0])), int(round(start[1]))),
-                      (int(round(end[0])), int(round(end[1])))]))
+        points = [(int(round(start[0])), int(round(start[1]))),
+                  (int(round(end[0])), int(round(end[1])))]
+        plan.append(_TrailStep(
+            time_s=float(moment),
+            points=points,
+            array=np.array(points, dtype="int32"),
+            # 只有紧邻下一行的完成段才可证明与本段共享节点。
+            chained=prev_row is not None and row_index == prev_row + 1,
+        ))
+        prev_row = row_index
     return plan
 
 
-def _segments_upto(plan: Sequence[tuple[float, Any]],
-                   upto: float) -> list[Any]:
+def _segments_upto(plan: Sequence["_TrailStep"],
+                   upto: float) -> list["_TrailStep"]:
     """已完成段：沿用“遇到第一个超出 upto 的段就停”的原有顺序语义。"""
 
     limit = upto + 1e-9
-    segments: list[Any] = []
-    for moment, segment in plan:
-        if moment > limit:
+    steps: list[_TrailStep] = []
+    for step in plan:
+        if step.time_s > limit:
             break
-        segments.append(segment)
-    return segments
+        steps.append(step)
+    return steps
 
 
 def _row_for_frame(unit: Mapping[str, Any],
@@ -444,110 +472,35 @@ def _row_state(row: Mapping[str, Any] | None) -> str:
 
 
 TRAJECTORY_COLOR = (95, 98, 184)
+# 每只动物的尾迹节点预算：只从保存完成段计节点，超限淘汰最旧节点及其边。
+TRAJECTORY_NODE_LIMIT = 1000
 
 
-class _TraceLayer:
-    """单色轨迹的增量层：只累积覆盖度，每帧只合成“真正画过的像素”。
+class _TrailEdge:
+    """当前保留的一条保存边：像素端点数组与两侧节点序号。"""
 
-    逐段直接画在画布上时，抗锯齿把线色与**当前帧**像素混合，所以画好的像素
-    不能整块搬用；但同一只动物的完成段同色，顺序叠加后的结果只取决于覆盖度
-    的累积乘积 Q=Π(1-aᵢ)：``out = C + (base - C)·Q``。
+    __slots__ = ("array", "start", "end", "time_s")
 
-    于是把 Q 记在“画过的像素”列表里（每段只更新该段包围盒内的像素），每帧
-    只对这份像素列表做一次合成：每帧成本与已画像素数有关，不随历史段数增长，
-    也不为空白画布区域付代价。栅格化仍由同一个 cv2 抗锯齿调用产生，叠放顺序
-    仍按观测顺序。
-    """
-
-    __slots__ = ("color", "thickness", "shape", "inverse", "pixels", "slots",
-                 "count", "segments")
-
-    def __init__(self, shape: tuple[int, int], color, thickness: int) -> None:
-        height, width = shape
-        self.shape = (height, width)
-        self.color = np.asarray(color, dtype=np.float32).reshape(1, 3)
-        self.thickness = int(thickness)
-        capacity = 4096
-        # Q=Π(1-a)：未被任何段覆盖时为 1（合成后与底色相同）。
-        self.inverse = np.ones(capacity, dtype=np.float32)
-        self.pixels = np.zeros(capacity, dtype=np.int32)
-        self.slots = np.full(height * width, -1, dtype=np.int32)
-        self.count = 0
-        self.segments = 0
-
-    def _grow(self, needed: int) -> None:
-        capacity = len(self.inverse)
-        if needed <= capacity:
-            return
-        while capacity < needed:
-            capacity = int(capacity * 1.5) + 1
-        grown = np.ones(capacity, dtype=np.float32)
-        grown[:self.count] = self.inverse[:self.count]
-        pixels = np.zeros(capacity, dtype=np.int32)
-        pixels[:self.count] = self.pixels[:self.count]
-        self.inverse = grown
-        self.pixels = pixels
-
-    def add(self, start, end) -> None:
-        import cv2
-
-        pad = self.thickness + 2
-        height, width = self.shape
-        x0 = max(0, min(start[0], end[0]) - pad)
-        x1 = min(width, max(start[0], end[0]) + pad + 1)
-        y0 = max(0, min(start[1], end[1]) - pad)
-        y1 = min(height, max(start[1], end[1]) + pad + 1)
-        if x1 <= x0 or y1 <= y0:
-            return
-        mask = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
-        points = np.array([[start[0] - x0, start[1] - y0],
-                           [end[0] - x0, end[1] - y0]], dtype="int32")
-        cv2.polylines(mask, [points], False, 255, self.thickness, cv2.LINE_AA)
-        rows, cols = np.nonzero(mask)
-        if not len(rows):
-            return
-        coverage = mask[rows, cols].astype(np.float32) * (1.0 / 255.0)
-        flat = (rows + y0) * width + (cols + x0)
-        slots = self.slots[flat]
-        known = slots >= 0
-        if known.any():
-            self.inverse[slots[known]] *= (1.0 - coverage[known])
-        fresh = ~known
-        if fresh.any():
-            extra = flat[fresh]
-            start_slot = self.count
-            self._grow(start_slot + len(extra))
-            self.slots[extra] = np.arange(start_slot, start_slot + len(extra),
-                                          dtype=np.int32)
-            self.inverse[start_slot:start_slot + len(extra)] = \
-                1.0 - coverage[fresh]
-            self.pixels[start_slot:start_slot + len(extra)] = extra
-            self.count = start_slot + len(extra)
-        self.segments += 1
-
-    def compose(self, canvas) -> None:
-        count = self.count
-        if not count:
-            return
-        index = self.pixels[:count]
-        flat = canvas.reshape(-1, 3)
-        base = flat[index].astype(np.float32)
-        base -= self.color
-        base *= self.inverse[:count][:, None]
-        base += self.color
-        np.rint(base, out=base)
-        np.clip(base, 0, 255, out=base)
-        flat[index] = base.astype(np.uint8)
+    def __init__(self, array, start: int, end: int, time_s: float) -> None:
+        self.array = array
+        self.start = start
+        self.end = end
+        self.time_s = time_s
 
 
 class _UnitTrack:
-    """一只动物的逐帧状态：一次预处理 + 单调游标 + 增量轨迹层。"""
+    """一只动物的逐帧状态：一次预处理 + 单调游标 + 有界尾迹。
+
+    节点只来自保存完成段：共享节点按“源行相邻”的保存事实证明只计一次，
+    其余（不同观测、断点两侧、同坐标不同观测）一律独立计数。节点预算
+    ``TRAJECTORY_NODE_LIMIT``，超限淘汰最旧节点及引用它的保存边，不补连、
+    不改剩余边顺序。每帧只画当前保留的边，不扫描全部历史。
+    """
 
     __slots__ = ("unit_id", "label", "start", "end", "geometry", "rows",
-                 "plan", "cursor", "layer")
+                 "plan", "cursor", "nodes", "edges", "next_node", "dropped")
 
-    def __init__(self, unit: Mapping[str, Any], shape: tuple[int, int],
-                 thickness: int) -> None:
+    def __init__(self, unit: Mapping[str, Any]) -> None:
         self.unit_id = unit.get("unit_id")
         self.label = _ascii_label(unit.get("unit_name"))
         self.start = float(unit["start"])
@@ -561,25 +514,57 @@ class _UnitTrack:
                 self.rows.setdefault(index, row)
         self.plan = _segment_plan(unit)
         self.cursor = 0
-        self.layer = (_TraceLayer(shape, TRAJECTORY_COLOR, thickness)
-                      if self.plan else None)
+        self.nodes: deque[int] = deque()
+        self.edges: deque[_TrailEdge] = deque()
+        self.next_node = 0
+        self.dropped = 0
 
     def active(self, start: float, end: float) -> bool:
         middle = (start + end) / 2.0
         return self.start - 1e-9 <= middle < self.end - 1e-9
 
-    def advance(self, upto: float) -> None:
-        """把已完成的新段追加进轨迹层；只做一次栅格化。"""
+    def _add_node(self) -> int:
+        seq = self.next_node
+        self.next_node += 1
+        self.nodes.append(seq)
+        return seq
 
-        layer = self.layer
-        if layer is None:
-            return
+    def advance(self, upto: float) -> None:
+        """把已完成的新段（节点与边）加入尾迹，并维持节点预算。"""
+
         limit = upto + 1e-9
         plan = self.plan
-        while self.cursor < len(plan) and plan[self.cursor][0] <= limit:
-            start, end = plan[self.cursor][1]
-            layer.add(start, end)
+        while self.cursor < len(plan) and plan[self.cursor].time_s <= limit:
+            step = plan[self.cursor]
             self.cursor += 1
+            if step.chained and self.edges:
+                # 与上一段共享同一节点：只计一次，不再新增起点节点。
+                start = self.edges[-1].end
+            else:
+                start = self._add_node()
+            end = self._add_node()
+            self.edges.append(
+                _TrailEdge(step.array, start, end, step.time_s))
+            self._trim()
+
+    def _trim(self) -> None:
+        while len(self.nodes) > TRAJECTORY_NODE_LIMIT:
+            evicted = self.nodes.popleft()
+            self.dropped += 1
+            # 只删除引用被淘汰节点的保存边；不把它的两侧节点补连。
+            while self.edges and (self.edges[0].start == evicted
+                                  or self.edges[0].end == evicted):
+                self.edges.popleft()
+
+    def draw(self, canvas, thickness: int) -> None:
+        """当前保留段直接用 OpenCV 画：与逐条调用同序（测试已证逐像素一致）。"""
+
+        import cv2
+
+        if not self.edges:
+            return
+        cv2.polylines(canvas, [edge.array for edge in self.edges], False,
+                      TRAJECTORY_COLOR, thickness, cv2.LINE_AA)
 
     def state(self, frame_index: int) -> str:
         return _row_state(self.rows.get(frame_index))
@@ -799,7 +784,8 @@ def write_run_video(path: str | Path, *, job: Mapping[str, Any],
     durations: dict[int, int] = {}
     queued: list[int] = []
     expected: list[tuple[int, int]] = []
-    tracks: list[_UnitTrack] | None = None
+    # 尾迹状态与画布尺寸无关：预处理一次，逐帧只推进游标与画保留段。
+    tracks = [_UnitTrack(unit) for unit in prepared_units]
     thickness = 1
     try:
         decode_source = build_source(True)
@@ -813,11 +799,9 @@ def write_run_video(path: str | Path, *, job: Mapping[str, Any],
                 bounds_pair = clipped(frame)
                 if bounds_pair is None:
                     continue
-                if tracks is None:
-                    shape = canvas_base.shape[:2]
-                    thickness = max(1, int(round(min(shape) / 320)))
-                    tracks = [_UnitTrack(unit, shape, thickness)
-                              for unit in prepared_units]
+                if thickness == 1:
+                    thickness = max(
+                        1, int(round(min(canvas_base.shape[:2]) / 320)))
                 low, high = bounds_pair
                 for clip_start, clip_end in _split(low, high, bounds):
                     if cancel is not None and cancel():
@@ -828,13 +812,12 @@ def write_run_video(path: str | Path, *, job: Mapping[str, Any],
                         if not track.active(clip_start, clip_end):
                             continue
                         _draw_geometry(canvas, track.geometry, thickness)
-                        # 当前源帧只消费自己的保存事实：轨迹按完成段分开
-                        # 画且只延长到本片段终点，不跨缺失，也不把未来
-                        # 帧的身份画到当前帧。历史段已在增量层里，这里只
-                        # 追加新完成的段并合成一次。
+                        # 当前源帧只消费自己的保存事实：轨迹只延长到本片
+                        # 段终点，不跨缺失，也不把未来帧的身份画到当前帧；
+                        # 尾迹只保留最近 1000 个节点，超限淘汰最旧节点及
+                        # 引用它的保存边，不补连。
                         track.advance(clip_end)
-                        if track.layer is not None:
-                            track.layer.compose(canvas)
+                        track.draw(canvas, thickness)
                         point = track.body(int(frame.index))
                         if point is not None:
                             import cv2

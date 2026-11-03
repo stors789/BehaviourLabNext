@@ -1,10 +1,9 @@
-"""叠画渲染：改前（8f39454 逐段重放）与改后（增量轨迹层）的编码前像素对照。
+"""叠画尾迹：与“同一组保留段逐条 OpenCV 调用”的编码前像素对照。
 
-改前实现逐帧重建全部历史段并逐段 ``cv2.polylines``；改后把同色段的覆盖度
-累积在增量层里、每帧合成一次。这里用同一批冻结事实跑两条路径，比较**编码
-前**画布，避免有损编码掩盖绘制差异。
-
-参照实现 ``legacy_canvases`` 逐行复刻 8f39454 的渲染循环，不改写任何断言。
+视频轨迹改为每只动物最近 1000 个节点的有限尾迹（本轮明确选择的显示变化），
+因此参考画面是**同一组当前保留段**逐条调用旧 OpenCV 绘制的结果，而不是含
+已淘汰旧段的全历史画面。同时单独证明：把有序独立两点段交给一次
+``cv2.polylines`` 与逐条调用逐像素一致（生产用合并调用，测试把关）。
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ UNIT_B = "b" * 32
 
 
 class _Source:
-    """确定性合成源：每帧像素随帧号变化，用于暴露抗锯齿混合差异。"""
+    """确定性合成源：每帧像素随帧号变化，用于暴露绘制差异。"""
 
     frames_spec: list[dict] = []
 
@@ -52,8 +51,8 @@ def _frame_image(index: int) -> np.ndarray:
     cols = np.arange(96, dtype=np.int32)[None, :]
     base = (rows * 3 + cols * 2 + index * 11) % 256
     base = base.astype(np.uint8)
-    return np.stack([base, np.roll(base, 5, axis=1),
-                     np.roll(base, 9, axis=0)], axis=-1)
+    return np.stack([base, np.roll(base, 5, axis=1), np.roll(base, 9, axis=0)],
+                    axis=-1)
 
 
 def _job(frames: list[dict], *, orientation: int = 0) -> dict:
@@ -62,12 +61,6 @@ def _job(frames: list[dict], *, orientation: int = 0) -> dict:
         "window": {"start_s": 0.0, "end_s": frames[-1]["end"]},
         "orientation": orientation, "fps_override": None,
     }
-
-
-def _active_units_linear(units, start: float, end: float):
-    middle = (start + end) / 2.0
-    return [unit for unit in units
-            if unit["start"] - 1e-9 <= middle < unit["end"] - 1e-9]
 
 
 def _prepare(job, units, events):
@@ -86,24 +79,65 @@ def _prepare(job, units, events):
     return prepared_units, prepared_events
 
 
-def _split_linear(start: float, end: float, points) -> list[tuple]:
-    """8f39454 的切分：每帧逐点扫全表，二分只用于对照结果。"""
+def reference_retained(unit, upto: float):
+    """独立复刻尾迹语义：返回 (节点列表, 保留边列表)。
 
-    cuts = [start]
-    for point in points:
-        if start + 1e-9 < point < end - 1e-9:
-            cuts.append(point)
-    cuts.append(end)
-    return [(cuts[index], cuts[index + 1])
-            for index in range(len(cuts) - 1)
-            if cuts[index + 1] - cuts[index] > 1e-12]
-
-
-def legacy_canvases(job, units, events, collect=True):
-    """8f39454 的渲染循环：逐帧重建全部完成段并逐段绘制。
-
-    ``collect=False`` 只统计画布数量（测时间/内存时不保留像素）。
+    节点共享证明与生产一致：源行相邻且都存有完成段的两段共享同一节点；
+    其余（不同观测、断点两侧、同坐标不同观测）独立计数。淘汰最旧节点时
+    只删除引用它的保存边，不补连。
     """
+
+    if unit.get("suppress_positions") or unit.get("manual"):
+        return [], []
+    mapper = annotated._unit_cm_mapper(unit)
+    if mapper is None:
+        return [], []
+    entries = []
+    prev_row = None
+    for row_index, row in enumerate(unit.get("observations") or []):
+        moment = annotated._finite(row.get("time_s"))
+        if moment is None:
+            break
+        if row.get("position_valid") is False or row.get("jump"):
+            continue
+        coords = [annotated._finite(row.get(key))
+                  for key in ("motion_x0", "motion_y0",
+                              "motion_x1", "motion_y1")]
+        if None in coords:
+            continue
+        start = mapper((coords[0], coords[1]))
+        end = mapper((coords[2], coords[3]))
+        points = [(int(round(start[0])), int(round(start[1]))),
+                  (int(round(end[0])), int(round(end[1])))]
+        entries.append((float(moment), points,
+                        prev_row is not None and row_index == prev_row + 1))
+        prev_row = row_index
+
+    nodes: list[int] = []
+    edges: list[tuple] = []
+    next_node = 0
+    for moment, points, chained in entries:
+        if moment > upto + 1e-9:
+            break
+        if chained and edges:
+            start = edges[-1][2]
+        else:
+            start = next_node
+            next_node += 1
+            nodes.append(start)
+        end = next_node
+        next_node += 1
+        nodes.append(end)
+        edges.append((points, start, end))
+        while len(nodes) > annotated.TRAJECTORY_NODE_LIMIT:
+            evicted = nodes.pop(0)
+            edges = [edge for edge in edges
+                     if evicted not in (edge[1], edge[2])]
+    return nodes, edges
+
+
+def reference_canvases(job, units, events):
+    """参考渲染：几何 → 保留段**逐条** OpenCV 绘制 → 身体点 → 事件 → 文字。"""
 
     import cv2
 
@@ -140,18 +174,17 @@ def legacy_canvases(job, units, events, collect=True):
         if base is None or pair is None:
             continue
         low, high = pair
-        for clip_start, clip_end in _split_linear(low, high, bounds):
+        for clip_start, clip_end in annotated._split(low, high, bounds):
             canvas = base.copy()
             thickness = max(1, int(round(min(canvas.shape[:2]) / 320)))
             lines = [f"t={annotated.clock_text(clip_start)}  frame={frame.index}"]
-            for unit in _active_units_linear(prepared_units, clip_start,
-                                             clip_end):
+            for unit in annotated._active_units(prepared_units, clip_start,
+                                                clip_end):
                 annotated._draw_geometry(canvas, unit["geometry"], thickness)
-                for segment in annotated._trajectory_segments(unit, clip_end):
-                    if len(segment) >= 2:
-                        cv2.polylines(canvas, [np.array(segment, "int32")],
-                                      False, (95, 98, 184), thickness,
-                                      cv2.LINE_AA)
+                _nodes, edges = reference_retained(unit, clip_end)
+                for points, _start, _end in edges:
+                    cv2.polylines(canvas, [np.array(points, "int32")], False,
+                                  (95, 98, 184), thickness, cv2.LINE_AA)
                 row = annotated._row_for_frame(unit, int(frame.index))
                 point = annotated._body_point(row)
                 if point is not None:
@@ -166,8 +199,7 @@ def legacy_canvases(job, units, events, collect=True):
                 lines.append(f"{label} {event.get('kind') or 'event'} "
                              f"{event.get('target') or ''}".strip())
             canvas = annotated._draw_label(canvas, lines)
-            canvas = annotated._even_canvas(canvas)
-            canvases.append(canvas.copy() if collect else None)
+            canvases.append(annotated._even_canvas(canvas).copy())
     return canvases
 
 
@@ -218,25 +250,22 @@ def new_canvases(monkeypatch, job, units, events):
     return captured
 
 
-def _compare(old, new) -> tuple[int, int, int, int]:
-    assert len(old) == len(new), f"画布数量不同：{len(old)} vs {len(new)}"
-    worst = 0
-    diff_pixels = 0
-    painted = 0
-    for before, after in zip(old, new):
-        assert before.shape == after.shape
-        delta = np.abs(before.astype(np.int16) - after.astype(np.int16))
-        worst = max(worst, int(delta.max()))
-        changed = delta.max(axis=2) > 0
-        diff_pixels += int(changed.sum())
-        painted += int((before != after).any(axis=2).sum())
-    return diff_pixels, worst, len(old), painted
-
-
 def _frames(count: int, step: float = 0.2) -> list[dict]:
     return [{"index": index, "time_s": round(index * step, 6),
              "start": round(index * step, 6),
              "end": round(index * step + step, 6)} for index in range(count)]
+
+
+def _compare(old, new) -> tuple[int, int]:
+    assert len(old) == len(new), f"画布数量不同：{len(old)} vs {len(new)}"
+    worst = 0
+    diff_pixels = 0
+    for before, after in zip(old, new):
+        assert before.shape == after.shape
+        delta = np.abs(before.astype(np.int16) - after.astype(np.int16))
+        worst = max(worst, int(delta.max()))
+        diff_pixels += int((delta.max(axis=2) > 0).sum())
+    return diff_pixels, worst
 
 
 def _rows(unit_id, points):
@@ -277,43 +306,10 @@ def _frames_spec():
 
 
 def _report(name, old, new):
-    diff, worst, canvases, _painted = _compare(old, new)
-    print(f"[{name}] 画布 {canvases} 张；差异像素 {diff}；最大差 {worst}")
-    # 差异只来自舍入：既有断言不放宽，这里如实记录实际幅度。
-    assert worst <= 2, f"{name} 出现超过 2 的像素差：{worst}"
+    diff, worst = _compare(old, new)
+    print(f"[{name}] 画布 {len(old)} 张；差异像素 {diff}；最大差 {worst}")
+    assert diff == 0, f"{name} 与逐条 OpenCV 调用存在 {diff} 个差异像素"
     return diff, worst
-
-
-def test_single_segment_diff_confined_to_partial_coverage():
-    """单段：完全覆盖与未画像素逐值相同，差异只在 AA 部分覆盖像素。"""
-
-    import cv2
-
-    base = _frame_image(0)[:40, :60].copy()
-    start, end, thickness = (5, 5), (52, 33), 2
-    direct = base.copy()
-    cv2.polylines(direct, [np.array([start, end], "int32")], False,
-                  (95, 98, 184), thickness, cv2.LINE_AA)
-    mask = np.zeros(base.shape[:2], np.uint8)
-    cv2.polylines(mask, [np.array([start, end], "int32")], False, 255,
-                  thickness, cv2.LINE_AA)
-
-    layer = annotated._TraceLayer(base.shape[:2], (95, 98, 184), thickness)
-    layer.add(start, end)
-    ours = base.copy()
-    layer.compose(ours)
-
-    delta = np.abs(direct.astype(np.int16) - ours.astype(np.int16))
-    changed = delta.max(axis=2) > 0
-    # 实测上界（见报告“未解决差异”）不是等价结论：逐段整数舍入与一次性
-    # 合成舍入不同，差异只允许出现在部分覆盖像素上。
-    assert int(delta.max()) <= 2
-    assert not changed[mask == 255].any(), "完全覆盖的像素必须逐值相同"
-    assert not changed[mask == 0].any(), "未画到的像素必须逐值相同"
-    partial = (mask > 0) & (mask < 255)
-    assert changed[partial].any(), "部分覆盖像素才有舍入差"
-    print(f"[单段] 部分覆盖像素 {int(partial.sum())}，差异 "
-          f"{int(changed[partial].sum())}，最大差 {int(delta.max())}")
 
 
 def test_crossing_and_overlapping_trajectories(monkeypatch):
@@ -329,7 +325,7 @@ def test_crossing_and_overlapping_trajectories(monkeypatch):
     events = [{"time_s": 0.4, "confirmed_s": 0.6, "kind": "zone_entry",
                "target": "open", "unit_id": UNIT_A}]
     job = _job(_Source.frames_spec)
-    _report("交叉/重叠", legacy_canvases(job, units, events),
+    _report("交叉/重叠", reference_canvases(job, units, events),
             new_canvases(monkeypatch, job, units, events))
 
 
@@ -359,7 +355,7 @@ def test_two_units_window_switch_and_geometry_overlap(monkeypatch):
               {"time_s": 0.6, "kind": "rearing", "target": "wall",
                "unit_id": UNIT_B}]
     job = _job(_Source.frames_spec)
-    _report("双动物/窗切换/几何", legacy_canvases(job, units, events),
+    _report("双动物/窗切换/几何", reference_canvases(job, units, events),
             new_canvases(monkeypatch, job, units, events))
 
 
@@ -367,7 +363,7 @@ def test_gaps_jumps_suppressed_and_manual(monkeypatch):
     monkeypatch.setattr(annotated.media, "VideoSource", _Source)
     rows = _with_segments(_rows(UNIT_A, [
         (0, 0.0, 12, 12), (1, 0.2, 30, 18),
-        (2, 0.4, 50, 26),                               # 缺口起点（下一行越界）
+        (2, 0.4, 50, 26),
         (4, 0.8, 70, 40, {"jump": True}),
         (5, 1.0, 20, 60), (6, 1.2, 30, 60, {"state": "freeze"}),
     ]))
@@ -387,7 +383,7 @@ def test_gaps_jumps_suppressed_and_manual(monkeypatch):
          "geometry": {}, "observations": rows},
     ]
     job = _job(_Source.frames_spec)
-    _report("缺口/jump/人工/抑制", legacy_canvases(job, units, []),
+    _report("缺口/jump/人工/抑制", reference_canvases(job, units, []),
             new_canvases(monkeypatch, job, units, []))
 
 
@@ -408,5 +404,34 @@ def test_multiple_events_in_one_exposure(monkeypatch):
          "target": "B", "unit_id": UNIT_A},
     ]
     job = _job(_Source.frames_spec)
-    _report("同曝光多事件", legacy_canvases(job, units, events),
+    _report("同曝光多事件", reference_canvases(job, units, events),
             new_canvases(monkeypatch, job, units, events))
+
+
+def test_merged_call_matches_per_segment_calls():
+    """生产用一次 polylines 传全部保留段：必须与逐条调用逐像素一致。"""
+
+    import cv2
+
+    rng = np.random.RandomState(11)
+    cases = (
+        ("交叉/重叠", [((int(rng.randint(2, 60)), int(rng.randint(2, 44))),
+                      (int(rng.randint(2, 60)), int(rng.randint(2, 44))))
+                     for _ in range(200)]),
+        ("共享端点链", [((5 + i * 2, 10 + (i % 5) * 3),
+                      (7 + i * 2, 10 + ((i + 1) % 5) * 3))
+                     for i in range(120)]),
+        ("同线重复30", [((8, 8), (50, 30))] * 30),
+        ("同线重复300", [((8, 8), (50, 30))] * 300),
+    )
+    for label, segments in cases:
+        base = _frame_image(3)[:48, :64].copy()
+        one_by_one = base.copy()
+        for points in segments:
+            cv2.polylines(one_by_one, [np.array(points, "int32")], False,
+                          (95, 98, 184), 2, cv2.LINE_AA)
+        merged = base.copy()
+        cv2.polylines(merged, [np.array(points, "int32") for points in segments],
+                      False, (95, 98, 184), 2, cv2.LINE_AA)
+        delta = np.abs(one_by_one.astype(np.int16) - merged.astype(np.int16))
+        assert int(delta.max()) == 0, f"{label}: 合并调用与逐条调用不一致"
