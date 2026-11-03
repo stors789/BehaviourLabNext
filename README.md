@@ -41,3 +41,10 @@ python -m venv .venv
 - `tasks/<job>/<run>/worker.log`：单个后台分析进程日志。
 
 构建失败与 Windows 原生验收待办见 [`docs/ACCEPTANCE_STATUS.md`](docs/ACCEPTANCE_STATUS.md)。
+
+## 未来开发计划
+
+- **MCP 接口**：提供 Model Context Protocol 服务端，让 AI Agent 直接对接本应用——
+  查询项目/视频/run 的元数据与结果（summary.csv、events.csv、report.md），
+  发起或查询分析任务、取回标注视频与图形输出；本地数据根仍然只读原则不变，
+  Agent 经同一本地服务（127.0.0.1）访问，不引入云端依赖。
