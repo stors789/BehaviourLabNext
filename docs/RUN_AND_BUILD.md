@@ -42,11 +42,14 @@ py -3.11 -m venv .venv-build
 
 ## 当前构建状态
 
-**最近构建（2026-11-03，74fc94c）：成功。** 上述配方在本机实际执行
-（`.venv-build` 基于 CPython 3.11.13，PyInstaller 6.22.3，exit 0，约 44 s），
+**最近构建（2026-11-03，22da64e = v1.0.0）：成功。** 上述配方在本机实际执行
+（`.venv-build` 基于 CPython 3.11.13，PyInstaller 6.22.3，exit 0，约 41 s），
 产物 `dist/windows/BehaviourLabNext/`（≈288 MB，`BehaviourLabNext.exe` +
 `_internal`）。冒烟：`--browser --data-dir <临时目录>` 启动后
-`/api/health` ok、首页正常渲染；`build/`、`dist/`、`.venv-build/` 不入
+`/api/health` ok（version 1.0.0）、首页正常渲染；产物已发布为
+Release [v1.0.0](https://github.com/stors789/BehaviourLabNext/releases/tag/v1.0.0)
+附件（BehaviourLabNext-1.0.0-windows-x64.zip，≈287 MB）。
+`build/`、`dist/`、`.venv-build/` 不入
 Git。完整 Windows 桌面验收（WebView2 窗口、原生选择器、冻结 worker
 路由）仍未执行，构建与冒烟记录见
 `docs/BUILD_VALIDATION_STATUS.json`（check `exe-build-smoke`）。
