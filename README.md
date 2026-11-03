@@ -10,6 +10,7 @@
 ![python](https://img.shields.io/badge/python-3.11-3776AB)
 ![ui](https://img.shields.io/badge/UI-WebView2-0E7490)
 ![data](https://img.shields.io/badge/data-local%20SQLite-2EA043)
+![license](https://img.shields.io/badge/license-GPL--3.0--or--later-2EA043)
 
 </div>
 
@@ -88,6 +89,11 @@ python -m venv .venv
   查询项目/视频/run 的元数据与结果（summary.csv、events.csv、report.md），
   发起或查询分析任务、取回标注视频与图形输出；本地数据根仍然只读原则不变，
   Agent 经同一本地服务（127.0.0.1）访问，不引入云端依赖。
+
+## 许可证
+
+本项目以 [GPL-3.0-or-later](LICENSE) 发布：你可以自由使用、修改与再分发，
+修改后的版本同样须以 GPL-3.0 开源。
 - **DeepLabCut 集成**：作为可选的深度学习检测后端（保留现有经典视觉管线为默认零依赖路径），
   并支持 DLC 标注数据格式的导入/导出，便于复用已有训练集与在本地继续训练。
 - **多系统适配**：在 Windows 之外支持 macOS（含 Apple Silicon）与 Linux 桌面运行——
