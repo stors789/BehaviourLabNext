@@ -48,7 +48,7 @@ py -3.11 -m venv .venv-build
 `_internal`）。冒烟：`--browser --data-dir <临时目录>` 启动后
 `/api/health` ok（version 1.0.0）、首页正常渲染；产物已发布为
 Release [v1.0.0](https://github.com/stors789/BehaviourLabNext/releases/tag/v1.0.0)
-附件（BehaviourLabNext-1.0.0-windows-x64.zip，≈287 MB）。
+附件（BehaviourLabNext-1.0.0-windows-x64.zip，≈122 MB）。
 `build/`、`dist/`、`.venv-build/` 不入
 Git。完整 Windows 桌面验收（WebView2 窗口、原生选择器、冻结 worker
 路由）仍未执行，构建与冒烟记录见
