@@ -112,7 +112,8 @@ def test_center_rule_warning_and_metadata(monkeypatch):
     assert any("中心点入臂规则" in w and "无时间防抖" in w
                for w in result.warnings)
     # 深度规则不产生该警告。
-    plain = run_y([ARM_A] * 2, values=options(), monkeypatch=monkeypatch)
+    plain = run_y([ARM_A] * 2, values=options(arm_entry_rule="depth"),
+                  monkeypatch=monkeypatch)
     assert all("中心点入臂规则" not in w for w in plain.warnings)
 
 
@@ -360,3 +361,26 @@ def test_new_rule_field_compat_unchanged():
     values["arm_entry_rule"] = None
     issues = ymaze.validate_unit(values, geometry(), complete=True)
     assert [issue["field"] for issue in issues] == ["options.arm_entry_rule"]
+
+
+def test_factory_defaults_center_rule_and_temporal_background():
+    """新配置默认：中心点入臂规则 + 时序背景（仅 Y 迷宫覆盖）。"""
+
+    assert ymaze.DEFAULTS["arm_entry_rule"] == "center"
+    assert ymaze.DETECTION_DEFAULTS == {"bg_method": "temporal"}
+    from behaviourlab import detection
+    from behaviourlab.experiments import catalog
+
+    spec = [item for item in catalog() if item["key"] == "ymaze"][0]
+    assert spec["detection_defaults"]["bg_method"] == "temporal"
+    rule = [p for p in spec["parameters"] if p["key"] == "arm_entry_rule"][0]
+    assert rule["default"] == "center"
+    assert rule["choices"][0]["value"] == "center"
+    # 其他实验的检测默认不受影响。
+    others = {item["key"]: item["detection_defaults"]["bg_method"]
+              for item in catalog() if item["key"] != "ymaze"}
+    assert "temporal" not in others.values(), "时序默认只落在 Y 迷宫"
+    # 兼容语义不变：缺字段仍按原深度规则。
+    legacy = {key: value for key, value in ymaze.DEFAULTS.items()
+              if key != "arm_entry_rule"}
+    assert ymaze.validate_unit(legacy, geometry(), complete=True) == []

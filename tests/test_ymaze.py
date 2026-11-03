@@ -44,7 +44,10 @@ def geometry() -> dict:
 
 
 def options(**overrides) -> dict:
-    return dict(ymaze.DEFAULTS, **overrides)
+    # 本文件固化的是深度规则的文档行为：显式钉住，不随工厂默认漂移。
+    values = dict(ymaze.DEFAULTS, arm_entry_rule="depth")
+    values.update(overrides)
+    return values
 
 
 def unit(values: dict | None = None) -> dict:
@@ -276,7 +279,11 @@ class PreviewSource:
         for index in range(count):
             moment = round(begin + index * step, 6)
             image = np.full((240, 240, 3), 255, dtype=np.uint8)
-            cv2.ellipse(image, (150, 105), (20, 9), 0, 0, 360, (0, 0, 0), -1)
+            # 小鼠在 B 臂内连续扫动（7px 步进循环）：时序中位数背景会吸收
+            # 静止/小幅目标（前景变空），大幅扫动才能让两种背景法都稳定
+            # 检出同一只鼠。
+            x = 138 + (index * 7) % 26
+            cv2.ellipse(image, (x, 105), (20, 9), 0, 0, 360, (0, 0, 0), -1)
             self._frames.append(Frame(
                 image=image, index=index, time_s=moment, dt_s=step,
                 elapsed_s=moment - begin, analysis_fps=1.0 / step,
@@ -284,6 +291,15 @@ class PreviewSource:
 
     def iter_frames(self):
         return iter(self._frames)
+
+    def index_evidence(self):
+        # 时序背景两段式的规划阶段会问一次索引证据；内存替身没有。
+        return None
+
+    def frames_at(self, indices, orientation=None, evidence=None):
+        """按规划选中的索引给像素（测试固定 0° 方向）。"""
+        for index in indices:
+            yield self._frames[index].image
 
 
 def test_y_preview_and_result_page(client, store, tmp_path, monkeypatch):
@@ -298,8 +314,9 @@ def test_y_preview_and_result_page(client, store, tmp_path, monkeypatch):
         "window": {"start_s": 0.0, "end_s": 4.0},
         "orientation": 0, "fps_override": None, "sample_fps": 10,
         "units": [{"id": "e" * 32, "name": "Y 鼠", "window": None,
-                   "geometry": geometry(), "options": {}, "detection": {},
-                   "manual": None}],
+                   "geometry": geometry(), "options": {},
+                   # 该测试测页面流而非背景方法：显式钉回阈值，避免工厂默认漂移。
+                   "detection": {"bg_method": "threshold"}, "manual": None}],
     }])
     monkeypatch.setattr(media, "VideoSource", PreviewSource)
     monkeypatch.setattr(

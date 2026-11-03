@@ -2912,7 +2912,7 @@
 
   function ymazeCenterRule(unit) {
     if (state.assay !== "ymaze") return false;
-    return effectiveOption(unit, "arm_entry_rule", "depth") === "center";
+    return effectiveOption(unit, "arm_entry_rule", "center") === "center";
   }
 
   function parameterField(unit, param) {

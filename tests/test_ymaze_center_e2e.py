@@ -24,14 +24,18 @@ def videos_payload(asset_id: str) -> list[dict]:
         "asset_id": asset_id,
         "window": {"start_s": 0.0, "end_s": 4.0},
         "orientation": 0, "fps_override": None, "sample_fps": 10,
+        # 这组测试验证规则接线与展示，不验证背景方法：显式钉回阈值，
+        # 避开合成场景在时序法下的前景不稳（时序默认由
+        # test_factory_defaults_center_rule_and_temporal_background 断言）。
         "units": [
             {"id": UNIT_A, "name": "中心点鼠", "window": None,
              "geometry": geometry(),
-             "options": {"arm_entry_rule": "center"}, "detection": {},
-             "manual": None},
+             "options": {"arm_entry_rule": "center"},
+             "detection": {"bg_method": "threshold"}, "manual": None},
             {"id": UNIT_B, "name": "原规则鼠", "window": None,
-             "geometry": geometry(), "options": {}, "detection": {},
-             "manual": None},
+             "geometry": geometry(),
+             "options": {"arm_entry_rule": "depth"},
+             "detection": {"bg_method": "threshold"}, "manual": None},
         ],
     }]
 
@@ -70,7 +74,8 @@ def test_rule_persists_through_save_reload(ymaze_env, client):
     reloaded = client.get(f"/api/drafts/{draft['id']}").get_json()["data"]["draft"]
     units = reloaded["videos"][0]["units"]
     assert units[0]["options"]["arm_entry_rule"] == "center"
-    assert "arm_entry_rule" not in units[1]["options"], "原规则鼠未被写入新字段"
+    assert units[1]["options"]["arm_entry_rule"] == "depth", \
+        "原规则鼠显式携带深度规则"
     # 同一视频不同小鼠各自携带规则，冻结解析不串用。
     from behaviourlab.engine import resolve_options
     resolved = [resolve_options("ymaze", draft=reloaded,
@@ -243,7 +248,7 @@ def test_catalog_exposes_rule_choices():
     spec = [item for item in catalog() if item["key"] == "ymaze"][0]
     rule = [p for p in spec["parameters"] if p["key"] == "arm_entry_rule"][0]
     assert rule["type"] == "select"
-    assert [c["value"] for c in rule["choices"]] == ["depth", "center"]
+    assert [c["value"] for c in rule["choices"]] == ["center", "depth"]
     assert "IMPC" in rule["help"] and "无时间防抖" in rule["help"]
 
 

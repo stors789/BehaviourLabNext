@@ -23,7 +23,7 @@ DEFAULTS = {
     "mode": "auto",
     "arm_length_cm": 30.0,
     "arm_width_cm": 10.0,
-    "arm_entry_rule": "depth",
+    "arm_entry_rule": "center",
     "entry_depth_ratio": 0.2,
     "max_jump_cm": 12.0,
     "tracking_hold_s": 0.4,
@@ -52,7 +52,7 @@ AREA_HIGH = 4.0
 EVIDENCE_SAMPLES = 9
 MISSING_GATE = "no_candidate_within_gate"
 
-DETECTION_DEFAULTS: dict = {}
+DETECTION_DEFAULTS: dict = {"bg_method": "temporal"}
 
 SPEC = {
     "key": KEY,
@@ -63,12 +63,12 @@ SPEC = {
                   minimum=0, step="any"),
         parameter("arm_width_cm", "臂宽", "number", 10.0, unit="cm",
                   minimum=0, step="any"),
-        parameter("arm_entry_rule", "入臂规则", "select", "depth",
+        parameter("arm_entry_rule", "入臂规则", "select", "center",
                   choices=[
-                      {"value": "depth",
-                       "label": "进入深度+持续确认（原规则，默认）"},
                       {"value": "center",
-                       "label": "中心点入臂（新区域首个有效观测即计）"},
+                       "label": "中心点入臂（新区域首个有效观测即计，默认）"},
+                      {"value": "depth",
+                       "label": "进入深度+持续确认（原规则）"},
                   ],
                   section="实验参数",
                   help="参考 IMPC“自动追踪以小鼠中心进入新区域判定”的约定；"
