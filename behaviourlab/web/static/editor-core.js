@@ -816,7 +816,10 @@
       .filter((text) => typeof text === "string" && text.trim());
     const lines = [];
     let tone = "ok";
-    if (summary.detection_available === false) {
+    if (summary.detection_skipped_reason === "background_unavailable") {
+      lines.push("检测：未运行（背景构建失败，原因见下方提示）");
+      tone = "error";
+    } else if (summary.detection_available === false) {
       lines.push("检测：未运行（人工记录路径）");
       tone = "muted";
     } else if (!detection) {

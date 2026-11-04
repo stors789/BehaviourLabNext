@@ -64,6 +64,16 @@ class DetectionError(RuntimeError):
     """检测无法进行：区域、背景或参数不满足要求。"""
 
 
+class BackgroundUnavailableError(DetectionError):
+    """背景内容不可用，预览可以降级的一类失败。
+
+    只覆盖"换一份可解码的背景/视频就能继续"的内容性问题：时序背景
+    视频无法解码、静态背景未设置/文件缺失/无法解码/尺寸不符。
+    源身份变化、共享构建等待超时、取消等流程性失败仍用 DetectionError
+    本类抛出，调用方不得据此降级。
+    """
+
+
 def common_detection_defaults() -> dict:
     return deepcopy(DETECTION_DEFAULTS)
 
@@ -544,11 +554,17 @@ def load_static_background(path: str | Path, orientation: int,
 
     file_path = Path(path)
     if not file_path.is_file():
-        raise DetectionError("静态背景不可读取")
+        raise BackgroundUnavailableError("静态背景不可读取")
     data = np.fromfile(str(file_path), dtype=np.uint8)
-    image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    if data.size == 0:
+        # 0 字节文件：cv2.imdecode 对空数组会断言失败（500），先明确拒绝。
+        raise BackgroundUnavailableError("静态背景为空文件")
+    try:
+        image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    except cv2.error as error:
+        raise BackgroundUnavailableError(f"静态背景无法解码：{error}") from error
     if image is None:
-        raise DetectionError("静态背景无法解码")
+        raise BackgroundUnavailableError("静态背景无法解码")
     if orientation == 90:
         image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
     elif orientation == 180:
@@ -556,7 +572,7 @@ def load_static_background(path: str | Path, orientation: int,
     elif orientation == 270:
         image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
     if image.shape[1] != width or image.shape[0] != height:
-        raise DetectionError("静态背景尺寸与源帧不一致")
+        raise BackgroundUnavailableError("静态背景尺寸与源帧不一致")
     return to_gray(image)
 
 
@@ -603,7 +619,7 @@ def prepare_background(settings: Mapping[str, Any], asset: Mapping[str, Any],
     if method == "static":
         path = settings.get("static_background")
         if not path:
-            raise DetectionError("静态背景未设置")
+            raise BackgroundUnavailableError("静态背景未设置")
         return load_static_background(path, orientation, width, height)
     if method == "temporal":
         metadata = asset.get("metadata") or {}
@@ -725,26 +741,60 @@ def _build_temporal_background(asset: Mapping[str, Any],
             source_identity = tuple(expected_identity)
             if source_identity:
                 _require_same_source(media, path, source_identity, "背景构建入口")
+
+        def _decode_io(action, *, when: str):
+            """把源解码失败转为背景内容不可用（预览可降级）。
+
+            只包媒体 IO；身份核对（``_require_same_source``，含文件不可
+            再访问）与取消走各自原有异常，保持失败/取消语义。
+            时钟不可解释（ClockError）与覆盖不足（VideoSourceError）是
+            正确性错误，不是"换份背景就能继续"，原样上抛。
+            访问被拒绝（如 Windows 独占打开）按异常类型/errno 结构化判定，
+            同样原样上抛；源文件不可 stat 也属于访问失败。
+            """
+
+            try:
+                return action()
+            except (media.ClockError, media.VideoSourceError):
+                raise
+            except media.MediaError as error:
+                if media.is_access_denied(error):
+                    # 换一份文件才可能继续：不是内容问题，明确失败。
+                    raise error
+                try:
+                    media.file_identity(path)
+                except OSError:
+                    # 源文件不可访问：重抛原始 MediaError（访问类失败），
+                    # 不是嵌套 try 里的新 OSError。
+                    raise error
+                raise BackgroundUnavailableError(
+                    f"背景视频无法解码（{when}）：{error}") from error
+
         # 规划阶段只读时刻/曝光：解码但不转 BGR、不复制方向像素。
-        source = media.VideoSource(
-            path, start_s=start, end_s=end_value, orientation=orientation,
-            fps_override=video.get("fps_override"),
-            sample_fps=video.get("sample_fps"),
-            source_fps=metadata.get("fps"),
-            decode_images=False, pool=pool,
-        )
-        plan, evidence = temporal_frame_plan(
-            source, start=start, sample_end=sample_end, samples=samples,
-            cancel=cancel,
-        )
+        source = _decode_io(
+            lambda: media.VideoSource(
+                path, start_s=start, end_s=end_value, orientation=orientation,
+                fps_override=video.get("fps_override"),
+                sample_fps=video.get("sample_fps"),
+                source_fps=metadata.get("fps"),
+                decode_images=False, pool=pool,
+            ),
+            when="规划扫描")
+        plan, evidence = _decode_io(
+            lambda: temporal_frame_plan(
+                source, start=start, sample_end=sample_end, samples=samples,
+                cancel=cancel),
+            when="规划扫描")
         if source_identity:
             _require_same_source(media, path, source_identity,
                                  "背景规划与取像素之间")
         if cancel is not None and cancel():
             raise DetectionError("已取消")
         # 只对确定下来的源帧取像素：中间帧不再转 BGR、复制或转灰。
-        pixels = source.frames_at([item[0] for item in plan], orientation,
-                                  evidence)
+        pixels = _decode_io(
+            lambda: source.frames_at([item[0] for item in plan], orientation,
+                                     evidence),
+            when="取像素")
 
         def frames():
             for entry, image in zip(plan, pixels):
@@ -752,8 +802,12 @@ def _build_temporal_background(asset: Mapping[str, Any],
                     raise DetectionError("已取消")
                 yield entry[1], image, entry[2]
 
-        background = temporal_background(frames(), samples, start, sample_end,
-                                         cancel=cancel)
+        # 取像素是生成器：解码失败往往在消费时才抛（FrameReadError），
+        # 所以包装必须覆盖实际迭代，而不只是生成器创建。
+        background = _decode_io(
+            lambda: temporal_background(frames(), samples, start, sample_end,
+                                        cancel=cancel),
+            when="取像素")
         if source_identity:
             _require_same_source(media, path, source_identity, "背景构建期间")
         return background

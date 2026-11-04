@@ -139,6 +139,23 @@ function notes() {
   assert.strictEqual(manual.tone, "muted");
   assert.ok(manual.text.includes("未运行"), manual.text);
 
+  // 自动检测因背景构建失败被跳过：与人工路径区分，错误色调并指到原因。
+  const backgroundFailure = previewNoteFor({
+    summary: {
+      detection_available: false,
+      detection_skipped_reason: "background_unavailable",
+      detection: null,
+    },
+    warnings: ["背景构建失败（无法打开视频），本次预览未叠加自动检测。"],
+  });
+  assert.strictEqual(backgroundFailure.tone, "error");
+  assert.ok(backgroundFailure.text.includes("背景构建失败"),
+            backgroundFailure.text);
+  assert.ok(!backgroundFailure.text.includes("人工记录路径"),
+            "自动路径不得显示人工记录提示");
+  assert.ok(backgroundFailure.text.includes("背景构建失败（无法打开视频）"),
+            "必须显示后端 warnings 里的具体原因");
+
   const found = previewNoteFor({
     summary: {
       detection_available: true,

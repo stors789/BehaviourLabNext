@@ -7,6 +7,7 @@ read_frame_info / read_frame_at_time / VideoSource 要求源时钟可解释。
 from __future__ import annotations
 
 import atexit
+import errno
 import math
 import os
 import threading
@@ -65,6 +66,30 @@ class ClockError(MediaError):
 
 class VideoSourceError(MediaError):
     """视频窗口或覆盖不满足要求。"""
+
+
+ACCESS_DENIED_ERRNOS = (errno.EACCES, errno.EPERM)
+
+
+def is_access_denied(error: BaseException) -> bool:
+    """按异常类型/errno 判定"访问被拒绝"（含 PyAV 的 PermissionError）。
+
+    访问拒绝不是内容/解码问题：换一份文件不会有帮助，调用方必须保留
+    失败语义。沿 ``__cause__``/``__context__`` 链检查，只看类型与 errno，
+    不匹配提示文字。
+    """
+
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, PermissionError):
+            return True
+        errno_value = getattr(current, "errno", None)
+        if isinstance(errno_value, int) and errno_value in ACCESS_DENIED_ERRNOS:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def has_video_extension(name: str) -> bool:

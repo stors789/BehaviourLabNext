@@ -403,6 +403,7 @@ def create_preview(
     region_source = None
     result = None
     background_warning = None
+    detection_skipped = None
     if detect_here:
         try:
             region, region_source = detection.geometry_region(
@@ -411,13 +412,15 @@ def create_preview(
             try:
                 background = _background_for(detection_settings, asset, video,
                                              orientation, width, height)
-            except media.MediaError as error:
-                # 时序/静态背景要真实解码建背景；个别视频解不出来时预览
-                # 降级为不叠加自动检测，而不是挡住整个预览（正式分析
-                # 对同一错误仍硬失败，不会带着坏背景写结果）。
+            except detection.BackgroundUnavailableError as error:
+                # 仅背景内容不可用（时序解码失败；静态背景未设置/缺失/
+                # 无法解码/尺寸不符）才降级：预览不叠加自动检测并明示
+                # 原因。身份变化、共享构建等待超时、取消等流程性失败
+                # 保持原有失败语义，不在此吞掉；正式分析不受影响。
                 background = None
                 background_warning = (
                     f"背景构建失败（{error}），本次预览未叠加自动检测。")
+                detection_skipped = "background_unavailable"
             if (background is not None
                     or detection_settings.get("bg_method") not in
                     ("temporal", "static")):
@@ -450,9 +453,21 @@ def create_preview(
                 )
         except detection.DetectionError as error:
             raise ValidationError(str(error), "detection") from error
+    else:
+        # 纯人工 Y 的行为预览：不运行自动检测，与背景构建失败区分开。
+        detection_skipped = "manual"
 
     behavior = None
     if kind == "behavior" and hasattr(module, "preview_analysis"):
+        if background_warning is not None:
+            # 行为摘要以自动检测观测为统计输入；没有有效背景就无法产出
+            # 可靠统计，明确报错而不是返回全部缺失的伪结果。检测预览
+            # 仍可用（画面与场地照常，见 background_warning）。
+            raise ValidationError(
+                background_warning
+                + "行为预览需要自动检测结果作为统计输入，无法降级为有效"
+                "摘要。请先解决视频读取或背景文件问题（自动检测也可临时"
+                "改用阈值背景），再重试行为预览。", "detection")
         core_unit = {
             "id": unit.get("id"),
             "name": unit.get("name"),
@@ -551,7 +566,8 @@ def create_preview(
         if note:
             warnings.append(note + "。")
     if result is None:
-        warnings.append("人工记录路径不运行自动检测。")
+        if detection_skipped == "manual":
+            warnings.append("人工记录路径不运行自动检测。")
     elif result.missing_reason == "foreground_saturated":
         warnings.append("前景覆盖过高，已拒绝整片掩膜。")
     elif result.missing_reason == "no_candidate":
@@ -603,6 +619,7 @@ def create_preview(
             "drawn_steps": drawn,
             "missing_steps": missing,
             "detection_available": result is not None,
+            "detection_skipped_reason": detection_skipped,
             "behavior": behavior,
             "detection": None if result is None else {
                 "candidates": len(result.candidates),
