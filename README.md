@@ -16,7 +16,7 @@
 
 本地服务与桌面窗口共用同一套服务与前端；正式桌面交付目标为 Windows 64 位 + CPython 3.11 + Microsoft Edge WebView2（系统级前提）。
 
-> 📥 **下载**：最新版本 [v1.0.0 · Windows EXE](https://github.com/stors789/BehaviourLabNext/releases/latest)（解压即用，无需安装 Python）
+> 📥 **下载**：最新版本 [v1.0.1 · Windows EXE](https://github.com/stors789/BehaviourLabNext/releases/latest)（解压即用，无需安装 Python）
 
 ## 界面预览
 
