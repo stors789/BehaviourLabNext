@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "product": "BehaviourLabNext",
-  "source_revision": "fff59585cd061cb0eb7def195858d20c1106e62f",
-  "recorded_at_utc": "2026-11-04T01:17:00Z",
+  "source_revision": "3a29f193838b9e54f3f6fbfa7faebfecb88bd06a",
+  "recorded_at_utc": "2026-11-04T01:31:42Z",
   "target": "Windows",
   "build": {
     "status": "built",
@@ -13,10 +13,10 @@
     "exit_code": 0,
     "artifact_path": "dist/windows/BehaviourLabNext/（整个目录为交付物，BehaviourLabNext.exe + _internal，≈288 MB）",
     "artifact_count": 1,
-    "log_reference": "构建日志在临时目录（已清理）；产物于 2026-11-03 16:34 本地时间首次生成，20:08 在 9668450 重建，21:51 为 v1.0.0 发布在 22da64e 重建，2026-11-04 09:14 在 fff5958 重建（同命令、exit 0）；当前 dist/windows/BehaviourLabNext/ 为 fff5958 产物（预览背景异常分类修复后），发布包 BehaviourLabNext-1.0.0-windows-x64.zip 为真 ZIP ≈122 MB",
+    "log_reference": "构建日志在临时目录（已清理）；产物于 2026-11-03 16:34 本地时间首次生成，20:08 在 9668450 重建，21:51 为 v1.0.0 发布在 22da64e 重建，2026-11-04 09:14 在 fff5958 重建，2026-11-04 09:29 在 3a29f19（= v1.0.1）重建并发布（同命令、exit 0）；当前 dist/windows/BehaviourLabNext/ 为 1.0.1 产物，发布包 BehaviourLabNext-1.0.1-windows-x64.zip 为真 ZIP ≈122 MB",
     "smoke_test": {
       "command": "BehaviourLabNext.exe --browser --data-dir <临时QA目录>",
-      "observed": "server.json 就绪；/api/health ok=true（version 1.0.0、schema 1、job_owner true）；首页 HTTP 200（title「首页 · BehaviourLabNext」）"
+      "observed": "server.json 就绪；/api/health ok=true（version 1.0.1、schema 1、job_owner true）；首页 HTTP 200（title「首页 · BehaviourLabNext」）"
     }
   },
   "checks": [
@@ -151,7 +151,7 @@
       "expected": "完整桌面验收逐项通过",
       "observed": "完整桌面验收未执行。已完成的仅是构建与 --browser 冒烟（见 exe-build-smoke check）：产物就绪、HTTP 面健康，不代表窗口/选择器/worker 路由已验证",
       "evidence_reference": "docs/BUILD_VALIDATION_STATUS.json build.smoke_test",
-      "source_revision": "fff59585cd061cb0eb7def195858d20c1106e62f",
+      "source_revision": "3a29f193838b9e54f3f6fbfa7faebfecb88bd06a",
       "limitations": ["构建环境已具备（2026-11-03 实际构建成功），剩余为窗口与交互层验收"]
     },
     {
@@ -165,9 +165,9 @@
       },
       "command_or_action": "PyInstaller 构建（exit 0，约 44 s）→ BehaviourLabNext.exe --browser --data-dir <临时QA目录> → 轮询 server.json → GET /api/health 与 /",
       "expected": "构建成功且产物目录完整（exe + _internal）；服务就绪、health ok、首页正常渲染",
-      "observed": "产物 dist/windows/BehaviourLabNext/ ≈288 MB；server.json 就绪；/api/health ok=true（version 1.0.0、schema 1、job_owner true）；首页 HTTP 200（title「首页 · BehaviourLabNext」）。2026-11-03 21:51 在 22da64e 为 v1.0.0 重建并复测通过（该版即 Release v1.0.0 附件）；2026-11-04 09:14 在 fff5958 重建后复测同样通过（含预览背景异常分类修复，未更新 Release）",
+      "observed": "产物 dist/windows/BehaviourLabNext/ ≈288 MB；server.json 就绪；/api/health ok=true（version 1.0.1、schema 1、job_owner true）；首页 HTTP 200（title「首页 · BehaviourLabNext」）。2026-11-03 21:51 在 22da64e 为 v1.0.0 重建并复测通过（该版即 Release v1.0.0 附件）；2026-11-04 09:14 在 fff5958 重建后复测同样通过，09:29 在 3a29f19（v1.0.1）重建、冒烟通过并作为 Release v1.0.1 附件发布",
       "evidence_reference": "docs/RUN_AND_BUILD.md 当前构建状态",
-      "source_revision": "fff59585cd061cb0eb7def195858d20c1106e62f",
+      "source_revision": "3a29f193838b9e54f3f6fbfa7faebfecb88bd06a",
       "limitations": ["仅覆盖 --browser 无窗口路径与 HTTP 面；WebView2 桌面窗口、原生选择器、冻结 worker 路由等完整 Windows 验收仍未执行"]
     },
     {
