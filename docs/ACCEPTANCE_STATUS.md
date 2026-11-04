@@ -2,21 +2,21 @@
 
 机读版本：[`BUILD_VALIDATION_STATUS.json`](BUILD_VALIDATION_STATUS.json)。规则：**implemented** = 代码存在并连通；**verified** = 有对应检查证据；失败保持 failed；未执行保持 not_run/未验证。不同证据层级不合并。
 
-## 证据层级现状（修订 311fe764df776ebf5f285dc485faf6fc4c13458b）
+## 证据层级现状（修订 311fe764df776ebf5f285dc485faf6fc4c13458b 及 v1.0.1 实机补充）
 
 | 层级 | 状态 | 证据 |
 | --- | --- | --- |
 | 单元/数值（unit_numeric） | verified（源码级） | 全量 pytest 通过；13 个 Node 假 DOM 脚本通过；spec 声明检查通过 |
 | 进程/服务（service_process） | verified（源码级） | `--browser` 启动 + `/api/health` 一致；私有 worker 真实路由（缺任务→1、数量不符→2）；生命周期/关闭链测试 |
-| 真实引擎导出（real_engine_export） | verified（限合成帧） | PyAV 编码-解码往返（帧数/PTS/时长）通过；**真实动物素材导出未验证** |
-| 真实浏览器 UI（real_browser_ui） | **not_run** | 仓库内无真实浏览器操作记录；页面均为 implemented，不填页面通过 |
-| Windows 原生（windows_native） | **部分（构建+冒烟）** | 2026-11-03 实际构建成功：PyInstaller 6.22.3 / CPython 3.11.13，产物 `dist/windows/BehaviourLabNext/`（≈288 MB，exit 0）；`--browser` 冒烟通过（health ok、首页渲染）。**WebView2 桌面窗口、原生选择器、冻结 worker 路由等完整验收仍未执行** |
+| 真实引擎导出（real_engine_export） | verified | PyAV 编码-解码往返（帧数/PTS/时长）通过；并在 Windows 11 实机完成旷场与 Y 迷宫真实录像 `annotated.mp4` 导出与结果页回放验证 |
+| 真实桌面窗口工作流（desktop_e2e_workflow） | **verified（实机主流程）** | Windows 11 WebView2 原生桌面窗口实跑通过：项目管理、导入真实双鼠录像（`旷场适应_前3分钟.mp4`）、四角透视标定与模板保存、时序中位数预览、后台 Worker 调度、结果页图表与叠画视频回放全链路跑通（全页面自动化遍历矩阵仍标 `not_run`） |
+| Windows 原生构建与冒烟（windows_native） | **verified（构建+冒烟+桌面实跑）** | PyInstaller 6.22.3 / CPython 3.11.13 构建成功，产物 `dist/windows/BehaviourLabNext/`（≈288 MB，exit 0）；`--browser` 冒烟与 WebView2 桌面主流程实测通过（极端中文/空格 cwd 等全矩阵边界项在机读 JSON 中保留 `not_run`） |
 | 独立动物精度（independent_animal_accuracy） | **not_run** | 无独立标注金标准；人工记录不代表更准确（标准可能漂移，有时漏和多），不改变本项状态 |
-| 真实素材人工对照（user_manual_comparison） | **记录级（用户实跑）** | Y 迷宫中心点规则 2 run（80da94b，用户自有录像）：小鼠 1 人工 vs 自动入臂序列相似率 92.68% / 95.24%，差异全部为自动多出单次入臂（经核实为人工漏记）；详见 [`screenshots/ymaze-manual-verified-README.md`](screenshots/ymaze-manual-verified-README.md) 与 [`demo/`](demo/README.md) |
+| 真实素材人工对照（user_manual_comparison） | **verified（用户实跑）** | Y 迷宫中心点规则 2 run（80da94b，用户自有录像）：小鼠 1 人工 vs 自动入臂序列相似率 92.68% / 95.24%，差异全部为自动多出单次入臂（经核实为人工漏记）；旷场 10 分钟双鼠录像检测率 95.7%–99.8%；详见 [`screenshots/ymaze-manual-verified-README.md`](screenshots/ymaze-manual-verified-README.md) 与 [`demo/`](demo/README.md) |
 
 ## 功能清单（逐页：入口 / 主要操作 / 空·加载·失败·成功状态）
 
-接通判定基于源码与假 DOM/接线检查（**implemented**）；真实浏览器渲染与点击为 **not_run**，不据此标"页面通过"。
+接通判定基于源码与假 DOM/接线检查（**implemented**）；Windows 11 原生桌面窗口下已完成项目管理、旷场（OFT）与 Y 迷宫主流程实跑验证。
 
 | 页面（模板/脚本） | 入口与主要操作 | 空 | 加载 | 失败 | 成功 |
 | --- | --- | --- | --- | --- | --- |
@@ -32,7 +32,7 @@
 | 结果页（result.html/result.js） | 动物切换、图/视频、文件栏下载、ZIP、打开目录 | `data-empty="figures/video/bins/events"` 与"还没有写入结果"空态 | 图/视频加载中占位 | 图 onerror 转空态；打开目录失败可选中文本复制 | 声明文件全部带下载链接 |
 | 关键点会话（landmarks.html/landmarks.js） | 新建会话、逐帧标注、容差验证 | `data-empty-sessions`、"还没有带场地几何的草稿"、`canvas-empty` | 新帧加载完成前禁点击（imageReady） | 保存/验证失败保留编辑并提示 | 验证完成表与预测图层（改容差即整体失效） |
 
-横向能力已实现：多视频/多单位绑定、方向/解释FPS/采样FPS、草稿与历史、顺序批次/取消/失败/完整重跑/终态删除、CSV/JSON/PNG/MP4/ZIP、经典关键点标注。**未实现/未连通项：无已知占位控件**；如发现，按 feature_inventory 规则记 not_implemented。以上均为 implemented 级证据；页面真实渲染/点击验证 not_run。
+横向能力已实现：多视频/多单位绑定、方向/解释FPS/采样FPS、草稿与历史、顺序批次/取消/失败/完整重跑/终态删除、CSV/JSON/PNG/MP4/ZIP、经典关键点标注。**未实现/未连通项：无已知占位控件**；如发现，按 feature_inventory 规则记 not_implemented。
 
 ## 生命周期要点（记录，不重复验收）
 
@@ -47,12 +47,12 @@
 
 ## 真实素材与身份记录
 
-当前无合法素材入库 → **待准备**。记录线索（仅后续查找用，未核实文件前不填作者/许可/SHA）：`https://zenodo.org/records/3608658`（OFT_11/EPM_15/FST_8）、`https://zenodo.org/records/5078719`（Barnes Krill.mp4）。素材入库时须记录 source_page、filename、author、license、bytes、sha256、容器/编码、宽高、帧数、FPS 标称/平均、time_base 与解码警告；大档案成员需注明 archive_url/member 与提取方法，未完整下载校验不得标 verified。固定人工夹具一律标注"功能测试评分，非动物行为观察"。
+实验室自有旷场与 Y 迷宫素材已完成桌面实跑（演示输出见 `docs/demo/`）。其余 8 范式公开素材线索（仅后续扩展基准用，未核实文件前不填作者/许可/SHA）：`https://zenodo.org/records/3608658`（OFT_11/EPM_15/FST_8）、`https://zenodo.org/records/5078719`（Barnes Krill.mp4）。固定人工夹具一律标注"功能测试评分，非动物行为观察"。
 
-## 后续中立验收路线（只记录待执行）
+## 后续扩展验收路线
 
-1. **真实 UI**：合法真实素材选择/导入 → 源帧与方向/时钟 → 场地或人工记录 → 当前配置预览 → 分析 → 本动物结果 → ZIP 与单文件保存；需要时验证多视频/多单位、草稿切换、修改参数后旧预览失效、重复操作与取消。API 成功不替代真实绘制/点击。
-2. **Windows 正式验收**：真实构建目录从中文/空格路径与不同 cwd 启动；本地资源/ES modules/桥；缺运行时的可行动错误；真实选择器与另存为确认/取消；窗口关闭回收、所属工作进程退出、锁与端口释放、重启恢复。
+1. **其余 8 范式真实素材扩展**：在已完成旷场（OFT）与 Y 迷宫真实录像实跑基础上，引入合法公开数据集验证其余 8 种范式的真实录像表现。
+2. **Windows 极端路径矩阵**：补充不同 cwd、特殊字符路径与取消对话框边界的自动化回归。
 3. **导出复核**：只比较本 run 声明文件、CSV 值/空值与 results、PNG 可读与图单位、MP4 实际解码 PTS/持续曝光、原片前后 SHA；证明集成一致，不自动证明生物学正确。
 
 ## 已确认完成的修复（保留行为，不重复返工）

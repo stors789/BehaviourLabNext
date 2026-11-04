@@ -16,7 +16,43 @@
 
 本地服务与桌面窗口共用同一套服务与前端；正式桌面交付目标为 Windows 64 位 + CPython 3.11 + Microsoft Edge WebView2（系统级前提）。
 
-> 📥 **下载**：最新版本 [v1.0.1 · Windows EXE](https://github.com/stors789/BehaviourLabNext/releases/latest)（解压即用，无需安装 Python）
+> 📥 **免安装下载**：最新版本 [v1.0.1 · Windows EXE](https://github.com/stors789/BehaviourLabNext/releases/latest)（解压即用，无需安装 Python）
+
+---
+
+## 🎯 评审专家快速启动与本地测试指南
+
+本代码包根目录已随附一段真实实验室双鼠旷场录像 **`旷场适应_前3分钟.mp4`**（3 分钟，左右双实验箱各 1 只 C57 小鼠），供评审专家开箱验证主流程：
+
+### 方式一：免安装 EXE 直接运行（Windows 10/11 推荐）
+1. 从 [GitHub Release v1.0.1](https://github.com/stors789/BehaviourLabNext/releases/tag/v1.0.1) 下载 `BehaviourLabNext-1.0.1-windows-x64.zip` 并解压。
+2. 双击运行目录内的 `BehaviourLabNext.exe` 即可打开原生桌面窗口。
+
+### 方式二：从本源码包启动（Python 3.11）
+1. **安装依赖**（需 Python 3.11）：
+   ```bash
+   python -m venv .venv
+   # Windows:
+   .venv\Scripts\python -m pip install -r requirements-dev.txt
+   # macOS / Linux (使用 --browser 浏览器模式):
+   .venv/bin/python -m pip install -r requirements-dev.txt
+   ```
+2. **启动应用**：
+   ```bash
+   # Windows 原生桌面窗口模式（需系统自带 Edge WebView2）：
+   .venv\Scripts\python launch.py
+
+   # 浏览器服务模式（Windows / macOS / Linux 通用，终端将打印 http://127.0.0.1:<端口>）：
+   .venv\Scripts\python launch.py --browser
+   ```
+3. **1 分钟跑通随附测试视频（`旷场适应_前3分钟.mp4`）**：
+   - 打开界面后点击 **「独立分析」** → 选择 **「旷场实验 (OFT)」**；
+   - 导入本代码包根目录下的 **`旷场适应_前3分钟.mp4`** → 点击 **「设置视频」 → 「确认进入场地」**；
+   - 在画布上顺时针点击左侧（或右侧）实验箱的 **4 个内角**完成 `50×50 cm` 透视标定（可点击「添加小鼠」标定第 2 只小鼠）；
+   - 点击 **「下一步：检测」**（默认已启用**时序中位数背景**）→ 点击 **「检测预览」** 查看实时前景分割与质心 → 点击 **「检查并开始分析」**；
+   - 分析完成后进入 **「查看结果」**，即可查看轨迹图、空间停留热图、内嵌叠画标注视频（`annotated.mp4`）、分箱统计表，并支持一键导出 ZIP。
+
+---
 
 ## 界面预览
 
@@ -93,7 +129,7 @@ python -m venv .venv
 
 ## 状态与验收
 
-- **构建**：已实际完成一次 Windows EXE 构建（PyInstaller 6.22.3 / CPython 3.11.13，产物 `dist/windows/BehaviourLabNext/`，`--browser` 冒烟通过）；WebView2 桌面窗口等完整原生验收仍在进行。方法与边界见 [`docs/RUN_AND_BUILD.md`](docs/RUN_AND_BUILD.md)，逐项证据见 [`docs/BUILD_VALIDATION_STATUS.json`](docs/BUILD_VALIDATION_STATUS.json) 与 [`docs/ACCEPTANCE_STATUS.md`](docs/ACCEPTANCE_STATUS.md)。
+- **构建与桌面实跑**：已完成 Windows x64 单目录 EXE 构建（PyInstaller 6.22.3 / CPython 3.11.13，产物 `dist/windows/BehaviourLabNext/`），在 Windows 11 实机通过 `--browser` 冒烟核验，并已在 WebView2 原生桌面窗口下完成真实双鼠旷场录像（`旷场适应_前3分钟.mp4` 及 10 分钟完整录像）与 Y 迷宫录像的全链路分析、结果图表与叠画标注视频回放验证。方法与边界见 [`docs/RUN_AND_BUILD.md`](docs/RUN_AND_BUILD.md)，分层记录见 [`docs/BUILD_VALIDATION_STATUS.json`](docs/BUILD_VALIDATION_STATUS.json) 与 [`docs/ACCEPTANCE_STATUS.md`](docs/ACCEPTANCE_STATUS.md)。
 - **独立动物精度**：无独立标注金标准；人工记录不代表更准确（标准可能漂移，有时漏和多），详见验收文档。
 
 ## 故障定位

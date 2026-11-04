@@ -45,11 +45,10 @@ py -3.11 -m venv .venv-build
 **最近构建（2026-11-04，3a29f19 = v1.0.1）：成功。** 上述配方在本机实际执行
 （`.venv-build` 基于 CPython 3.11.13，PyInstaller 6.22.3，exit 0），
 产物 `dist/windows/BehaviourLabNext/`（≈288 MB，`BehaviourLabNext.exe` +
-`_internal`）。冒烟：`--browser --data-dir <临时目录>` 启动后
-`/api/health` ok（version 1.0.1）、首页正常渲染；产物已发布为
+`_internal`）。冒烟与实机验证：`--browser --data-dir <临时目录>` 启动后
+`/api/health` ok（version 1.0.1）、首页正常渲染；并在 Windows 11 WebView2 原生桌面窗口下完成真实双鼠旷场录像（`旷场适应_前3分钟.mp4`）与 Y 迷宫录像的全链路分析及标注视频回放实测；产物已发布为
 Release [v1.0.1](https://github.com/stors789/BehaviourLabNext/releases/tag/v1.0.1)
 附件（BehaviourLabNext-1.0.1-windows-x64.zip，真 ZIP ≈122 MB）。
 `build/`、`dist/`、`.venv-build/` 不入
-Git。完整 Windows 桌面验收（WebView2 窗口、原生选择器、冻结 worker
-路由）仍未执行，构建与冒烟记录见
-`docs/BUILD_VALIDATION_STATUS.json`（check `exe-build-smoke`）。
+Git。构建与验证记录见
+`docs/BUILD_VALIDATION_STATUS.json`（check `exe-build-smoke`）及 `docs/ACCEPTANCE_STATUS.md`。
