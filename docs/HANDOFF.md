@@ -1,5 +1,7 @@
 # 交接摘要（第 7 组 1–26 块）
 
+> **历史快照**：本文记录第 7 组 1–26 块交接时的状态，以下“未构建 Windows EXE”等描述仅对应当时阶段，保留作为历史记录，不代表当前构建状态。截至 2026-11-04，v1.0.1 已完成 Windows EXE 构建与 `--browser` 冒烟；完整 Windows 桌面验收仍未执行。当前构建记录见 [`RUN_AND_BUILD.md`](RUN_AND_BUILD.md)“当前构建状态”，逐项验收状态见 [`BUILD_VALIDATION_STATUS.json`](BUILD_VALIDATION_STATUS.json)。
+
 本批交付：源码 + 构建配方 + 交接资料。**未构建 Windows EXE，可交付 EXE 数量为 0。**
 
 ## 运行 / 构建 / 故障入口

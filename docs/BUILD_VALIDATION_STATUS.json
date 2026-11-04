@@ -202,9 +202,9 @@
   ],
   "known_issues": [
     {
-      "issue": "未构建 Windows EXE",
-      "impact": "无原生交付物；桌面路径只能以源码+WebView2 运行",
-      "minimal_next_step": "在满足 Windows x64 + CPython 3.11 的环境按 docs/RUN_AND_BUILD.md 顺序执行构建并记录 build 字段"
+      "issue": "完整 Windows 桌面验收未执行",
+      "impact": "Windows EXE 已构建并通过 --browser 冒烟；WebView2 桌面窗口、原生选择器、冻结 worker 路由等仍未验证",
+      "minimal_next_step": "按 checks 中 windows-native 的 command_or_action 逐项执行并记录结果；构建与 --browser 冒烟不替代完整桌面验收"
     },
     {
       "issue": "真实浏览器 UI 验收未执行",
