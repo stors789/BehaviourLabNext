@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 APP_NAME = "BehaviourLabNext"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 SCHEMA_VERSION = 1
 ALGORITHM_VERSION = "0.1.0"
 
